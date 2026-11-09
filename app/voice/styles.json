@@ -1,0 +1,66 @@
+{
+  "talking": {
+    "title": "Talking", "suffix": "", "pitch": 0, "range": 3, "contour": "declining", "note": 0.15, "tempo": 1.0, "jitter": 0.4, "final": 1.6, "legato": 0.02,
+    "instructions": "Plain, friendly conversational speech. Normal sentences, natural pauses."
+  },
+  "singing": {
+    "title": "Singing", "suffix": "", "pitch": 2, "contour": "melody", "melody": [0, 2, 4, 7, 4, 2, 0, -3, 0, 4, 7, 9, 7, 4, 2, 0], "note": 0.3, "tempo": 1.0, "jitter": 0.05, "final": 3.0, "legato": 0.04, "pauses": 1.5,
+    "instructions": "Answer as a short song: 2–4 lyrical lines with a repeating rhythm, simple words, maybe a small rhyme. Lines end with commas or periods."
+  },
+  "rapping": {
+    "title": "Rapping", "suffix": "", "pitch": -1, "range": 1, "contour": "flat", "note": 0.11, "tempo": 1.15, "jitter": 0.6, "final": 1.3, "legato": 0.0, "accent": 4, "accentPitch": 2, "pauses": 0.6,
+    "instructions": "Answer as a quick rap verse: 2–4 punchy rhyming lines, strong rhythm, short words, confident attitude."
+  },
+  "whispering": {
+    "title": "Whispering", "suffix": "囁", "pitch": -2, "range": 1.5, "contour": "declining", "note": 0.17, "tempo": 0.9, "jitter": 0.2, "final": 1.8, "gain": 0.8,
+    "instructions": "Whisper: secretive, intimate, short sentences, a little mysterious."
+  },
+  "angry": {
+    "title": "Angry", "suffix": "力", "pitch": 2, "range": 5, "contour": "arch", "note": 0.12, "tempo": 1.2, "jitter": 0.8, "final": 1.4, "accent": 3, "accentPitch": 2,
+    "instructions": "Annoyed and fiery: short, sharp sentences, exclamations, but never insulting the user."
+  },
+  "shouting": {
+    "title": "Shouting", "suffix": "↑", "pitch": 4, "range": 4, "contour": "arch", "note": 0.14, "tempo": 1.1, "jitter": 0.6, "final": 2.0,
+    "instructions": "Shout it out loud: very short exclamations, maximum energy, end lines with '!'."
+  },
+  "happy": {
+    "title": "Happy", "suffix": "", "pitch": 3, "range": 5, "contour": "arch", "note": 0.13, "tempo": 1.1, "jitter": 0.6, "final": 1.7,
+    "instructions": "Cheerful and warm: positive wording, a bit playful, light exclamations."
+  },
+  "enthusiastic": {
+    "title": "Enthusiastic", "suffix": "", "pitch": 4, "range": 7, "contour": "rising", "note": 0.12, "tempo": 1.2, "jitter": 0.8, "final": 1.5, "accent": 5, "accentPitch": 2,
+    "instructions": "Hyped and excited: energetic, celebratory, '!' at line ends, encouraging the user."
+  },
+  "sad": {
+    "title": "Sad", "suffix": "弱", "pitch": -3, "range": 2, "contour": "declining", "note": 0.2, "tempo": 0.8, "jitter": 0.2, "final": 2.2, "pauses": 1.5, "gain": 0.85,
+    "instructions": "Quiet and melancholic: slow, gentle sentences, soft words, a sigh-like ending."
+  },
+  "soft": {
+    "title": "Soft / shy", "suffix": "弱", "pitch": 1, "range": 2, "contour": "rising", "note": 0.16, "tempo": 0.95, "jitter": 0.3, "final": 1.8, "gain": 0.85,
+    "instructions": "Shy and gentle: hesitant, polite, small phrases, a little cute."
+  },
+  "calm": {
+    "title": "Calm", "suffix": "滑", "pitch": -1, "range": 2, "contour": "declining", "note": 0.18, "tempo": 0.9, "jitter": 0.2, "final": 2.0, "legato": 0.04, "pauses": 1.3,
+    "instructions": "Calm and soothing: smooth, steady sentences, reassuring tone, no exclamations."
+  },
+  "grumpy": {
+    "title": "Grumpy (vocal fry)", "suffix": "'", "pitch": -3, "range": 2, "contour": "declining", "note": 0.15, "tempo": 0.95, "jitter": 0.4, "final": 1.8,
+    "instructions": "Grumpy and sarcastic but helpful: dry humour, short lines, low energy."
+  },
+  "sleepy": {
+    "title": "Sleepy", "suffix": "弱", "pitch": -4, "range": 1.5, "contour": "declining", "note": 0.24, "tempo": 0.75, "jitter": 0.2, "final": 2.5, "pauses": 1.8, "gain": 0.8,
+    "instructions": "Sleepy and drowsy: slow, yawning phrases, short sentences trailing off."
+  },
+  "dramatic": {
+    "title": "Dramatic", "suffix": "力", "pitch": 0, "range": 8, "contour": "arch", "note": 0.2, "tempo": 0.85, "jitter": 0.5, "final": 2.6, "pauses": 1.6,
+    "instructions": "Theatrical narrator: grand, dramatic phrasing, pauses for effect, one strong final line."
+  },
+  "robotic": {
+    "title": "Robotic", "suffix": "", "pitch": 0, "range": 0, "contour": "flat", "note": 0.14, "tempo": 1.0, "jitter": 0.0, "final": 1.0, "legato": 0.0,
+    "instructions": "Robot voice: precise, monotone, very literal statements, no emotion words."
+  },
+  "cute": {
+    "title": "Cute", "suffix": "", "pitch": 5, "range": 4, "contour": "rising", "note": 0.13, "tempo": 1.05, "jitter": 0.5, "final": 1.8,
+    "instructions": "Cute idol style: bubbly, sweet, playful phrases, a cheerful sign-off."
+  }
+}

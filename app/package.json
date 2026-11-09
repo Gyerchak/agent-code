@@ -1,0 +1,42 @@
+{
+  "name": "open-claude-code",
+  "version": "4.9.1",
+  "description": "Open Claude Code (occ): Claude Code with an opencode-style terminal UI",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "opencode",
+    "tui",
+    "terminal",
+    "agent"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@opentui/core": "0.6.1",
+    "@opentui/solid": "0.6.1",
+    "diff": "^9.0.0",
+    "solid-js": "^1.9.12",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2"
+  },
+  "bin": {
+    "occ": "bin/occ"
+  },
+  "license": "MIT",
+  "author": "Gyerchak",
+  "engines": {
+    "node": ">=26"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gyerchak/occ.git"
+  }
+}

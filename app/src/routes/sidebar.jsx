@@ -1,0 +1,425 @@
+import { TextAttributes } from "@opentui/core"
+import os from "node:os"
+import { useTerminalDimensions } from "@opentui/solid"
+import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
+import { catalog } from "../context/catalog"
+import { providerKind } from "../context/providers"
+import { limits,                                     } from "../context/session"
+import { store } from "../context/tabs"
+import { theme, syntax } from "../context/theme"
+import { runCommand } from "../context/keymap"
+import { clock } from "../context/app"
+import { dialog } from "../ui/dialog"
+import { Spinner } from "../component/spinner"
+import { UsageBar } from "../component/prompt"
+import { openChild, TASK_KINDS, taskEntries } from "./session"
+import { Slot } from "../plugin/slots"
+import { pluginStatus } from "../plugin/runtime"
+
+export const SIDEBAR_WIDTH = 42
+
+export const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+
+export function Section(props                                                                                      ) {
+  const [open, setOpen] = createSignal(true)
+  return (
+    <box>
+      <box flexDirection="row" gap={1} onMouseUp={() => props.collapsible && setOpen((value) => !value)}>
+        <Show when={props.collapsible}>
+          <text fg={theme.text}>{open() ? "▼" : "▶"}</text>
+        </Show>
+        <text fg={theme.text} flexGrow={1}>
+          <b>{props.title}</b>
+        </text>
+        {props.right}
+      </box>
+      <Show when={open()}>{props.children}</Show>
+    </box>
+  )
+}
+
+export function resetsIn(at         ) {
+  if (!at) return ""
+  const ms = at - clock()
+  if (ms <= 0) return "resets now"
+  const minutes = Math.round(ms / 60000)
+  if (minutes < 60) return `resets in ${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `resets in ${hours}h ${minutes % 60}m`
+  return `resets ${new Date(at).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+}
+
+// ---------------------------------------------------------------------------
+// Built-in sections (registered as built-in plugins in src/feature-plugins)
+// ---------------------------------------------------------------------------
+
+export function ContextSection() {
+  return (
+    <Show when={store.context || store.cost > 0}>
+      <box>
+        <text fg={theme.text}>
+          <b>Context</b>
+        </text>
+        <Show when={store.context}>
+          {(context                                                        ) => (
+            <>
+              <text fg={theme.textMuted}>{context().tokens.toLocaleString()} tokens</text>
+              <Show when={context().percent}>
+                <text fg={theme.textMuted}>{context().percent}% used</text>
+              </Show>
+            </>
+          )}
+        </Show>
+        <Show when={store.cost > 0}>
+          <text fg={theme.textMuted}>{money.format(store.cost)} spent</text>
+        </Show>
+      </box>
+    </Show>
+  )
+}
+
+function Meter(props                                             ) {
+  return (
+    <Show when={props.window}>
+      {(w                       ) => (
+        <box>
+          <UsageBar label={props.label} window={w()} width={18} reset={false} />
+          <Show when={!w().resetsAt || w().resetsAt  > clock()}>
+            <text fg={theme.textMuted}>{resetsIn(w().resetsAt)}</text>
+          </Show>
+        </box>
+      )}
+    </Show>
+  )
+}
+
+const extraMoney = (minor        , exponent        , currency        ) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency }).format(minor / 10 ** exponent)
+
+/** The meters of whoever pays for this tab's model: the Claude plan, the OpenCode Go plan, or nobody. */
+export function UsageSection() {
+  const kind = createMemo(() => providerKind(store.model))
+  return (
+    <Switch>
+      <Match when={kind() === "anthropic" && limits.available && (limits.fiveHour || limits.week)}>
+        <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? `${catalog.plan} plan` : ""}</text>}>
+          <Meter label="5-hour " window={limits.fiveHour} />
+          <Meter label="Weekly " window={limits.week} />
+          <Show when={limits.extra}>
+            {(extra                                        ) => (
+              <text fg={theme.textMuted} onMouseUp={() => runCommand("usage.extra")}>
+                Extra usage{" "}
+                <span style={{ fg: extra().enabled ? theme.warning : theme.textMuted }}>{extra().enabled ? "on" : "off"}</span>
+                <Show when={extra().used > 0 || extra().enabled}>
+                  {" · "}
+                  {extraMoney(extra().used, extra().exponent, extra().currency)}
+                  {extra().limit ? ` of ${extraMoney(extra().limit , extra().exponent, extra().currency)}` : ""} spent
+                </Show>
+              </text>
+            )}
+          </Show>
+        </Section>
+      </Match>
+      <Match when={kind() === "go" && catalog.go}>
+        <Section title="OpenCode Go">
+          <Meter label="Rolling " window={catalog.go?.rolling} />
+          <Meter label="Weekly  " window={catalog.go?.weekly} />
+          <Meter label="Monthly " window={catalog.go?.monthly} />
+        </Section>
+      </Match>
+      <Match when={kind() === "local"}>
+        <Section title="Usage">
+          <text fg={theme.textMuted}>Local model · free, no limits</text>
+        </Section>
+      </Match>
+    </Switch>
+  )
+}
+
+export function McpSection() {
+  const mcp = createMemo(() => store.mcp.filter((server) => server.status !== "disabled"))
+  return (
+    <Show when={mcp().length}>
+      <Section title="MCP" collapsible={mcp().length > 2}>
+        <For each={mcp()}>
+          {(server) => (
+            <box flexDirection="row" gap={1}>
+              <text
+                flexShrink={0}
+                fg={
+                  server.status === "connected"
+                    ? theme.success
+                    : server.status === "failed"
+                      ? theme.error
+                      : server.status === "needs-auth"
+                        ? theme.warning
+                        : theme.textMuted
+                }
+              >
+                •
+              </text>
+              <text fg={theme.text} wrapMode="word">
+                {server.name}{" "}
+                <span style={{ fg: theme.textMuted }}>
+                  {server.status === "connected"
+                    ? "Connected"
+                    : server.status === "failed"
+                      ? (server.error ?? "Failed")
+                      : server.status === "needs-auth"
+                        ? "Needs auth"
+                        : "Connecting…"}
+                </span>
+              </text>
+            </box>
+          )}
+        </For>
+      </Section>
+    </Show>
+  )
+}
+
+export function TasksSection() {
+  const entries = createMemo(() => taskEntries())
+  const groups = createMemo(() =>
+    TASK_KINDS.map((kind) => ({ ...kind, items: entries().filter((entry) => entry.kind === kind.id) })).filter((group) => group.items.length),
+  )
+  return (
+    <Show when={entries().length}>
+      <Section
+        title="Tasks"
+        collapsible={entries().length > 2}
+        right={<text fg={theme.textMuted}>{entries().filter((entry) => entry.running).length || ""}</text>}
+      >
+        <For each={groups()}>
+          {(group) => (
+            <>
+              <Show when={groups().length > 1}>
+                <text fg={theme.textMuted}>{group.title}</text>
+              </Show>
+              <For each={group.items}>
+                {(entry) => (
+                  <box flexDirection="row" gap={1} onMouseUp={() => (entry.part ? openChild(entry.part) : runCommand("tasks.list"))}>
+                    <Show
+                      when={entry.running}
+                      fallback={<text flexShrink={0} fg={entry.failed ? theme.error : theme.textMuted}>{entry.failed ? "✗" : "✓"}</text>}
+                    >
+                      <Spinner color={entry.kind === "subagent" || entry.kind === "remote" ? theme.secondary : theme.textMuted} />
+                    </Show>
+                    <text fg={entry.running ? theme.text : theme.textMuted} wrapMode="none" truncate flexShrink={1}>
+                      {entry.title.replace(" Subagent — ", ": ")}
+                    </text>
+                  </box>
+                )}
+              </For>
+            </>
+          )}
+        </For>
+      </Section>
+    </Show>
+  )
+}
+
+/** Latest plan written in plan mode (ExitPlanMode), like opencode's plan panel. */
+export function latestPlan() {
+  for (let i = store.messages.length - 1; i >= 0; i--) {
+    const message = store.messages[i]
+    if (message.type !== "assistant") continue
+    for (let j = message.parts.length - 1; j >= 0; j--) {
+      const part = message.parts[j]
+      if (part.type === "tool" && part.name === "ExitPlanMode" && typeof part.input.plan === "string") return part
+    }
+  }
+  return undefined
+}
+
+export function PlanDialog(props                  ) {
+  const dimensions = useTerminalDimensions()
+  return (
+    <box paddingLeft={4} paddingRight={4} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text fg={theme.text} attributes={TextAttributes.BOLD}>
+          Plan
+        </text>
+        <text fg={theme.textMuted} onMouseUp={() => dialog.pop()}>
+          esc
+        </text>
+      </box>
+      <scrollbox maxHeight={Math.max(8, dimensions().height - 12)} scrollbarOptions={{ visible: false }}>
+        <markdown syntaxStyle={syntax()} content={props.plan} fg={theme.markdownText} bg={theme.backgroundPanel} conceal={true} />
+      </scrollbox>
+    </box>
+  )
+}
+
+export function PlanSection() {
+  const plan = createMemo(() => latestPlan())
+  const title = createMemo(() => {
+    const text = String(plan()?.input.plan ?? "")
+    const heading = text.match(/^#+\s+(.+)$/m)
+    return (heading?.[1] ?? text.split("\n").find((line) => line.trim()) ?? "").trim()
+  })
+  return (
+    <Show when={plan() || store.mode === "plan"}>
+      <Section title="Plan">
+        <Show
+          when={plan()}
+          fallback={<text fg={theme.textMuted}>Planning… (read-only)</text>}
+        >
+          <box onMouseUp={() => dialog.replace(() => <PlanDialog plan={String(plan() .input.plan)} />, undefined, "xlarge")}>
+            <text fg={theme.text} wrapMode="word">
+              {title()}
+            </text>
+            <text fg={theme.textMuted}>
+              {plan() .status === "completed" ? "approved" : plan() .status === "error" ? "rejected" : "awaiting approval"} · click to view
+            </text>
+          </box>
+        </Show>
+      </Section>
+    </Show>
+  )
+}
+
+export function TodoSection() {
+  return (
+    <Show when={store.todos.length}>
+      <Section
+        title="Todo"
+        collapsible={store.todos.length > 2}
+        right={
+          <text fg={theme.textMuted}>
+            {store.todos.filter((todo) => todo.status === "completed").length}/{store.todos.length}
+          </text>
+        }
+      >
+        <For each={store.todos}>
+          {(todo) => (
+            <text
+              fg={todo.status === "in_progress" ? theme.warning : todo.status === "completed" ? theme.textMuted : theme.text}
+              wrapMode="word"
+            >
+              {todo.status === "completed" ? "[✓]" : todo.status === "in_progress" ? "[•]" : "[ ]"} {todo.content}
+            </text>
+          )}
+        </For>
+      </Section>
+    </Show>
+  )
+}
+
+export function FilesSection() {
+  const files = createMemo(() => Object.entries(store.files))
+  return (
+    <Show when={files().length}>
+      <Section title="Modified Files" collapsible={files().length > 2}>
+        <For each={files()}>
+          {([file, diff]) => (
+            <box flexDirection="row" gap={1} justifyContent="space-between">
+              <text fg={theme.textMuted} wrapMode="none" truncate flexShrink={1}>
+                {file}
+              </text>
+              <box flexDirection="row" gap={1} flexShrink={0}>
+                <Show when={diff.additions}>
+                  <text fg={theme.diffAdded}>+{diff.additions}</text>
+                </Show>
+                <Show when={diff.deletions}>
+                  <text fg={theme.diffRemoved}>-{diff.deletions}</text>
+                </Show>
+              </box>
+            </box>
+          )}
+        </For>
+      </Section>
+    </Show>
+  )
+}
+
+export function PluginsSection() {
+  const external = createMemo(() => pluginStatus().filter((plugin) => plugin.source !== "internal"))
+  const count = createMemo(() => store.plugins.length + external().length)
+  return (
+    <Show when={count() || store.skills.length}>
+      <Section title="Plugins" collapsible={count() > 2}>
+        <For each={store.plugins}>
+          {(plugin) => (
+            <text fg={theme.text} wrapMode="none" truncate>
+              <span style={{ fg: theme.success }}>•</span> {plugin.name}
+              <span style={{ fg: theme.textMuted }}> {plugin.version ?? ""} claude</span>
+            </text>
+          )}
+        </For>
+        <For each={external()}>
+          {(plugin) => (
+            <text fg={theme.text} wrapMode="none" truncate onMouseUp={() => runCommand("plugins.list")}>
+              <span style={{ fg: plugin.active ? theme.success : plugin.enabled ? theme.error : theme.textMuted }}>•</span> {plugin.id}
+              <span style={{ fg: theme.textMuted }}> occ</span>
+            </text>
+          )}
+        </For>
+        <Show when={store.skills.length}>
+          <text fg={theme.textMuted}>
+            {store.skills.length} skill{store.skills.length === 1 ? "" : "s"}
+            {store.agents.length ? ` · ${store.agents.length} agent${store.agents.length === 1 ? "" : "s"}` : ""}
+          </text>
+        </Show>
+      </Section>
+    </Show>
+  )
+}
+
+export function SidebarFooter() {
+  const dimensions = useTerminalDimensions()
+  const location = createMemo(() => {
+    const home = os.homedir()
+    const dir = home && store.cwd.startsWith(home) ? "~" + store.cwd.slice(home.length) : store.cwd
+    return store.branch ? `${dir}:${store.branch}` : dir
+  })
+  return (
+    <>
+      <text fg={theme.textMuted} wrapMode="none" truncate>
+        {location()}
+      </text>
+      <Show when={dimensions().height >= 20}>
+        <text fg={theme.textMuted}>
+          <span style={{ fg: theme.success }}>•</span> <b>Claude</b>
+          <span style={{ fg: theme.text }}>
+            <b>Code</b>
+          </span>{" "}
+          <span>{store.version ?? ""}</span>
+        </text>
+      </Show>
+    </>
+  )
+}
+
+export function Sidebar() {
+  const title = createMemo(() => store.title ?? "New session")
+  return (
+    <box
+      backgroundColor={theme.backgroundPanel}
+      width={SIDEBAR_WIDTH}
+      height="100%"
+      paddingTop={1}
+      paddingBottom={1}
+      paddingLeft={2}
+      paddingRight={2}
+    >
+      <box flexShrink={0} paddingRight={2} paddingBottom={1}>
+        <Slot name="sidebar_title" mode="single_winner" session_id={store.sessionID ?? ""} title={title()}>
+          <text fg={theme.text} attributes={TextAttributes.BOLD}>
+            {title()}
+          </text>
+        </Slot>
+      </box>
+      <scrollbox flexGrow={1} minHeight={0} horizontalScrollbarOptions={{ visible: false }} verticalScrollbarOptions={{ visible: false }}>
+        <box flexShrink={0} gap={1} paddingRight={1}>
+          <Slot name="sidebar_content" session_id={store.sessionID ?? ""} />
+        </box>
+      </scrollbox>
+      <box flexShrink={0} gap={1} paddingTop={1}>
+        <Slot name="sidebar_footer" mode="single_winner" session_id={store.sessionID ?? ""}>
+          <SidebarFooter />
+        </Slot>
+      </box>
+    </box>
+  )
+}

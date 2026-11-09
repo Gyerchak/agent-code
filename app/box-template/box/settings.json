@@ -1,0 +1,15 @@
+{
+  "theme": "opencode",
+  "autoAllow": true,
+  "model": "opus",
+  "effort": "medium",
+  "modelEffort": {
+    "opus": "medium"
+  },
+  "askQuestions": false,
+  "runTests": false,
+  "smallSessions": false,
+  "scrollbar": true,
+  "autoResume": true,
+  "agentMix": {}
+}

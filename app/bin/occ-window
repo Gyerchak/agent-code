@@ -1,0 +1,37 @@
+#!/bin/sh
+# occ-window — open a terminal window running occ (or the given command) in which files dropped onto the
+# window reach occ.
+#
+#   occ-window                         occ in a new window (in the current folder)
+#   occ-window --title NAME CMD [ARG…] CMD in a new window titled NAME
+#
+# Alacritty cannot receive dropped files on Wayland (its windowing library, winit 0.30, has no Wayland
+# drag-and-drop), so it is started through XWayland, where drops arrive as a paste of the file's path. The
+# command inside gets WAYLAND_DISPLAY back (bin/occ restores it), so the clipboard keeps working.
+DIR="$(dirname "$(readlink -f "$0")")"
+TITLE="occ"
+if [ "${1:-}" = "--title" ] && [ -n "${2:-}" ]; then TITLE="$2"; shift 2; fi
+[ $# -gt 0 ] || set -- "$DIR/occ"
+
+TERM_APP="${TERMINAL:-}"
+if [ -z "$TERM_APP" ]; then
+  for t in alacritty konsole kitty foot wezterm gnome-terminal xfce4-terminal xterm; do
+    command -v "$t" >/dev/null 2>&1 && { TERM_APP="$t"; break; }
+  done
+fi
+case "$(basename "${TERM_APP:-}")" in
+  alacritty)
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
+      exec env -u WAYLAND_DISPLAY OCC_WAYLAND_DISPLAY="$WAYLAND_DISPLAY" alacritty --title "$TITLE" -e "$@"
+    fi
+    exec alacritty --title "$TITLE" -e "$@" ;;
+  konsole) exec konsole -e "$@" ;;
+  kitty) exec kitty --title "$TITLE" "$@" ;;
+  foot) exec foot --title "$TITLE" "$@" ;;
+  wezterm) exec wezterm start -- "$@" ;;
+  gnome-terminal) exec gnome-terminal -- "$@" ;;
+  xfce4-terminal) exec xfce4-terminal --title "$TITLE" -x "$@" ;;
+  xterm) exec xterm -T "$TITLE" -e "$@" ;;
+  "") echo "occ-window: no terminal emulator found" >&2; exit 1 ;;
+  *) exec "$TERM_APP" -e "$@" ;;
+esac
