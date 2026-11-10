@@ -97,7 +97,8 @@ running on the computer. Files a chat produced can be downloaded on the phone wh
 The pause bar at the bottom of the sidebar (`ctrl+x p`) stops the work at its next step until you resume (or until
 a time, or until the plan limit resets). Nothing is sent while paused and resuming sends nothing extra. With
 "Pause before a limit" on, occ does this by itself when a Claude plan limit window reaches the "Pause at" level
-(90% by default, adjustable in `/settings`); resume to go on up to 100% of that window.
+(95% by default). Turn it on or off with the switch right below the pause bar, and right-click the switch to set the
+level (or use `/settings`). Resume to go on up to 100% of that window.
 
 ## Files
 

@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { createSignal } from "solid-js"
 import { configDir } from "./paths"
 
 
@@ -206,8 +207,13 @@ export function resetSettings() {
   return backup
 }
 
+// `config` is a plain object: views that show a setting read configRevision() to redraw when one is saved.
+const [revision, setRevision] = createSignal(0)
+export const configRevision = revision
+
 let timer
 export function saveConfig() {
+  setRevision((n) => n + 1)
   clearTimeout(timer)
   timer = setTimeout(writeConfig, 100)
 }

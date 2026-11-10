@@ -2003,12 +2003,12 @@ export function createSession(seed             ) {
 
   /**
    * "Pause before a limit": Anthropic refuses a request that would go past the plan limit, which costs a failed
-   * request and a "continue" later. Near the limit (pauseAt %, default 90, a setting) the work pauses until the window
+   * request and a "continue" later. Near the limit (pauseAt %, default 95, a setting) the work pauses until the window
    * resets. Resuming by hand goes on up to 100 %: that window doesn't pause again until it resets.
    */
   function pauseNearLimit() {
     if (config.pauseNearLimit === false || splitModel(store.model) || store.pause) return
-    const at = config.pauseAt ?? 90
+    const at = config.pauseAt ?? 95
     const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
     const windows = [
       limits.fiveHour && { key: "fiveHour", ...limits.fiveHour },

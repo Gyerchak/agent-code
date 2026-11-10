@@ -282,9 +282,9 @@ function claudeModels() {
     })
 }
 
-/** How full a plan limit window gets before "Pause before a limit" pauses (default 90 %). */
-function DialogPauseAt() {
-  const current = config.pauseAt ?? 90
+/** How full a plan limit window gets before "Pause before a limit" pauses (default 95 %). */
+function DialogPauseAt(props) {
+  const current = config.pauseAt ?? 95
   return (
     <DialogSelect
       title="Pause at"
@@ -292,13 +292,14 @@ function DialogPauseAt() {
       options={[70, 75, 80, 85, 90, 95, 98, 99].map((value) => ({
         title: `${value}%`,
         value: String(value),
-        description: value === 90 ? "default" : value >= 98 ? "just before the limit" : undefined,
+        description: value === 95 ? "default" : value >= 98 ? "just before the limit" : undefined,
       }))}
       onSelect={(option) => {
         config.pauseAt = Number(option.value)
         if (config.pauseNearLimit === false) config.pauseNearLimit = true
         saveConfig()
-        dialog.replace(() => <DialogSettings />, undefined, "large")
+        if (props.back) dialog.replace(() => <DialogSettings />, undefined, "large")
+        else dialog.clear()
         toast.show({ variant: "success", message: `Pausing at ${option.value}% of a plan limit` })
       }}
     />
@@ -1625,7 +1626,7 @@ function DialogSettings() {
       footer: (setting.get() ? "on" : "off") + (setting.tier && config.subagentPriority?.[setting.tier]?.length ? ` · ${config.subagentPriority[setting.tier] .length} first` : ""),
       gutter: <text fg={setting.get() ? theme.success : theme.textMuted}>{setting.get() ? "[x]" : "[ ]"}</text>,
       // Saving, restoring and resetting the settings are actions, not switches.
-      ...(setting.key === "pauseAt" ? { footer: `${config.pauseAt ?? 90}%`, gutter: <text fg={theme.textMuted}>{" % "}</text> } : {}),
+      ...(setting.key === "pauseAt" ? { footer: `${config.pauseAt ?? 95}%`, gutter: <text fg={theme.textMuted}>{" % "}</text> } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
       ...(setting.key === "settings.reset" ? { footer: "reset", gutter: <text fg={theme.textMuted}>{" ↺ "}</text> } : {}),
@@ -1644,7 +1645,7 @@ function DialogSettings() {
           return
         }
         if (option.value === "pauseAt") {
-          dialog.replace(() => <DialogPauseAt />)
+          dialog.replace(() => <DialogPauseAt back />)
           return
         }
         if (option.value === "settings.save") {
@@ -2159,6 +2160,18 @@ export function App() {
       slash: "pause",
       run: () => (store.pause ? active().resume() : actions.pause()),
     },
+    {
+      id: "pause.limit.toggle",
+      title: config.pauseNearLimit === false ? "Turn on auto-pause before a limit" : "Turn off auto-pause before a limit",
+      category: "Session",
+      slash: "autopause",
+      run: () => {
+        config.pauseNearLimit = config.pauseNearLimit === false
+        saveConfig()
+        toast.show({ variant: "info", message: config.pauseNearLimit ? `Auto-pause on: pausing at ${config.pauseAt ?? 95}% of a plan limit` : "Auto-pause before a limit off" })
+      },
+    },
+    { id: "pause.limit.threshold", title: "Auto-pause threshold", category: "Session", run: () => dialog.replace(() => <DialogPauseAt />) },
     { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
     { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
     { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },

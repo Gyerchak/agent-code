@@ -8,6 +8,7 @@ import { limits,                                     } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
+import { config, configRevision } from "../context/config"
 import { actions, clock } from "../context/app"
 import { dialog } from "../ui/dialog"
 import { Spinner } from "../component/spinner"
@@ -417,6 +418,34 @@ export function PauseBar() {
   )
 }
 
+/**
+ * Auto-pause before a plan limit, right below the pause bar: a click turns it on or off, a right click sets the level
+ * (the same as Settings → "Pause before a limit" / "Pause at").
+ */
+export function AutoPauseToggle() {
+  const [hover, setHover] = createSignal(false)
+  const on = () => (configRevision(), config.pauseNearLimit !== false)
+  const level = () => (configRevision(), config.pauseAt ?? 95)
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={(event) => runCommand(event?.button === 2 ? "pause.limit.threshold" : "pause.limit.toggle")}
+    >
+      <text fg={on() ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: on() ? theme.success : theme.textMuted }}>{on() ? "◉" : "○"}</span>
+        {on() ? `  Auto-pause at ${level()}%` : "  Auto-pause off"}
+        <Show when={hover()}>
+          <span style={{ fg: theme.textMuted }}> (right click: level)</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
 export function SidebarFooter() {
   const dimensions = useTerminalDimensions()
   const location = createMemo(() => {
@@ -426,7 +455,10 @@ export function SidebarFooter() {
   })
   return (
     <>
-      <PauseBar />
+      <box flexShrink={0}>
+        <PauseBar />
+        <AutoPauseToggle />
+      </box>
       <text fg={theme.textMuted} wrapMode="none" truncate>
         {location()}
       </text>
