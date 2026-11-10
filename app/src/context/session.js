@@ -26,7 +26,7 @@ import { ensureBoxTrusted } from "./box"
 import { occMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
-import { fetchPlanUsage, isLimitError, limitResetTime, onSharedPlanUsage, planType, publishPlanUsage } from "./usage"
+import { fetchPlanUsage, isLimitError, limitResetTime, onSharedPlanUsage, planDetails, publishPlanUsage } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
 // renames every Claude alias to that provider's model (and drops some), so those tabs use this list.
@@ -521,7 +521,7 @@ function assistantError(code        , msg     ) {
   const text = (msg?.content ?? []).find((block     ) => block.type === "text")?.text
   if (text) return text
   const map                         = {
-    authentication_failed: "Authentication failed — run `claude /login`",
+    authentication_failed: "Not logged in to Claude Code (or the login expired) — run /login",
     billing_error: "Billing error",
     rate_limit: "Rate limited",
     overloaded: "API overloaded",
@@ -600,7 +600,10 @@ export async function pollPlanUsage(force = false) {
     const usage = await fetchPlanUsage(force)
     planExact = !!usage
     // Claude Code rewrites the plan into its credentials when the login refreshes (e.g. after a plan change).
-    void planType().then((plan) => plan && plan !== catalog.plan && setCatalog("plan", plan))
+    void planDetails().then((plan) => {
+      if (plan && plan.type !== catalog.plan) setCatalog("plan", plan.type)
+      if (plan && plan.label !== catalog.planLabel) setCatalog("planLabel", plan.label)
+    })
     if (usage)
       setLimits({
         available: true,
@@ -917,11 +920,12 @@ function contextEnv(value        , sent         )                         {
   return context ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(context) } : {}
 }
 
-export function behaviourPrompt(extra           = []) {
+/** `context`: the session the prompt is for ({ sessionId, session }), so a part can differ per session. */
+export function behaviourPrompt(extra           = [], context = {}) {
   const parts           = []
   for (const part of promptParts.values()) {
     try {
-      const text = part()?.trim()
+      const text = part(context)?.trim()
       if (text) parts.push(text)
     } catch (error) {
       log("prompt part failed", error)
@@ -1090,6 +1094,8 @@ export function createSession(seed             ) {
     view: "home",
     promptMode: "normal",
     mods: { attached: false, status: {}, panes: [], shown: null, version: 0 },
+    /** Paused: { until?: ms, reason: "user" | "limit", holding?: a turn waits at its next tool call }. */
+    pause: undefined,
   })
 
   /** Prompt draft that survives switching tabs. */
@@ -1193,7 +1199,7 @@ export function createSession(seed             ) {
     const extra           = []
     if (policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
     if (lines.length) extra.push(providerPrompt(lines))
-    const append = behaviourPrompt(extra)
+    const append = behaviourPrompt(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
     const disallowed = [
       ...(config.askQuestions === false ? ["AskUserQuestion"] : []),
       ...(policy.enabled ? [] : ["Agent", "Task"]),
@@ -1218,7 +1224,7 @@ export function createSession(seed             ) {
         disallowedTools: disallowed.length ? disallowed : undefined,
         agents: Object.keys(agents).length ? agents : undefined,
         settings: extraSettings(store.model)       ,
-        hooks: policy.enabled ? { PreToolUse: subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) } : undefined,
+        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) : []), pauseHook()] },
         // occ's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
         mcpServers: { ...occMcpServers(), ...(config.planning ? { [OCC_MCP]: planningServer() } : {}) },
         plugins: modPlugins(),
@@ -1255,7 +1261,6 @@ export function createSession(seed             ) {
         setStore("models", reconcile(external ? claudeModels : (init.models ?? [])))
         setStore("agents", reconcile(init.agents ?? []))
         if (init.account) setStore("account", init.account)
-        if (init.account?.subscriptionType && init.account.subscriptionType !== catalog.plan) setCatalog("plan", init.account.subscriptionType)
         if (init.output_style) setStore("outputStyle", init.output_style)
         setStore("ready", true)
         setStore("booting", false)
@@ -1344,7 +1349,8 @@ export function createSession(seed             ) {
     if (!(current || oc) || store.status === "running") return false
     restartAfterTurn = false
     if (store.sessionID && store.messages.some((m) => m.type === "user")) await start({ resume: store.sessionID })
-    else await start({ sessionId: randomUUID() })
+    // A session with no prompt yet keeps its id (and so its per-session settings, like the agent mix).
+    else await start({ sessionId: store.sessionID && !store.engine ? store.sessionID : randomUUID() })
     return true
   }
 
@@ -1767,10 +1773,81 @@ export function createSession(seed             ) {
   }
 
   // -------------------------------------------------------------------------
+  // Pause: the work stops at its next tool call and goes on from there, so pausing and resuming send nothing
+  // and cost nothing (a PreToolUse hook holds the call). Harnesses without hooks stop the turn instead and get
+  // a short "continue" on resume.
+  // -------------------------------------------------------------------------
+
+  let pauseWaiters = []
+  let pauseTimer
+
+  /** Pause until `until` (ms; undefined = until resumed by hand). */
+  function pause(until, reason = "user") {
+    clearTimeout(pauseTimer)
+    const stopped = !!oc && store.status === "running"
+    setStore("pause", { until, reason, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
+    if (until) pauseTimer = setTimeout(() => resume(), Math.max(1000, until - Date.now()))
+    if (stopped) void interrupt()
+    emit("pause", { until, reason })
+  }
+
+  /** Let a paused turn go on (or, for a harness that was stopped, continue it with one short message). */
+  function resume() {
+    clearTimeout(pauseTimer)
+    const was = store.pause
+    if (!was) return
+    setStore("pause", undefined)
+    for (const release of pauseWaiters.splice(0)) release()
+    emit("pause", { resumed: true })
+    if (was.interrupted && oc) send("Continue where you stopped.")
+  }
+
+  function waitWhilePaused(signal) {
+    if (!store.pause) return Promise.resolve()
+    return new Promise((resolve) => {
+      pauseWaiters.push(resolve)
+      signal?.addEventListener("abort", () => resolve(), { once: true })
+    })
+  }
+
+  /**
+   * "Pause before a limit": Anthropic refuses a request that would go past the plan limit, which costs a failed
+   * request and a "continue" later. Near the limit (pauseAt %, default 98) the work pauses until the window resets.
+   */
+  function pauseNearLimit() {
+    if (config.pauseNearLimit === false || splitModel(store.model) || store.pause) return
+    const at = config.pauseAt ?? 98
+    const windows = [limits.fiveHour, limits.week].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at)
+    if (!windows.length) return
+    const until = Math.max(...windows.map((w) => w.resetsAt)) + 30_000
+    pause(until, "limit")
+    pushNotice(`Paused before the plan limit (${Math.round(Math.max(...windows.map((w) => w.utilization)))}% used); resumes at ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} with nothing extra sent.`, "info")
+  }
+
+  /** The PreToolUse hook that holds a tool call while the tab is paused. */
+  function pauseHook() {
+    return {
+      timeout: 7 * 86_400,
+      hooks: [
+        async (_input, _id, options) => {
+          pauseNearLimit()
+          if (store.pause) {
+            setStore("pause", "holding", true)
+            await waitWhilePaused(options?.signal)
+          }
+          return {}
+        },
+      ],
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Sending
   // -------------------------------------------------------------------------
 
   function send(text        , extra            = {}) {
+    // Writing to a paused tab means: go on.
+    if (store.pause && !(store.pause.interrupted && text === "Continue where you stopped.")) resume()
     // Like opencode: a new prompt deletes the reverted messages for good.
     if (store.revert) {
       void commitRevert().then(() => send(text, extra))
@@ -3284,6 +3361,8 @@ export function createSession(seed             ) {
     replyElicitation,
     relative,
     findToolPart,
+    pause,
+    resume,
     modRender,
     modPress,
     modInput,

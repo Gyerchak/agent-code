@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url"
 import { createMemo, createSignal, For, Show } from "solid-js"
 import { config, configDir, saveConfig } from "../context/config"
 import { registerPromptPart } from "../context/session"
-import { tabs } from "../context/tabs"
+import { active, tabs } from "../context/tabs"
 import { syntax, theme } from "../context/theme"
 
 import { dialog, DialogSelect } from "../ui/dialog"
@@ -104,11 +104,68 @@ const RENAMED                         = {
   aiintegration: "agent-practices",
   "typescript-standard": "javascript-standard",
 }
-const picked = (layer       ) => (version(), (config.agentMix?.[layer.key] ?? []).map((slug) => RENAMED[slug] ?? slug))
+// ---------------------------------------------------------------------------
+// Default and per-session mixes. `config.agentMix` is the mix new sessions start with; each session keeps its own
+// copy in `config.sessionAgentMix[sessionId]` (taken when it first starts, so it survives restarts and later
+// changes to the default). A session's copy is edited in /mix with "This session" selected.
+// ---------------------------------------------------------------------------
 
+const [scope, setScope] = createSignal("session")
+const sessionId = () => active()?.store.sessionID
+/** Per-session mixes need the system prompt as target (a file is shared by every session). */
+const perSession = () => target() === "prompt" && !!sessionId()
+const editingSession = () => scope() === "session" && perSession()
+
+/** A session's own mix, made from the default the first time the session asks for it. */
+function sessionMix(id) {
+  if (!id) return config.agentMix ?? {}
+  let mix = config.sessionAgentMix?.[id]
+  if (!mix) {
+    mix = structuredClone(config.agentMix ?? {})
+    const all = { ...(config.sessionAgentMix ?? {}), [id]: mix }
+    // Keep the newest 300 sessions' mixes.
+    const ids = Object.keys(all)
+    for (const old of ids.slice(0, Math.max(0, ids.length - 300))) delete all[old]
+    config.sessionAgentMix = all
+    saveConfig()
+  }
+  return mix
+}
+
+/** The mix being looked at: the focused session's, or the default for new sessions. */
+const scopeMix = () => (version(), editingSession() ? (config.sessionAgentMix?.[sessionId()] ?? config.agentMix ?? {}) : (config.agentMix ?? {}))
+
+const picked = (layer       , mix = scopeMix()) => (version(), (mix[layer.key] ?? []).map((slug) => RENAMED[slug] ?? slug))
+
+const changedSessions = new Set()
 function setPicked(layer       , slugs          ) {
-  config.agentMix = { ...(config.agentMix ?? {}), [layer.key]: slugs }
-  if (!slugs.length) delete config.agentMix[layer.key]
+  if (editingSession()) {
+    const id = sessionId()
+    const mix = { ...sessionMix(id), [layer.key]: slugs }
+    if (!slugs.length) delete mix[layer.key]
+    config.sessionAgentMix = { ...(config.sessionAgentMix ?? {}), [id]: mix }
+    changedSessions.add(id)
+  } else {
+    config.agentMix = { ...(config.agentMix ?? {}), [layer.key]: slugs }
+    if (!slugs.length) delete config.agentMix[layer.key]
+    defaultChanged = true
+  }
+  saveConfig()
+  setVersion((value) => value + 1)
+  dirty = true
+}
+
+/** Replace the focused session's mix (with the default's, or put it into the default). */
+function copyMix(direction) {
+  const id = sessionId()
+  if (!id) return
+  if (direction === "to-session") {
+    config.sessionAgentMix = { ...(config.sessionAgentMix ?? {}), [id]: structuredClone(config.agentMix ?? {}) }
+    changedSessions.add(id)
+  } else {
+    config.agentMix = structuredClone(sessionMix(id))
+    defaultChanged = true
+  }
   saveConfig()
   setVersion((value) => value + 1)
   dirty = true
@@ -123,12 +180,12 @@ function toggle(layer       , slug        ) {
 // Headings inside an option sit below its own "###" title.
 const demote = (body        ) => body.replace(/^(#{1,4}) /gm, (_, hashes        ) => "#".repeat(Math.min(6, hashes.length + 3)) + " ")
 
-/** The composed prompt section, or undefined when nothing is picked. */
-export function compose() {
+/** The composed prompt section of a mix (default: the one being looked at), or undefined when nothing is picked. */
+export function compose(mix = scopeMix()) {
   version()
   const sections           = []
   for (const layer of LAYERS) {
-    const chosen = picked(layer)
+    const chosen = picked(layer, mix)
     if (!chosen.length) continue
     const all = options(layer)
     const items = chosen.map((slug) => all.find((option) => option.slug === slug)).filter(Boolean)
@@ -193,7 +250,8 @@ function writeBlock(file        , text                    ) {
 
 /** Bring both files in line with the mix and the chosen target. */
 function syncFiles() {
-  const mix = compose()
+  // Files are shared by every session: they get the default mix.
+  const mix = compose(config.agentMix ?? {})
   const where = target()
   writeBlock(AGENTS_MD, where === "agents" ? mix : undefined)
   writeBlock(CLAUDE_MD, where === "claude" ? mix : where === "agents" && mix ? `@${tilde(AGENTS_MD)}` : undefined)
@@ -210,29 +268,65 @@ const tokens = (text                    ) => (text ? Math.ceil(text.length / 4) 
 const short = (n        ) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n))
 
 let dirty = false
+let defaultChanged = false
 function applyChanges() {
   if (!dirty) return
   dirty = false
   syncFiles()
+  // A session's own mix reaches it when its Claude Code process restarts; a new default only new sessions (or every
+  // session when the mix goes to a file, which they all read).
+  const shared = target() !== "prompt" && defaultChanged
   let restarted = 0
-  for (const tab of tabs()) if (tab.live && tab.store.status === "idle") (void tab.restart(), restarted++)
-  toast.show({ variant: "success", message: restarted ? "Agent mix applied" : "Agent mix applies from the next message", duration: 2500 })
+  for (const tab of tabs())
+    if (tab.live && tab.store.status === "idle" && (shared || changedSessions.has(tab.store.sessionID))) (void tab.restart(), restarted++)
+  const message = changedSessions.size
+    ? restarted
+      ? "This session's agent mix applied"
+      : "This session's agent mix applies from its next message"
+    : defaultChanged
+      ? shared
+        ? "Agent mix applied"
+        : "Default agent mix saved: new sessions start with it"
+      : "Agent mix saved"
+  changedSessions.clear()
+  defaultChanged = false
+  toast.show({ variant: "success", message, duration: 3000 })
 }
 
 // ---------------------------------------------------------------------------
 // UI
 // ---------------------------------------------------------------------------
 
-function titlesOf(layer       ) {
+function titlesOf(layer       , mix = scopeMix()) {
   const all = options(layer)
-  return picked(layer).map((slug) => all.find((option) => option.slug === slug)?.title ?? slug)
+  return picked(layer, mix).map((slug) => all.find((option) => option.slug === slug)?.title ?? slug)
 }
 
 export function DialogAgents() {
   const options_ = createMemo(() => {
     version()
     const total = tokens(compose())
+    const title = active()?.store.title ?? "this session"
+    const scopeRows = perSession()
+      ? [
+          {
+            title: "Editing",
+            value: "scope",
+            description: editingSession() ? `this session · ${title.length > 40 ? title.slice(0, 39) + "…" : title}` : "new sessions (the default mix)",
+            footer: "switch",
+            category: "Scope",
+            gutter: <text fg={theme.accent}>{editingSession() ? "◆" : "◇"}</text>,
+          },
+          ...(editingSession()
+            ? [
+                { title: "Use the default mix here", value: "to-session", description: "replace this session's mix with the default", category: "Scope" },
+                { title: "Make this the default", value: "to-default", description: "new sessions start with this session's mix", category: "Scope" },
+              ]
+            : []),
+        ]
+      : [{ title: "Editing", value: "scope-note", description: "the default mix (per-session mixes need “Written to: System prompt”)", category: "Scope" }]
     return [
+      ...scopeRows,
       ...LAYERS.map((layer) => {
         const names = titlesOf(layer)
         return {
@@ -263,10 +357,13 @@ export function DialogAgents() {
   })
   return (
     <DialogSelect
-      title="Agents"
+      title={editingSession() ? "Agents · this session" : "Agents · new sessions"}
       options={options_()}
       flatten
       onSelect={(option) => {
+        if (option.value === "scope") return setScope(editingSession() ? "default" : "session")
+        if (option.value === "scope-note") return
+        if (option.value === "to-session" || option.value === "to-default") return copyMix(option.value)
         if (option.value === "preview") return dialog.push(() => <PreviewDialog title="Composed prompt" text={compose() ?? "_Nothing selected._"} />)
         if (option.value === "clear") {
           for (const layer of LAYERS) if (picked(layer).length) setPicked(layer, [])
@@ -363,11 +460,10 @@ function PreviewDialog(props                                 ) {
 }
 
 export function AgentsSection() {
-  const rows = createMemo(() => {
-    version()
-    return LAYERS.map((layer) => ({ layer, names: titlesOf(layer) })).filter((row) => row.names.length)
-  })
-  const total = createMemo(() => tokens(compose()))
+  // The focused session's own mix (the default until the session has started).
+  const mix = createMemo(() => (version(), perSession() ? (config.sessionAgentMix?.[sessionId()] ?? config.agentMix ?? {}) : (config.agentMix ?? {})))
+  const rows = createMemo(() => LAYERS.map((layer) => ({ layer, names: titlesOf(layer, mix()) })).filter((row) => row.names.length))
+  const total = createMemo(() => tokens(compose(mix())))
   return (
     <box onMouseUp={() => openAgents()}>
       <box flexDirection="row" gap={1}>
@@ -399,6 +495,8 @@ export function AgentsSection() {
 }
 
 export function openAgents() {
+  // /mix opens on the focused session's own mix when it has one to edit.
+  setScope(perSession() ? "session" : "default")
   dialog.replace(() => <DialogAgents />, applyChanges, "large")
 }
 
@@ -447,7 +545,8 @@ function importOpenCodeBox() {
 }
 
 export const agentsPlugin         = (api) => {
-  api.lifecycle.onDispose(registerPromptPart("occ-agents", () => (target() === "prompt" ? compose() : undefined)))
+  // Each session's prompt gets that session's own mix (a copy of the default, made when it first starts).
+  api.lifecycle.onDispose(registerPromptPart("occ-agents", (context) => (target() === "prompt" ? compose(sessionMix(context?.sessionId)) : undefined)))
   syncFiles()
   api.slots.register({ id: "occ-agents", order: 160, slots: { sidebar_content: () => <AgentsSection /> } })
   api.keymap.registerLayer({

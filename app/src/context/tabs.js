@@ -172,9 +172,15 @@ export async function forkSession(messageID         ) {
     session.setStore("effort", source.store.effort)
     session.setStore("mode", source.store.mode)
   })
+  // The fork keeps the original's per-session settings (agent mix).
+  const forkId = randomUUID()
+  if (config.sessionAgentMix?.[id]) {
+    config.sessionAgentMix = { ...config.sessionAgentMix, [forkId]: structuredClone(config.sessionAgentMix[id]) }
+    saveConfig()
+  }
   // Forking before the first prompt leaves nothing to resume: a fresh conversation.
-  if (index >= 0 && !before) await session.start({ sessionId: randomUUID() })
-  else await session.start({ resume: id, resumeAt: before?.type === "assistant" ? before.sdkUuid : undefined, fork: true, sessionId: randomUUID() })
+  if (index >= 0 && !before) await session.start({ sessionId: forkId })
+  else await session.start({ resume: id, resumeAt: before?.type === "assistant" ? before.sdkUuid : undefined, fork: true, sessionId: forkId })
   return session
 }
 

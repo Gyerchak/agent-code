@@ -192,7 +192,8 @@ export function DialogSelect   (props
   const filtered = createMemo(() => {
     const needle = store.filter.trim()
     const options = props.options.filter((option) => !option.disabled)
-    if (!needle) return options
+    // With `search` the caller finds the options for the typed text itself (e.g. full-text search).
+    if (!needle || props.search) return options
     return options
       .map((option) => ({ option, score: fuzzy(needle, `${option.title} ${option.description ?? ""} ${option.category ?? ""}`) }))
       .filter((item) => item.score >= 0)
@@ -312,7 +313,10 @@ export function DialogSelect   (props
         <Show when={props.filter !== false}>
           <box paddingTop={1}>
             <input
-              onInput={(value        ) => setStore("filter", value)}
+              onInput={(value        ) => {
+                setStore("filter", value)
+                props.search?.(value)
+              }}
               focusedBackgroundColor={theme.backgroundPanel}
               cursorColor={theme.primary}
               focusedTextColor={theme.primary}

@@ -647,6 +647,32 @@ export function Prompt(props                                         ) {
   const showLimits = createMemo(() => kind() === "anthropic" && !!limits.available && !!(limits.fiveHour || limits.week) && roomForLimits())
   const showGo = createMemo(() => kind() === "go" && !!catalog.go && roomForLimits())
 
+  // The footer's right side is one line, so it gets a width budget: tokens and cost always show, then the
+  // warning and resume time, then the plan meters, and the key hints only when there is room left. Whatever
+  // doesn't fit is left out whole (the row used to run off the edge and cut the cost off).
+  const fit = createMemo(() => {
+    const GAP = 2
+    let left = width() - 18 // the prompt's border and padding, and at least this much of the folder path
+    const take = (size) => {
+      if (!size) return true
+      if (size + GAP > left) return false
+      left -= size + GAP
+      return true
+    }
+    const usageText = props.home ? "" : [...usage(), cost()].filter(Boolean).join(" · ")
+    take(usageText.length)
+    if (!props.home && warning()) take(warning().text.length)
+    if (store.resumeAt !== undefined) take(18)
+    if (subagents()) take(subagents().length)
+    const bar = 22 // "5h ▰▰▰▱▱▱ 42% 2h13m"
+    const fiveHour = showLimits() && !!limits.fiveHour && take(bar)
+    const week = showLimits() && !!limits.week && take(bar)
+    const go = showGo() && take(bar * [catalog.go?.rolling, catalog.go?.weekly, catalog.go?.monthly].filter(Boolean).length)
+    const commands = take(shortcut("command.palette.show").length + 9)
+    const agents = width() >= 44 && take(shortcut("agent.cycle").replace("shift+tab", "tab").length + 7)
+    return { fiveHour, week, go, commands, agents }
+  })
+
   const metadata = createMemo(() => {
     const narrow = dimensions().width < 44
     const model = modelLabel()
@@ -940,24 +966,24 @@ export function Prompt(props                                         ) {
                     {subagents()}
                   </text>
                 </Show>
-                <Show when={width() >= 44 && !(props.home && showLimits()) && (props.home || (!usage().length && !cost()) || width() >= 110)}>
+                <Show when={fit().agents}>
                   <text fg={theme.text} flexShrink={0}>
                     {shortcut("agent.cycle").replace("shift+tab", "tab")}{" "}
                     <span style={{ fg: theme.textMuted }}>agents</span>
                   </text>
                 </Show>
-                <Show when={width() >= (showLimits() ? 100 : 60) || props.home || usage().length === 0}>
+                <Show when={fit().commands}>
                   <text fg={theme.text} wrapMode="none" flexShrink={0}>
                     {shortcut("command.palette.show")} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
                 </Show>
-                <Show when={showLimits()}>
+                <Show when={fit().fiveHour || fit().week}>
                   <box flexDirection="row" gap={2} flexShrink={0}>
-                    <Show when={limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={w()} />}</Show>
-                    <Show when={limits.week}>{(w                       ) => <UsageBar label="wk" window={w()} />}</Show>
+                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={w()} />}</Show>
+                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={w()} />}</Show>
                   </box>
                 </Show>
-                <Show when={showGo()}>
+                <Show when={fit().go}>
                   <box flexDirection="row" gap={2} flexShrink={0}>
                     <Show when={catalog.go?.rolling}>{(w                       ) => <UsageBar label="go" window={w()} />}</Show>
                     <Show when={catalog.go?.weekly}>{(w                       ) => <UsageBar label="wk" window={w()} />}</Show>

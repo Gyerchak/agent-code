@@ -1,9 +1,10 @@
-import { isWindows, openCommand } from "./context/platform"
+import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
 import { billingLabel, contextText, modelMeta, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
+import { lanAddress, phoneLink, phoneQr, phoneServerState, phoneSettings, phoneToken, setPhoneSetting, startPhoneServer, stopPhoneServer } from "./context/remote"
 import { execFile } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { dropsBlocked, selectionWithPaths, textWithPaths } from "./context/attachments"
@@ -11,12 +12,13 @@ import { modelVariants } from "./context/variants"
 import { boxDir, ownSettings, resetBox, restartBox, setOwnSettings } from "./context/box"
 import { ensureMcpFile, importMcp, mcpFile } from "./context/mcp"
 import { discoverMods, ensureModsDir, modEnabled, modsDir, modsEnabled, modsShows, setModEnabled, setModsSetting } from "./context/mods"
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import { forgetPlan } from "./context/usage"
 import { config, listSavedSettings, reloadConfig, resetSettings, restoreSettings, saveConfig, saveSettings } from "./context/config"
 import {
   actions,
@@ -74,7 +76,7 @@ import { toast, ToastHost } from "./ui/toast"
 import { TabBar, tabBarVisible } from "./component/tabs"
 import { Slot } from "./plugin/slots"
 import { pluginRoute, routeRender, showPluginRoute } from "./plugin/routes"
-import { deleteSession, renameSession } from "@anthropic-ai/claude-agent-sdk"
+import { deleteSession, getSessionMessages, renameSession } from "@anthropic-ai/claude-agent-sdk"
 
 const EFFORTS                = ["low", "medium", "high", "xhigh", "max"]
 const EFFORT_HINTS                         = {
@@ -153,6 +155,24 @@ async function openEditor(renderer                                , initial     
     await renderer.resume()
   }
   return readFileSync(file, "utf8")
+}
+
+/**
+ * Run a harness's own interactive command (its login, exactly as the harness does it) in this terminal: occ steps
+ * aside, the command takes the screen, and occ comes back after Enter.
+ */
+async function runInTerminal(renderer, file, args, title) {
+  await renderer.suspend()
+  try {
+    process.stdout.write(`\n\x1b[1m${title}\x1b[0m  (${[file, ...args].join(" ")})\n\n`)
+    const result = spawnSync(file, args, { stdio: "inherit", ...spawnOptions(file) })
+    process.stdout.write(`\n${result.status === 0 ? "Done." : `It ended with code ${result.status ?? "?"}.`} Press Enter to go back to occ… `)
+    if (isWindows) spawnSync("cmd", ["/c", "pause >nul"], { stdio: "inherit" })
+    else spawnSync("sh", ["-c", "read _"], { stdio: "inherit" })
+    return result.status === 0
+  } finally {
+    await renderer.resume()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -951,6 +971,432 @@ function applyConfigChange() {
 }
 
 /** Saved sets of settings: pick one to put it back. */
+/** The phone link as a QR code (and the link itself) for pairing a phone. */
+function DialogPhoneQr() {
+  onMount(() => dialog.setSize("large"))
+  const qr = phoneQr()
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <text fg={theme.text} attributes={TextAttributes.BOLD}>
+        Pair a phone
+      </text>
+      <Show when={qr} fallback={<text fg={theme.textMuted}>(install qrencode to see a QR code here)</text>}>
+        <text fg="#ffffff" bg="#000000">
+          {qr}
+        </text>
+      </Show>
+      <text fg={theme.textMuted}>Scan it with the phone's camera, or open this link on the phone:</text>
+      <text fg={theme.accent}>{phoneLink()}</text>
+      <text fg={theme.textMuted}>Then add the page to the home screen (Android: menu → Install app; iPhone: Share → Add to Home Screen).</text>
+    </box>
+  )
+}
+
+/** occ on a phone: the server, its address and how phones pair. */
+function DialogPhone() {
+  onMount(() => dialog.setSize("large"))
+  const [tick, setTick] = createSignal(0)
+  const restart = () => {
+    if (!phoneSettings().enabled) return stopPhoneServer()
+    startPhoneServer()
+      .then(() => setTick((n) => n + 1))
+      .catch((error) => toast.show({ variant: "error", title: "Phone server", message: String(error?.message ?? error), duration: 8000 }))
+  }
+  const HOSTS = ["lan", "all", "localhost"]
+  const hostLabel = (host) => (host === "lan" ? `local network (${lanAddress()})` : host === "all" ? "all addresses (public IP, port forwarding)" : host === "localhost" ? "this computer only" : host)
+  const options = createMemo(() => {
+    tick()
+    const s = phoneSettings()
+    const live = phoneServerState()
+    const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
+    return [
+      { title: "Phone server", value: "enabled", description: live.running ? `running · ${live.clients} phone${live.clients === 1 ? "" : "s"} connected` : "off", gutter: box(s.enabled), category: "Server" },
+      { title: "Pair a phone…", value: "qr", description: "QR code and link to open on the phone", category: "Server", disabled: !s.enabled },
+      { title: "Listen on", value: "host", description: hostLabel(s.host), footer: "change", category: "Address" },
+      { title: "Port", value: "port", description: String(s.port), footer: "change", category: "Address" },
+      { title: "Public address", value: "address", description: s.address || "none (the link uses the local address)", footer: "set", category: "Address" },
+      { title: "HTTPS", value: "tls", description: s.tls === "off" ? "off (fine on a home network)" : "self-signed certificate (accept it once on the phone)", gutter: box(s.tls !== "off"), category: "Address" },
+      { title: "Files to the phone", value: "files", description: "phones may download the files a chat attached, wrote or edited", gutter: box(s.files), category: "Phone" },
+      { title: "New pairing token", value: "token", description: "unpairs every phone", category: "Phone" },
+    ]
+  })
+  return (
+    <DialogSelect
+      title="Phone"
+      options={options()}
+      onSelect={(option) => {
+        const s = phoneSettings()
+        if (option.value === "enabled") {
+          setPhoneSetting("enabled", !s.enabled)
+          restart()
+          if (!s.enabled) setTimeout(() => dialog.replace(() => <DialogPhoneQr />, undefined, "large"), 300)
+        } else if (option.value === "qr") return dialog.replace(() => <DialogPhoneQr />, undefined, "large")
+        else if (option.value === "host") {
+          setPhoneSetting("host", HOSTS[(HOSTS.indexOf(s.host) + 1) % HOSTS.length])
+          restart()
+        } else if (option.value === "tls") {
+          setPhoneSetting("tls", s.tls === "off" ? "self-signed" : "off")
+          restart()
+        } else if (option.value === "files") setPhoneSetting("files", !s.files)
+        else if (option.value === "token") {
+          phoneToken(true)
+          toast.show({ variant: "info", message: "New token: pair your phones again", duration: 4000 })
+        } else if (option.value === "port" || option.value === "address")
+          return dialog.replace(() => (
+            <DialogPrompt
+              title={option.value === "port" ? "Port" : "Public address (IP or name phones use; empty: none)"}
+              value={option.value === "port" ? String(s.port) : (s.address ?? "")}
+              onConfirm={(value) => {
+                const text = value.trim()
+                if (option.value === "port") {
+                  const port = Number(text)
+                  if (!Number.isInteger(port) || port < 1 || port > 65535) return toast.show({ variant: "warning", message: "A port is a number from 1 to 65535" })
+                  setPhoneSetting("port", port)
+                } else setPhoneSetting("address", text || undefined)
+                restart()
+                dialog.replace(() => <DialogPhone />, undefined, "large")
+              }}
+            />
+          ))
+        setTick((n) => n + 1)
+      }}
+    />
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Find: search the chat (this session or every session here) for words you or the AI wrote, and jump there.
+// ---------------------------------------------------------------------------
+
+const WHO = ["both", "me", "ai"]
+const WHO_LABEL = { both: "me + AI", me: "me", ai: "AI" }
+/** The last search, for F3 / shift+F3 (find next / previous in the focused session). */
+const lastFind = { query: "", who: "both", at: -1 }
+
+/** Plain text of a message as the chat shows it (the user's words, or the AI's replies). */
+function messageText(message) {
+  if (message.type === "user") return message.text
+  if (message.type === "assistant") return message.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")
+  return ""
+}
+
+function snippet(text, query) {
+  const flat = text.replace(/\s+/g, " ")
+  const at = flat.toLowerCase().indexOf(query.toLowerCase())
+  const start = Math.max(0, at - 36)
+  return (start > 0 ? "…" : "") + flat.slice(start, start + 110) + (start + 110 < flat.length ? "…" : "")
+}
+
+/** Matches of `query` in the focused session's messages, in chat order. */
+function sessionMatches(query, who) {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+  return store.messages.filter(
+    (message) =>
+      (message.type === "user" ? who !== "ai" : message.type === "assistant" ? who !== "me" : false) && messageText(message).toLowerCase().includes(needle),
+  )
+}
+
+// Every session's text, read once per occ run (transcripts only change in open tabs, which are searched live).
+const transcriptCache = new Map()
+async function transcriptOf(sessionId) {
+  if (!transcriptCache.has(sessionId))
+    transcriptCache.set(
+      sessionId,
+      getSessionMessages(sessionId, { dir: app.cwd })
+        .then((entries) =>
+          entries
+            .filter((entry) => (entry.type === "user" || entry.type === "assistant") && !entry.parent_tool_use_id && !entry.isMeta)
+            .map((entry) => {
+              const content = entry.message?.content
+              const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((block) => block?.type === "text").map((block) => block.text).join("\n") : ""
+              return { uuid: entry.uuid, role: entry.type, text: text.startsWith("<attachment ") ? "" : text }
+            })
+            .filter((item) => item.text.trim()),
+        )
+        .catch(() => []),
+    )
+  return transcriptCache.get(sessionId)
+}
+
+/** Jump to a message of the focused session and light it up. */
+function jumpTo(id) {
+  setRoute("session")
+  active().setStore("view", "session")
+  setTimeout(() => actions.reveal(id, true), 30)
+}
+
+function DialogFind() {
+  onMount(() => dialog.setSize("large"))
+  const [query, setQuery] = createSignal(lastFind.query)
+  const [who, setWho] = createSignal(lastFind.who)
+  const [everywhere, setEverywhere] = createSignal(false)
+  const [found, setFound] = createSignal([])
+  const [busy, setBusy] = createSignal(false)
+  let run = 0
+  const search = async () => {
+    const text = query().trim()
+    const mine = ++run
+    if (!text) return setFound([])
+    const here = sessionMatches(text, who()).map((message) => ({
+      title: snippet(messageText(message), text),
+      value: `here:${message.id}`,
+      category: everywhere() ? `This session · ${store.title ?? "untitled"}` : undefined,
+      footer: message.type === "user" ? "me" : "AI",
+    }))
+    if (!everywhere()) return setFound(here.reverse())
+    setFound(here.reverse())
+    setBusy(true)
+    const others = []
+    for (const info of app.sessions) {
+      if (info.sessionId === store.sessionID) continue
+      const items = await transcriptOf(info.sessionId)
+      if (mine !== run) return
+      for (const item of items) {
+        if (who() === "me" && item.role !== "user") continue
+        if (who() === "ai" && item.role !== "assistant") continue
+        if (!item.text.toLowerCase().includes(text.toLowerCase())) continue
+        others.push({
+          title: snippet(item.text, text),
+          value: `other:${info.sessionId}:${item.role}:${item.uuid}`,
+          category: info.customTitle ?? info.summary ?? info.sessionId.slice(0, 8),
+          footer: item.role === "user" ? "me" : "AI",
+        })
+      }
+    }
+    if (mine !== run) return
+    setFound([...here, ...others])
+    setBusy(false)
+  }
+  createEffect(on([query, who, everywhere], () => void search()))
+  return (
+    <DialogSelect
+      title={`Find · ${WHO_LABEL[who()]} · ${everywhere() ? "all sessions here" : "this session"}${busy() ? " · searching…" : query().trim() ? ` · ${found().length} found` : ""}`}
+      placeholder="words to find"
+      search={setQuery}
+      options={found()}
+      flatten={!everywhere()}
+      emptyText={query().trim() ? "Not found" : "Type the words to find"}
+      onSelect={async (option) => {
+        lastFind.query = query()
+        lastFind.who = who()
+        dialog.clear()
+        const value = option.value
+        if (value.startsWith("here:")) {
+          const id = value.slice(5)
+          lastFind.at = store.messages.findIndex((message) => message.id === id)
+          return jumpTo(id)
+        }
+        const [, sessionId, role, uuid] = value.split(":")
+        const session = await openSession(sessionId)
+        // A user message keeps its transcript id; an AI reply is found again by its words.
+        const target =
+          (role === "user" && session.store.messages.find((message) => message.id === uuid)) ||
+          session.store.messages.findLast((message) => message.type === (role === "user" ? "user" : "assistant") && messageText(message).toLowerCase().includes(query().trim().toLowerCase()))
+        if (target) {
+          lastFind.at = session.store.messages.indexOf(target)
+          setTimeout(() => jumpTo(target.id), 150)
+        }
+      }}
+      actions={[
+        { keybind: "tab", label: `who: ${WHO_LABEL[who()]}`, run: () => setWho(WHO[(WHO.indexOf(who()) + 1) % WHO.length]) },
+        { keybind: "ctrl+s", label: everywhere() ? "this session" : "all sessions", run: () => setEverywhere(!everywhere()) },
+      ]}
+    />
+  )
+}
+
+/** F3 / shift+F3: the next / previous match of the last search in the focused session. */
+function findAgain(direction) {
+  if (!lastFind.query.trim()) return dialog.replace(() => <DialogFind />, undefined, "large")
+  const matches = sessionMatches(lastFind.query, lastFind.who)
+  if (!matches.length) return toast.show({ variant: "info", message: `"${lastFind.query}" not found in this session`, duration: 2500 })
+  const indexes = matches.map((message) => store.messages.indexOf(message))
+  const next = direction > 0 ? (indexes.find((index) => index > lastFind.at) ?? indexes[0]) : (indexes.findLast((index) => index < lastFind.at) ?? indexes.at(-1))
+  lastFind.at = next
+  jumpTo(store.messages[next].id)
+  toast.show({ variant: "info", message: `${indexes.indexOf(next) + 1} / ${indexes.length}: "${lastFind.query}"`, duration: 1500 })
+}
+
+// ---------------------------------------------------------------------------
+// Log in: each harness's own login (Claude Code, opencode, Codex) run as-is, keys for the rest.
+// ---------------------------------------------------------------------------
+
+/** A command's output lines, without blocking the UI (opencode's auth list starts its service: seconds). */
+function outputLines(file, args) {
+  return new Promise((resolve) =>
+    execFile(file, args, { encoding: "utf8", timeout: 20_000, ...spawnOptions(file) }, (_error, stdout, stderr) =>
+      resolve(String(stdout || "").replace(/\x1b\[[0-9;]*m/g, "").split("\n").map((line) => line.trim()).filter(Boolean)),
+    ),
+  )
+}
+
+async function claudeStatus() {
+  const claude = findBinary("claude")
+  if (!claude) return { installed: false }
+  try {
+    return { installed: true, ...JSON.parse((await outputLines(claude, ["auth", "status"])).join("\n") || "{}") }
+  } catch {
+    return { installed: true }
+  }
+}
+
+/** After a Claude Code login or logout: the plan and usage may be another account's; idle tabs pick it up now. */
+function afterClaudeLogin() {
+  forgetPlan()
+  void refreshCatalog()
+  void pollPlanUsage(true)
+  for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && !tab.store.engine) void tab.restart()
+}
+
+function DialogLogin() {
+  onMount(() => dialog.setSize("large"))
+  const renderer = useRenderer()
+  const [tick, setTick] = createSignal(0)
+  const opencode = findBinary("opencode")
+  const codex = findBinary("codex")
+  // Each status arrives on its own; the dialog shows at once.
+  const [claudeInfo] = createResource(() => tick() + 1, () => claudeStatus())
+  const [opencodeInfo] = createResource(() => tick() + 1, async () => (opencode ? (await outputLines(opencode, ["auth", "list"])).filter((line) => /\S\s{2,}\S/.test(line) && !/^(usage|description|warn|error)/i.test(line)) : []))
+  const [codexInfo] = createResource(() => tick() + 1, async () => (codex ? (await outputLines(codex, ["login", "status"]))[0] : undefined))
+  const options = createMemo(() => {
+    const claude = claudeInfo() ?? { installed: !!findBinary("claude"), checking: true }
+    const date = (iso) => (iso ? new Date(iso).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }) : "")
+    const opencodeAccounts = opencodeInfo() ?? []
+    const codexStatus = codexInfo()
+    return [
+      {
+        title: "Claude Code",
+        value: "claude",
+        description: !claude.installed
+          ? "not installed: npm i -g @anthropic-ai/claude-code"
+          : claude.checking
+            ? "checking…"
+            : claude.loggedIn
+            ? `${claude.email ?? "logged in"} · ${claude.authMethod ?? ""}${claude.loginExpiresAt ? ` · until ${date(claude.loginExpiresAt)}` : ""}`
+            : "not logged in — log in to use Claude models",
+        footer: claude.loggedIn ? "switch account" : "log in",
+        category: "Harnesses",
+        gutter: <text fg={claude.loggedIn ? theme.success : theme.error}>●</text>,
+      },
+      ...(claude.loggedIn ? [{ title: "Log out of Claude Code", value: "claude-logout", description: "claude auth logout", category: "Harnesses" }] : []),
+      {
+        title: "opencode",
+        value: "opencode",
+        description: opencode ? (opencodeInfo.loading ? "checking…" : opencodeAccounts.length ? `${opencodeAccounts.length} connected: ${opencodeAccounts.map((line) => line.split(/\s{2,}/)[0]).join(", ").slice(0, 60)}` : "no integrations yet") : "not installed: npm i -g opencode-ai",
+        footer: opencode ? "opencode auth login" : undefined,
+        category: "Harnesses",
+        gutter: <text fg={opencodeAccounts.length ? theme.success : theme.textMuted}>●</text>,
+      },
+      {
+        title: "Codex (OpenAI)",
+        value: "codex",
+        description: codex ? (codexInfo.loading ? "checking…" : (codexStatus ?? "status unknown")) : "not installed: npm i -g @openai/codex @agentclientprotocol/codex-acp",
+        footer: codex ? "codex login" : undefined,
+        category: "Harnesses",
+        gutter: <text fg={codexStatus && !/not logged/i.test(codexStatus) ? theme.success : theme.textMuted}>●</text>,
+      },
+      {
+        title: "DeepSeek Harness",
+        value: "deepseek",
+        description: "uses the DeepSeek key from occ (DEEPSEEK_API_KEY)",
+        footer: "set key",
+        category: "Harnesses",
+      },
+      { title: "Provider keys…", value: "connect", description: "OpenAI, DeepSeek, OpenCode Zen/Go, Ollama keys for occ (/connect)", category: "occ" },
+    ]
+  })
+  const run = async (file, args, title) => {
+    dialog.clear()
+    const ok = await runInTerminal(renderer, file, args, title)
+    return ok
+  }
+  return (
+    <DialogSelect
+      title="Log in"
+      options={options()}
+      onSelect={async (option) => {
+        if (option.value === "claude" || option.value === "claude-logout") {
+          const claude = findBinary("claude")
+          if (!claude) return toast.show({ variant: "warning", message: "Install Claude Code first: npm i -g @anthropic-ai/claude-code" })
+          const ok = await run(claude, ["auth", option.value === "claude" ? "login" : "logout"], option.value === "claude" ? "Claude Code login" : "Claude Code logout")
+          afterClaudeLogin()
+          toast.show({ variant: ok ? "success" : "warning", message: ok ? (option.value === "claude" ? "Logged in to Claude Code" : "Logged out of Claude Code") : "The login didn't finish" })
+          return
+        }
+        if (option.value === "opencode" && findBinary("opencode")) {
+          await run(findBinary("opencode"), ["auth", "login"], "opencode login")
+          void refreshProviders()
+          return
+        }
+        if (option.value === "codex" && findBinary("codex")) {
+          await run(findBinary("codex"), ["login"], "Codex login")
+          return
+        }
+        if (option.value === "deepseek" || option.value === "connect") return dialog.replace(() => <DialogConnect />)
+        setTick((n) => n + 1)
+      }}
+    />
+  )
+}
+
+/** How long to pause the focused tab: by hand, for a while, at a time, or until the 5-hour window resets. */
+function DialogPause() {
+  const fiveHour = limits.fiveHour?.resetsAt && limits.fiveHour.resetsAt > Date.now() ? limits.fiveHour.resetsAt : undefined
+  const at = (minutes) => Date.now() + minutes * 60_000
+  const options = [
+    { title: "Until I resume", value: "manual", description: "click the bar, /resume or ctrl+x p again" },
+    { title: "15 minutes", value: "15" },
+    { title: "30 minutes", value: "30" },
+    { title: "1 hour", value: "60" },
+    { title: "2 hours", value: "120" },
+    ...(fiveHour ? [{ title: "Until the 5-hour limit resets", value: "reset", footer: new Date(fiveHour + 30_000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }] : []),
+    { title: "Until a time…", value: "time", description: "HH:MM, or a number of minutes" },
+  ]
+  return (
+    <DialogSelect
+      title="Pause"
+      flatten
+      options={options}
+      onSelect={(option) => {
+        const session = active()
+        if (option.value === "time") {
+          dialog.replace(() => (
+            <DialogPrompt
+              title="Resume at (HH:MM) or after N minutes"
+              placeholder="e.g. 14:30 or 45"
+              onConfirm={(value) => {
+                const text = value.trim()
+                const clock = text.match(/^(\d{1,2}):(\d{2})$/)
+                let until
+                if (clock) {
+                  const date = new Date()
+                  date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
+                  if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
+                  until = date.getTime()
+                } else if (/^\d+$/.test(text)) until = at(Number(text))
+                dialog.clear()
+                if (!until) return toast.show({ variant: "warning", message: "Write a time like 14:30 or a number of minutes" })
+                session.pause(until)
+                toast.show({ variant: "info", message: `Paused until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` })
+              }}
+            />
+          ))
+          return
+        }
+        const until = option.value === "manual" ? undefined : option.value === "reset" ? fiveHour + 30_000 : at(Number(option.value))
+        session.pause(until)
+        dialog.clear()
+        toast.show({
+          variant: "info",
+          message: session.engine || session.store.engine ? "Paused: stopped now, a short continue on resume" : "Paused: the work stops at its next step; nothing is sent until it resumes",
+          duration: 4000,
+        })
+      }}
+    />
+  )
+}
+
 function DialogSavedSettings() {
   const list = listSavedSettings()
   return (
@@ -1050,6 +1496,7 @@ function DialogSettings() {
       get: flag("dropFiles", true),
       set: write("dropFiles"),
     },
+    { key: "pauseNearLimit", title: "Pause before a limit", description: "near a plan limit, pause until it resets (no failed request, no continue)", get: flag("pauseNearLimit", true), set: write("pauseNearLimit") },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
     { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what occ draws", get: () => modsEnabled(), set: () => {} },
@@ -1277,6 +1724,7 @@ export function App() {
     )
   })
   useKeyboard((event          ) => dispatchKey(event))
+  actions.pause = () => dialog.replace(() => <DialogPause />)
   actions.message = (id) => dialog.replace(() => <DialogMessage messageID={id} />)
   actions.redo = () =>
     dialog.replace(() => (
@@ -1578,6 +2026,40 @@ export function App() {
         toast.show({ variant: "success", message: "Configuration reloaded (idle sessions restarted; running ones when they finish)", duration: 3000 })
       },
     },
+    {
+      id: "session.pause",
+      title: store.pause ? "Resume" : "Pause",
+      category: "Session",
+      slash: "pause",
+      run: () => (store.pause ? active().resume() : actions.pause()),
+    },
+    { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
+    { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
+    { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },
+    { id: "session.find.previous", title: "Find previous", category: "Session", palette: false, run: () => findAgain(-1) },
+    { id: "auth.login", title: "Log in", category: "System", slash: "login", slashAliases: ["auth"], run: () => dialog.replace(() => <DialogLogin />, undefined, "large") },
+    {
+      id: "auth.logout",
+      title: "Log out of Claude Code",
+      category: "System",
+      slash: "logout",
+      run: () =>
+        dialog.replace(() => (
+          <DialogConfirm
+            title="Log out"
+            message="Log out of Claude Code (claude auth logout)? Claude models stop working until you log in again with /login."
+            onConfirm={async () => {
+              dialog.clear()
+              const claude = findBinary("claude")
+              if (claude) spawnSync(claude, ["auth", "logout"], { stdio: "ignore", ...spawnOptions(claude) })
+              afterClaudeLogin()
+              toast.show({ variant: "info", message: "Logged out of Claude Code" })
+            }}
+            onCancel={() => dialog.clear()}
+          />
+        )),
+    },
+    { id: "phone.show", title: "Phone", category: "System", slash: "phone", run: () => dialog.replace(() => <DialogPhone />, undefined, "large") },
     { id: "app.update", title: "Update occ", category: "System", slash: "update", run: () => void updateOcc() },
     { id: "mods.list", title: "Mods", category: "System", slash: "mods", run: () => dialog.replace(() => <DialogMods />, undefined, "large") },
     { id: "settings.show", title: "Settings", category: "System", slash: "settings", slashAliases: ["config", "options"], run: () => dialog.replace(() => <DialogSettings />, undefined, "large") },

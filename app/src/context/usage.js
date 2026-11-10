@@ -17,14 +17,73 @@ import { stateDir } from "./paths"
 /** Every limit window Anthropic reports (session, weekly, per-model weekly, …), for auto-resume. */
 
 
-/** The claude.ai plan Claude Code is logged in with ("pro", "max", "team", …), or undefined for API keys. */
-export async function planType()                              {
+/**
+ * The claude.ai plan of the logged-in account, from Anthropic itself (GET /api/oauth/profile: organization type
+ * and rate-limit tier), so a plan change shows at once. Claude Code's credentials file keeps the plan it saw at
+ * login (it said "pro" long after an upgrade to Max) and is only the fallback. Cached 30 minutes, shared by
+ * every occ window. Undefined for API-key logins.
+ */
+export async function planDetails() {
+  const shared = readProfileCache()
+  if (shared?.plan && Date.now() - shared.time < 30 * 60_000) return shared.plan
+  const token = await accessToken()
+  if (token) {
+    try {
+      const response = await fetch("https://api.anthropic.com/api/oauth/profile", {
+        headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (response.ok) {
+        const body = await response.json()
+        const org = body?.organization ?? {}
+        const type = String(org.organization_type ?? "").replace(/^claude_/, "") || (body?.account?.has_claude_max ? "max" : body?.account?.has_claude_pro ? "pro" : undefined)
+        const multiple = String(org.rate_limit_tier ?? "").match(/(\d+)x$/)?.[1]
+        const plan = type ? { type, label: planLabel(type, multiple), status: org.subscription_status } : undefined
+        writeProfileCache(plan)
+        return plan
+      }
+    } catch (error) {
+      log("plan profile error", String(error))
+    }
+  }
+  // Fallback: what Claude Code stored at login.
   try {
     const data = JSON.parse(await readFile(credentialsFile(), "utf8"))
-    return data?.claudeAiOauth?.subscriptionType ?? undefined
+    const type = data?.claudeAiOauth?.subscriptionType
+    return type ? { type, label: planLabel(type) } : undefined
   } catch {
     return undefined
   }
+}
+
+/** Kept for callers that only want the plan's type ("pro", "max", "team", …). */
+export async function planType() {
+  return (await planDetails())?.type
+}
+
+const PLAN_NAMES = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free" }
+function planLabel(type, multiple) {
+  const name = PLAN_NAMES[type] ?? type.charAt(0).toUpperCase() + type.slice(1)
+  return multiple && multiple !== "1" ? `${name} ${multiple}×` : name
+}
+
+function readProfileCache() {
+  try {
+    return JSON.parse(readFileSync(path.join(sharedDir, "plan-profile.json"), "utf8"))
+  } catch {
+    return undefined
+  }
+}
+/** Forget the cached plan (after logging in or out, the account may be another one). */
+export function forgetPlan() {
+  writeProfileCache(undefined)
+}
+
+function writeProfileCache(plan) {
+  try {
+    mkdirSync(sharedDir, { recursive: true })
+    writeFileSync(path.join(sharedDir, "plan-profile.json"), JSON.stringify({ time: Date.now(), plan }))
+  } catch {}
 }
 
 function extra(body     )                         {

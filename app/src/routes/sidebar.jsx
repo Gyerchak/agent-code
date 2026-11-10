@@ -5,10 +5,10 @@ import { createMemo, createSignal, For, Match, Show, Switch,          } from "so
 import { catalog } from "../context/catalog"
 import { providerKind } from "../context/providers"
 import { limits,                                     } from "../context/session"
-import { store } from "../context/tabs"
+import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
-import { clock } from "../context/app"
+import { actions, clock } from "../context/app"
 import { dialog } from "../ui/dialog"
 import { Spinner } from "../component/spinner"
 import { UsageBar } from "../component/prompt"
@@ -102,7 +102,7 @@ export function UsageSection() {
   return (
     <Switch>
       <Match when={kind() === "anthropic" && limits.available && (limits.fiveHour || limits.week)}>
-        <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? `${catalog.plan} plan` : ""}</text>}>
+        <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? `${catalog.planLabel ?? catalog.plan} plan` : ""}</text>}>
           <Meter label="5-hour " window={limits.fiveHour} />
           <Meter label="Weekly " window={limits.week} />
           <Show when={limits.extra}>
@@ -366,6 +366,37 @@ export function PluginsSection() {
   )
 }
 
+const clockTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+/** The pause bar: pause the work (nothing is sent while paused) or, while paused, resume it. */
+export function PauseBar() {
+  const [hover, setHover] = createSignal(false)
+  const paused = () => store.pause
+  const label = () => {
+    const p = paused()
+    if (!p) return store.status === "running" ? "⏸  Pause" : "⏸  Pause (nothing running)"
+    const when = p.until ? `resumes ${clockTime(p.until)}` : "until you resume"
+    return `▶  Paused${p.reason === "limit" ? " before the limit" : ""} · ${when}`
+  }
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : paused() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => (paused() ? active().resume() : actions.pause())}
+    >
+      <text fg={paused() ? theme.warning : store.status === "running" ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        {label()}
+        <Show when={paused() && hover()}>
+          <span style={{ fg: theme.textMuted }}> (click to resume)</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
 export function SidebarFooter() {
   const dimensions = useTerminalDimensions()
   const location = createMemo(() => {
@@ -375,6 +406,7 @@ export function SidebarFooter() {
   })
   return (
     <>
+      <PauseBar />
       <text fg={theme.textMuted} wrapMode="none" truncate>
         {location()}
       </text>

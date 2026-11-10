@@ -53,10 +53,12 @@ export function toggleScrollbar() {
 export const actions = {
   /** opencode's "Message Actions" for a user message: Revert / Copy / Fork. */
   message: (_id        ) => {},
+  /** Choose how long to pause the focused tab. */
+  pause: () => {},
   /** Ask, then restore what a revert hid (click on the "reverted" banner). */
   redo: () => {},
   /** Scroll the transcript to a message, drawing older history first if it isn't drawn (session.tsx). */
-  reveal: (id        ) => void refs.scroll?.scrollChildIntoView(`msg-${id}`),
+  reveal: (id        , _highlight = false) => void refs.scroll?.scrollChildIntoView(`msg-${id}`),
 }
 
 export const refs = {

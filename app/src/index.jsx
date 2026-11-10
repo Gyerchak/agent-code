@@ -18,6 +18,7 @@ import { builtins } from "./feature-plugins/builtins"
 import { provideHostModules } from "./plugin/loader"
 import { registerBuiltin, reportSlotError, startPlugins, stopPlugins } from "./plugin/runtime"
 import { setupSlots } from "./plugin/slots"
+import { autostartPhoneServer, stopPhoneServer } from "./context/remote"
 
 function parseArgs(argv          ) {
   const args                                                                                                                     = {}
@@ -99,6 +100,7 @@ async function shutdown(code = 0) {
   const hasMessages = active().store.messages.length > 0
   flushTabs()
   flushConfig()
+  stopPhoneServer()
   void stopPlugins().catch(() => {})
   disposeAll()
   setTimeout(() => process.exit(code), 50)
@@ -121,6 +123,9 @@ process.on("unhandledRejection", (error) => log("unhandled", error))
 void render(() => <App />, renderer)
 
 void startPlugins(renderer).catch((error) => log("plugins error", error))
+
+// The phone server (/phone), when it is switched on.
+autostartPhoneServer()
 
 // Prices, plan type and OpenCode Go meters (prices daily, Go meters every 5 minutes).
 void refreshCatalog()

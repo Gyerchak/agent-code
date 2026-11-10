@@ -80,8 +80,22 @@ occ "fix the tests" # start with a prompt
 | `esc esc` | interrupt |
 | `@` / `/` / `!` | mention a file / commands / shell mode |
 
-`/settings` holds the options (and can save, restore or reset them), `/connect` adds provider keys,
+`/login` runs each harness's own login (Claude Code, opencode, Codex) right inside occ, `/find` searches your
+chats, `/settings` holds the options (and can save, restore or reset them), `/connect` adds provider keys,
 `/mods` manages Claude Code mods, `/update` updates occ.
+
+## On your phone
+
+`/phone` starts occ's phone server (local network, a public address or this computer only; port and HTTPS
+are settings) and shows a QR code. Scan it on Android or iPhone and add the page to the home screen: the phone
+then shows your tabs and chats live, sends prompts and files, stops, pauses and approves tools — the work keeps
+running on the computer. Files a chat produced can be downloaded on the phone when you allow it.
+
+## Pause
+
+The pause bar at the bottom of the sidebar (`ctrl+x p`) stops the work at its next step until you resume (or until
+a time, or until the plan limit resets). Nothing is sent while paused and resuming sends nothing extra. With
+"Pause before a limit" on, occ does this by itself just before a Claude plan limit.
 
 ## Files
 

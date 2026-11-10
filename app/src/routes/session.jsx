@@ -161,10 +161,15 @@ export function Session() {
   const windowed = createMemo(() => transcript().slice(windowStart()))
   createEffect(on([() => store.child, () => store.sessionID], () => setShown(TRANSCRIPT_WINDOW), { defer: true }))
   // Jumping to a message: draw history back to it first if it is older than the drawn window.
-  actions.reveal = (id        ) => {
+  actions.reveal = (id        , highlight = false) => {
     const index = transcript().findIndex((m) => m.id === id)
     if (index >= 0 && index < windowStart()) setShown(transcript().length - index + 5)
     setTimeout(() => refs.scroll?.scrollChildIntoView(`msg-${id}`), 0)
+    // A found message lights up for a moment, like a match in a text editor.
+    if (highlight) {
+      setHighlighted(id)
+      setTimeout(() => highlighted() === id && setHighlighted(undefined), 2500)
+    }
   }
   const showEarlier = () => {
     if (!windowStart()) return
@@ -441,16 +446,21 @@ function Divider(props                                                   ) {
   )
 }
 
+/** The message a search jumped to (shown highlighted for a moment). */
+const [highlighted, setHighlighted] = createSignal()
+
 function MessageView(props                      ) {
   return (
     <Switch>
       <Match when={props.message.type === "user"}>
-        <box marginTop={1} flexShrink={0} id={`msg-${props.message.id}`}>
+        <box marginTop={1} flexShrink={0} id={`msg-${props.message.id}`} backgroundColor={highlighted() === props.message.id ? theme.accent : undefined}>
           <UserMessageView message={props.message               } />
         </box>
       </Match>
       <Match when={props.message.type === "assistant"}>
-        <AssistantView message={props.message                    } />
+        <box flexShrink={0} id={`msg-${props.message.id}`} backgroundColor={highlighted() === props.message.id ? theme.backgroundElement : undefined}>
+          <AssistantView message={props.message                    } />
+        </box>
       </Match>
       <Match when={props.message.type === "notice"}>
         <box marginTop={1} flexShrink={0}>

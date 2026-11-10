@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="occ" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <link rel="stylesheet" href="style.css" />
+    <title>occ</title>
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="dot" id="dot"></span><b>occ</b> <span id="host" class="muted"></span></div>
+      <button id="settings-button" class="icon" aria-label="Settings">⚙</button>
+    </header>
+    <nav id="tabs"></nav>
+    <main id="chat"><div class="empty muted" id="empty">Connecting…</div></main>
+    <section id="permissions" hidden></section>
+    <footer>
+      <div id="attached" class="attached"></div>
+      <div class="row">
+        <label class="icon" aria-label="Attach files">＋<input id="files" type="file" multiple hidden /></label>
+        <textarea id="prompt" rows="1" placeholder="Ask anything…"></textarea>
+        <button id="send" class="primary" aria-label="Send">↑</button>
+      </div>
+      <div class="row actions">
+        <button id="interrupt">■ Stop</button>
+        <button id="pause">⏸ Pause</button>
+        <button id="new">＋ New tab</button>
+        <span id="status" class="muted"></span>
+      </div>
+    </footer>
+    <dialog id="settings">
+      <h3>occ on this phone</h3>
+      <label class="check"><input type="checkbox" id="show-files" /> Show files from the PC (download, open)</label>
+      <label class="check"><input type="checkbox" id="show-tools" /> Show tool calls</label>
+      <p class="muted small">Paired with <span id="paired"></span>. The work runs on the PC; this phone only shows it and sends prompts.</p>
+      <div class="row">
+        <button id="unpair">Unpair</button>
+        <button id="close-settings" class="primary">Done</button>
+      </div>
+    </dialog>
+    <dialog id="pause-dialog">
+      <h3>Pause</h3>
+      <p class="muted small">The work stops at its next step; nothing is sent while paused.</p>
+      <div class="grid">
+        <button data-minutes="">Until I resume</button>
+        <button data-minutes="15">15 min</button>
+        <button data-minutes="30">30 min</button>
+        <button data-minutes="60">1 hour</button>
+        <button data-minutes="120">2 hours</button>
+        <button data-close>Cancel</button>
+      </div>
+    </dialog>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

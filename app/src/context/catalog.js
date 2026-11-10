@@ -5,7 +5,7 @@ import { config } from "./config"
 import { log } from "./log"
 import { stateDir } from "./paths"
 import { providerKind, providers, splitModel,                   } from "./providers"
-import { planType } from "./usage"
+import { planDetails } from "./usage"
 
 // ---------------------------------------------------------------------------
 // What each model costs *for this user* and how big its context is.
@@ -110,7 +110,9 @@ export function refreshCatalog() {
       log("models.dev unavailable", String(error))
     }
     save(cache)
-    setCatalog("plan", await planType())
+    const plan = await planDetails()
+    setCatalog("plan", plan?.type)
+    setCatalog("planLabel", plan?.label)
     try {
       setCatalog("go", await fetchGo())
     } catch (error) {
@@ -183,7 +185,7 @@ const PLAN                         = { pro: "Pro", max: "Max", team: "Team", ent
 export function billingLabel(meta           , providerName         ) {
   switch (meta.billing) {
     case "plan":
-      return `${PLAN[catalog.plan ?? ""] ?? "Claude"} plan`
+      return `${catalog.planLabel ?? PLAN[catalog.plan ?? ""] ?? "Claude"} plan`
     case "local":
       return "Free · local"
     case "free":
