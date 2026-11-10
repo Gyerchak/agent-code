@@ -564,7 +564,7 @@ function UserMessageView(props                          ) {
           </Show>
           <Show when={props.message.attachments?.length}>
             <box flexDirection="column" gap={1} paddingTop={props.message.text.trim() ? 1 : 0}>
-              <For each={props.message.attachments ?? []}>{(item) => <AttachmentPreview item={item} />}</For>
+              <For each={props.message.attachments ?? []}>{(item) => <AttachmentPreview item={item} background={hover() ? theme.backgroundElement : theme.backgroundPanel} />}</For>
             </box>
           </Show>
           <Show when={props.message.files.length || props.message.queued || props.message.unsent}>

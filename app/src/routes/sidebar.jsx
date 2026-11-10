@@ -45,8 +45,10 @@ export function resetsIn(at         ) {
   const minutes = Math.round(ms / 60000)
   if (minutes < 60) return `resets in ${minutes}m`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `resets in ${hours}h ${minutes % 60}m`
-  return `resets ${new Date(at).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+  // The day and time as well, so it can be checked against claude.ai's "Resets Wed 00:59".
+  const when = new Date(at).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })
+  if (hours < 24) return `resets in ${hours}h ${minutes % 60}m · ${when}`
+  return `resets ${when} · in ${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
 // ---------------------------------------------------------------------------

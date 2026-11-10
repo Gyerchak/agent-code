@@ -158,6 +158,9 @@ function writeShared(shared        ) {
 
 /** `force`: skip the shared 100 s cache (after a limit hit the cached reading is out of date). */
 /** Share numbers this window learned some other way (a live reading, a refused request) with the others. */
+// `time` is when the shared numbers last changed (other windows pick them up); `fetched` is when they last came from
+// Anthropic. Only `fetched` makes a reading fresh: windows republishing their own live numbers used to keep the
+// cache "fresh" for good, so after a reset (a new weekly date) nobody asked Anthropic again.
 export function publishPlanUsage(usage           ) {
   writeShared({ ...readShared(), time: Date.now(), usage })
 }
@@ -176,9 +179,15 @@ export function onSharedPlanUsage(fn                            ) {
   })
 }
 
+/** A window in the shared reading has reset since Anthropic was last asked: its numbers and next date are new. */
+function passedReset(shared) {
+  const windows = [shared.usage?.fiveHour, shared.usage?.week, ...(shared.usage?.all ?? [])]
+  return windows.some((w) => w?.resetsAt && w.resetsAt <= Date.now() && w.resetsAt > (shared.fetched ?? 0))
+}
+
 export async function fetchPlanUsage(force = false)                                 {
   const shared = readShared()
-  const fresh = !force && shared.usage && shared.time && Date.now() - shared.time < 100_000
+  const fresh = !force && shared.usage && shared.fetched && Date.now() - shared.fetched < 100_000 && !passedReset(shared)
   if (fresh) return shared.usage
   if (Date.now() < Math.max(pausedUntil, shared.pausedUntil ?? 0)) {
     // Backing off: a result up to 15 minutes old is still better than the partial stream events.
@@ -229,7 +238,7 @@ export async function fetchPlanUsage(force = false)                             
     // No five_hour window (and no "session" limit) means the plan has no rolling limit (Ultra).
     const rolling = !!body.five_hour || (body?.limits ?? []).some((item) => item?.kind === "session")
     const usage = { fiveHour: window(body.five_hour), week: window(body.seven_day), extra: extra(body), all, scoped, rolling }
-    writeShared({ time: Date.now(), usage })
+    writeShared({ time: Date.now(), fetched: Date.now(), usage })
     return usage
   } catch (error) {
     log("plan usage error", error)

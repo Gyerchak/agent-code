@@ -8,7 +8,7 @@ import { filetype } from "../routes/tools"
 import { syntax, theme } from "../context/theme"
 
 // Attachment chips and previews, shared by the prompt (what will be sent) and the transcript (what was sent).
-// Pictures, GIFs, videos and sound show as a soft (blurred) picture; a click shows the picture sharp at the
+// Pictures, GIFs, videos and sound show as a small picture; a click shows the picture at the
 // size of the chat, or plays the GIF/video (with its sound) or the sound in a loop; another click stops it.
 
 /**
@@ -63,7 +63,19 @@ export function AttachmentChip(props) {
   )
 }
 
-/** Raw RGB pixels (w × h, h even) drawn as w × h/2 half-block cells straight into a frame buffer. */
+/** Bytes per pixel of a frame: RGB, or RGBA (premultiplied from ffmpeg, straight from ImageMagick). */
+const channelsOf = (frame) => (frame.channels === 4 ? 4 : 3)
+
+/** The colour a cell shows for one pixel: transparent parts show the chat's background `bg` ([r, g, b]). */
+function pixel(rgb, i, channels, premultiplied, bg) {
+  if (channels === 3) return RGBA.fromInts(rgb[i], rgb[i + 1], rgb[i + 2], 255)
+  const a = rgb[i + 3] / 255
+  const keep = premultiplied ? 1 : a
+  const mix = (c, back) => Math.max(0, Math.min(255, Math.round(c * keep + back * (1 - a))))
+  return RGBA.fromInts(mix(rgb[i], bg[0]), mix(rgb[i + 1], bg[1]), mix(rgb[i + 2], bg[2]), 255)
+}
+
+/** Pixels (w × h, h even) drawn as w × h/2 half-block cells straight into a frame buffer, over `background`. */
 function Pixels(props) {
   let view
   const draw = () => {
@@ -74,18 +86,19 @@ function Pixels(props) {
     // Until layout gives the buffer its size, a drawing would be cut: onResize draws again.
     if (buffer.width < frame.w || buffer.height < rows) return
     const rgb = frame.rgb
+    const channels = channelsOf(frame)
+    const premultiplied = frame.alpha === "pre"
+    const bg = (props.background ?? theme.backgroundPanel).toInts()
     for (let y = 0; y < rows; y++) {
-      const top = y * 2 * frame.w * 3
-      const bottom = (y * 2 + 1) * frame.w * 3
+      const top = y * 2 * frame.w * channels
+      const bottom = (y * 2 + 1) * frame.w * channels
       for (let x = 0; x < frame.w; x++) {
-        const t = top + x * 3
-        const b = bottom + x * 3
-        buffer.setCell(x, y, "▀", RGBA.fromInts(rgb[t], rgb[t + 1], rgb[t + 2], 255), RGBA.fromInts(rgb[b], rgb[b + 1], rgb[b + 2], 255))
+        buffer.setCell(x, y, "▀", pixel(rgb, top + x * channels, channels, premultiplied, bg), pixel(rgb, bottom + x * channels, channels, premultiplied, bg))
       }
     }
     view.requestRender()
   }
-  createEffect(on(() => props.frame, draw))
+  createEffect(on([() => props.frame, () => props.background], draw))
   return (
     <pixels
       width={props.frame.w}
@@ -108,13 +121,13 @@ function Pixels(props) {
 function drawable(frame) {
   if (!frame?.rgb || !Number.isSafeInteger(frame.w) || !Number.isSafeInteger(frame.h)) return false
   if (frame.w < 1 || frame.h < 2 || frame.w > 2000 || frame.h > 4000) return false
-  return frame.rgb.length >= frame.w * Math.floor(frame.h / 2) * 2 * 3
+  return frame.rgb.length >= frame.w * Math.floor(frame.h / 2) * 2 * channelsOf(frame)
 }
 
 /** A thumbnail as stored ({ w, h rows, rgb base64 }), as a frame, when it is in that shape. */
 function thumbFrame(thumb) {
   if (!thumb || typeof thumb.rgb !== "string") return undefined
-  const frame = { w: thumb.w, h: thumb.h * 2, rgb: Buffer.from(thumb.rgb, "base64") }
+  const frame = { w: thumb.w, h: thumb.h * 2, rgb: Buffer.from(thumb.rgb, "base64"), channels: thumb.channels === 4 ? 4 : 3 }
   return drawable(frame) ? frame : undefined
 }
 
@@ -123,7 +136,7 @@ function Frame(props) {
   const size = createMemo(() => (drawable(props.frame) ? `${props.frame.w}x${props.frame.h}` : ""))
   return (
     <Show when={size()} keyed>
-      {() => <Pixels frame={props.frame} />}
+      {() => <Pixels frame={props.frame} background={props.background} />}
     </Show>
   )
 }
@@ -131,7 +144,7 @@ function Frame(props) {
 /** The small prompt-time thumbnail (base64 RGB) as pixels; kept for plugins that used it. */
 export function ThumbView(props) {
   const frame = createMemo(() => thumbFrame(props.thumb))
-  return <Frame frame={frame()} />
+  return <Frame frame={frame()} background={props.background} />
 }
 
 const stills = new Map()
@@ -140,16 +153,18 @@ async function cachedStill(key, make) {
   return stills.get(key)
 }
 
-/** Pictures, GIFs, video and sound: soft until clicked, then sharp or playing; a second click goes back. */
+/** Pictures, GIFs, video and sound: small until clicked, then full size or playing; a second click goes back. */
 function MediaPreview(props) {
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   const [open, setOpen] = createSignal(false)
   const [playing, setPlaying] = createSignal()
-  // Sharp: as wide as the chat column allows (in steps of 8 columns, so a resize doesn't redo it for every
-  // column) and up to 60 % of the window's height. Soft: a small picture.
+  // Sharp: as wide as the chat column really is (measured: the sidebar and panes take their share; in steps of 8
+  // columns, so a resize doesn't redo it for every column) and up to 60 % of the window's height. Collapsed: small.
+  const [space, setSpace] = createSignal(0)
+  let host
   const full = createMemo(() => ({
-    columns: Math.max(16, Math.min(240, Math.floor((dimensions().width - 14) / 8) * 8)),
+    columns: Math.max(16, Math.min(240, Math.floor(((space() || dimensions().width - 14) - 2) / 8) * 8)),
     rows: Math.max(8, Math.floor(dimensions().height * 0.6)),
   }))
   const small = createMemo(() => ({ columns: Math.min(32, full().columns), rows: Math.min(10, full().rows) }))
@@ -162,10 +177,9 @@ function MediaPreview(props) {
   const [still] = createResource(
     () => (info.loading ? undefined : { file: source(), open: open(), ...(open() ? full() : small()) }),
     async ({ file, open, columns, rows }) => {
-      const blur = !open
       if (file && canDecode()) {
-        const key = `${file}:${columns}x${rows}:${blur}`
-        const frame = await cachedStill(key, () => stillFrame(file, info(), columns, rows, { blur, at: props.item.kind === "video" ? 1 : undefined, audio: audio() }))
+        const key = `${file}:${columns}x${rows}`
+        const frame = await cachedStill(key, () => stillFrame(file, info(), columns, rows, { at: props.item.kind === "video" ? 1 : undefined, audio: audio() }))
         if (frame) return frame
       }
       // No ffmpeg: ImageMagick's thumbnail, as before.
@@ -190,7 +204,7 @@ function MediaPreview(props) {
       if (!isOpen || !file) return
       if (animated() && canDecode()) {
         const { w, h } = fitFrame(info(), full().columns, full().rows)
-        stops.push(playFrames(file, w, h, (rgb) => setPlaying({ w, h, rgb }), Math.min(24, Math.max(8, Math.round(info()?.fps ?? 15)))))
+        stops.push(playFrames(file, w, h, (rgb) => setPlaying({ w, h, rgb, channels: 4, alpha: "pre" }), Math.min(24, Math.max(8, Math.round(info()?.fps ?? 15)))))
       }
       if (sound() && canPlaySound()) stops.push(playSound(file))
     }),
@@ -205,6 +219,8 @@ function MediaPreview(props) {
   }
   return (
     <box
+      ref={(r) => (host = r)}
+      onSizeChange={() => host && host.width > 0 && setSpace(host.width)}
       flexDirection="column"
       flexShrink={0}
       paddingTop={1}
@@ -216,7 +232,7 @@ function MediaPreview(props) {
       }}
     >
       <Show when={picture()} fallback={<text fg={theme.textMuted}>{audio() ? "♪ " : ""}{label()}</text>}>
-        <Frame frame={picture()} />
+        <Frame frame={picture()} background={props.background} />
         <text fg={theme.textMuted}>
           {audio() ? "♪ " : ""}
           {label()}
@@ -234,7 +250,7 @@ function fitFrame(info, columns, rows) {
   return { w: Math.max(2, Math.floor((width * scale) / 2) * 2), h: Math.max(2, Math.floor((height * scale) / 2) * 2) }
 }
 
-/** What a sent prompt carried: chips, pictures and media (soft until clicked), the head of text files. */
+/** What a sent prompt carried: chips, pictures and media (small until clicked), the head of text files. */
 export function AttachmentPreview(props) {
   const [open, setOpen] = createSignal(false)
   const media = () => ["image", "video", "audio"].includes(props.item.kind)
@@ -248,7 +264,7 @@ export function AttachmentPreview(props) {
       <AttachmentChip item={props.item} onPress={() => setOpen((value) => !value)} />
       <Show when={config.attachmentPreviews !== false}>
         <Show when={media() && (props.item.path || props.item.data || props.item.thumb)}>
-          <MediaPreview item={props.item} />
+          <MediaPreview item={props.item} background={props.background} />
         </Show>
         <Show when={props.item.kind === "text" && props.item.text}>
           <box paddingTop={1} paddingLeft={1} border={["left"]} borderColor={theme.border} onMouseUp={() => setOpen((value) => !value)}>

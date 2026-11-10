@@ -104,24 +104,30 @@ export function fit(width, height, columns, rows) {
   return { w, h }
 }
 
+// Pictures keep their transparency: frames come as premultiplied RGBA (`alpha: "pre"`, 4 bytes a pixel) and are
+// laid over the chat's own background when drawn. Flattening to RGB used to show whatever colour the transparent
+// pixels happened to store (white, mostly), and scaling straight alpha left dark fringes on the edges.
+const RGBA_IN = "format=rgba,premultiply=inplace=1"
+
 /**
- * One frame as raw RGB of w×h pixels: a still of an image, a video's frame at `at` seconds, or for sound
- * its cover art, else its waveform. `blur` softens it (the collapsed look).
+ * One frame of w×h pixels: a still of an image, a video's frame at `at` seconds, or for sound its cover art,
+ * else its waveform (RGB). Scaled by plain area averaging: no sharpening and no blur, which drew bright halos
+ * ("glow") around shapes and stacked on top of each other.
  */
-export async function stillFrame(file, info, columns, rows, { blur = false, at, audio = false } = {}) {
+export async function stillFrame(file, info, columns, rows, { at, audio = false } = {}) {
   const ffmpeg = tool("ffmpeg")
   if (!ffmpeg) return undefined
   if (audio && !info?.hasCover) {
     const { w, h } = { w: Math.max(8, Math.floor(columns / 2) * 2), h: Math.max(4, Math.min(rows, 8) * 2) }
-    const filter = `showwavespic=s=${w}x${h}:colors=0xfab283|0x5c9cf5:split_channels=0${blur ? ",boxblur=1:1" : ""},format=rgb24`
+    const filter = `showwavespic=s=${w}x${h}:colors=0xfab283|0x5c9cf5:split_channels=0,format=rgb24`
     const out = await run(ffmpeg, ["-v", "error", "-i", file, "-filter_complex", filter, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
     return out?.length >= w * h * 3 ? { w, h, rgb: out } : undefined
   }
   const { w, h } = fit(info?.width, info?.height, columns, rows)
-  const filters = [`scale=${w}:${h}:flags=lanczos`, ...(blur ? [`boxblur=${Math.max(1, Math.round(w / 40))}:1`] : []), "format=rgb24"].join(",")
+  const filters = [RGBA_IN, `scale=${w}:${h}:flags=area`, "format=rgba"].join(",")
   const seek = at !== undefined && info?.duration ? ["-ss", String(Math.min(at, Math.max(0, info.duration - 0.1)))] : []
-  const out = await run(ffmpeg, ["-v", "error", ...seek, "-i", file, "-map", "0:v:0", "-frames:v", "1", "-vf", filters, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-  return out?.length >= w * h * 3 ? { w, h, rgb: out.subarray(0, w * h * 3) } : undefined
+  const out = await run(ffmpeg, ["-v", "error", ...seek, "-i", file, "-map", "0:v:0", "-frames:v", "1", "-vf", filters, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+  return out?.length >= w * h * 4 ? { w, h, rgb: out.subarray(0, w * h * 4), channels: 4, alpha: "pre" } : undefined
 }
 
 const children = new Set()
@@ -136,18 +142,18 @@ function track(child) {
   return child
 }
 
-/** Decode a video/GIF in a loop at its own pace, handing each w×h RGB frame to `onFrame`; returns stop(). */
+/** Decode a video/GIF in a loop at its own pace, handing each w×h premultiplied RGBA frame to `onFrame`; returns stop(). */
 export function playFrames(file, w, h, onFrame, fps = 15) {
   const ffmpeg = tool("ffmpeg")
   if (!ffmpeg) return () => {}
   const child = track(
     spawn(
       ffmpeg,
-      ["-v", "error", "-stream_loop", "-1", "-re", "-i", file, "-map", "0:v:0", "-an", "-vf", `fps=${fps},scale=${w}:${h}:flags=bilinear,format=rgb24`, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+      ["-v", "error", "-stream_loop", "-1", "-re", "-i", file, "-map", "0:v:0", "-an", "-vf", `fps=${fps},${RGBA_IN},scale=${w}:${h}:flags=area,format=rgba`, "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
       { stdio: ["ignore", "pipe", "ignore"] },
     ),
   )
-  const size = w * h * 3
+  const size = w * h * 4
   let pending = Buffer.alloc(0)
   child.stdout.on("data", (chunk) => {
     pending = pending.length ? Buffer.concat([pending, chunk]) : chunk

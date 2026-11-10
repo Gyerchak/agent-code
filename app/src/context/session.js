@@ -631,12 +631,14 @@ export async function pollPlanUsage(force = false) {
  */
 function keepHit(current                             , next                             ) {
   const nearFull = (next?.utilization ?? 100) >= 90
-  if (current?.hit && nearFull && current.resetsAt && current.resetsAt > Date.now() && (!next?.resetsAt || next.resetsAt <= current.resetsAt + 60_000))
+  if (current?.hit && nearFull && current.resetsAt && current.resetsAt > Date.now() && (!next?.resetsAt || Math.abs(next.resetsAt - current.resetsAt) <= 60_000))
     return { ...current, utilization: Math.max(100, next?.utilization ?? 0) }
   return next
 }
 
-const windowKey = (type                    ) => (type === "five_hour" ? "fiveHour" : type?.startsWith("seven_day") ? "week" : undefined)
+// Only the plan-wide windows drive the two meters; per-model weekly windows (seven_day_opus, …) have their own
+// dates and used to overwrite the weekly meter's.
+const windowKey = (type                    ) => (type === "five_hour" ? "fiveHour" : type === "seven_day" ? "week" : undefined)
 
 /** A request was refused by a plan limit: show that window full (until it resets) and re-read the real numbers. */
 export function markLimitHit(type         , resetsAt         ) {
@@ -736,6 +738,11 @@ function applyUsage(usage) {
 }
 
 function applySharedUsage(usage                             ) {
+  // A window from before a reset (an older occ still running publishes what it last saw) doesn't replace a newer one.
+  const stale = (theirs, mine) =>
+    !!theirs?.resetsAt && !!mine?.resetsAt && mine.resetsAt > Date.now() && (theirs.resetsAt <= Date.now() || theirs.resetsAt < mine.resetsAt - 60_000)
+  if (stale(usage.week, limits.week) || stale(usage.fiveHour, limits.fiveHour))
+    usage = { ...usage, week: stale(usage.week, limits.week) ? limits.week : usage.week, fiveHour: stale(usage.fiveHour, limits.fiveHour) ? limits.fiveHour : usage.fiveHour }
   applyUsage(usage)
   if ("offer" in usage) setLimits("offer", usage.offer)
   checkAutoResume()
@@ -2942,7 +2949,9 @@ export function createSession(seed             ) {
           // Claude Code's live reading (from the response headers) is newer than the last poll: never show less.
           const value = percent(info.utilization)
           const current = limits[key                       ]
-          if (!current || current.hit || value >= current.utilization || !planExact)
+          // A different reset date is a new window (after a reset): take it even though it reads lower.
+          const moved = !!resetsAt && !!current?.resetsAt && Math.abs(resetsAt - current.resetsAt) > 60_000
+          if (!current || current.hit || moved || value >= current.utilization || !planExact)
           {
             setLimits(key                       , keepHit(current, { utilization: value, resetsAt: resetsAt ?? current?.resetsAt }))
             shareLimits()

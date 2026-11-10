@@ -222,27 +222,39 @@ export async function addThumb(attachment            , maxColumns = 36, maxRows 
     attachment.height = height
   }
   // One cell is one pixel wide and two tall (▀ with foreground on top, background below), so the pixels come
-  // out about square. Lanczos + a light unsharp keeps small text and edges readable; never enlarged (">").
-  const ppm = await run(
+  // out about square. Plain box averaging (-scale): no sharpening, which drew bright halos; never enlarged (">").
+  // Transparency is kept (RGBA, laid over the chat background when drawn): flattening put it on white.
+  const pam = await run(
     tool,
-    ["-", "-auto-orient", "-flatten", "-filter", "Lanczos", "-resize", `${maxColumns}x${maxRows * 2}>`, "-unsharp", "0x0.6+0.6+0.01", "-strip", "-depth", "8", "ppm:-"],
+    ["-", "-auto-orient", "-background", "none", "-flatten", "-scale", `${maxColumns}x${maxRows * 2}>`, "-strip", "-depth", "8", "pam:-"],
     input,
   )
-  const parsed = ppm && parsePpm(ppm)
+  const parsed = pam && parsePam(pam)
   if (!parsed) return
   const rows = Math.floor(parsed.height / 2)
   if (!rows || !parsed.width) return
-  attachment.thumb = { w: parsed.width, h: rows, rgb: parsed.pixels.subarray(0, parsed.width * rows * 2 * 3).toString("base64") }
+  const channels = parsed.depth
+  attachment.thumb = { w: parsed.width, h: rows, channels, rgb: parsed.pixels.subarray(0, parsed.width * rows * 2 * channels).toString("base64") }
 }
 
-function parsePpm(buffer        ) {
-  // P6\n<w> <h>\n<max>\n<bytes>
-  const header = buffer.subarray(0, 64).toString("latin1")
-  const match = header.match(/^P6\s+(\d+)\s+(\d+)\s+(\d+)\s/)
-  if (!match) return undefined
-  const width = Number(match[1])
-  const height = Number(match[2])
-  return { width, height, pixels: buffer.subarray(match[0].length) }
+/** A PAM image (P7, RGB or RGB_ALPHA, 8 bits). */
+function parsePam(buffer) {
+  const end = buffer.indexOf("ENDHDR\n")
+  if (end < 0 || buffer.subarray(0, 3).toString("latin1") !== "P7\n") return undefined
+  const header = Object.fromEntries(
+    buffer
+      .subarray(3, end)
+      .toString("latin1")
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter((parts) => parts.length >= 2),
+  )
+  const width = Number(header.WIDTH)
+  const height = Number(header.HEIGHT)
+  const depth = Number(header.DEPTH)
+  if (!width || !height || (depth !== 3 && depth !== 4) || Number(header.MAXVAL) !== 255) return undefined
+  const pixels = buffer.subarray(end + 7)
+  return pixels.length >= width * height * depth ? { width, height, depth, pixels } : undefined
 }
 
 /** Human size: 900 B, 12 KB, 3.4 MB. */
