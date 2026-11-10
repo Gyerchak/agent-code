@@ -567,8 +567,13 @@ function UserMessageView(props                          ) {
               <For each={props.message.attachments ?? []}>{(item) => <AttachmentPreview item={item} />}</For>
             </box>
           </Show>
-          <Show when={props.message.files.length || props.message.queued}>
+          <Show when={props.message.files.length || props.message.queued || props.message.unsent}>
             <box flexDirection="row" paddingTop={1} gap={1} flexWrap="wrap">
+              <Show when={props.message.unsent}>
+                <text fg={theme.background}>
+                  <span style={{ bg: theme.error, fg: theme.background, bold: true }}> {store.authRequired ? "NOT SENT · waiting for /login" : "NOT SENT · reconnecting"} </span>
+                </text>
+              </Show>
               <Show when={props.message.queued}>
                 <text fg={theme.background}>
                   <span style={{ bg: theme.warning, fg: theme.background, bold: true }}> QUEUED </span>

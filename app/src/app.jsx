@@ -35,7 +35,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, limits, onSessionEvent, pollPlanUsage } from "./context/session"
+import { AGENTS, agentIndex, claudeModelList, limits, onSessionEvent, pollPlanUsage } from "./context/session"
 import {
   active,
   app,
@@ -236,8 +236,51 @@ function cycleFavorite(direction        ) {
 }
 
 /** The only Claude models offered, in this order; the names are used until a Claude tab has reported its list. */
-const CLAUDE_MODELS = ["opus", "sonnet", "haiku"]
-const CLAUDE_NAMES                         = { opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" }
+// Claude models as Claude Code lists them (its newest ones included, e.g. Fable), in this order, others after.
+const CLAUDE_ORDER = ["opus", "fable", "sonnet", "haiku"]
+const CLAUDE_FALLBACK = [
+  { value: "opus", displayName: "Opus", resolvedModel: "claude-opus-5-5" },
+  { value: "claude-fable-5-1[1m]", displayName: "Fable", resolvedModel: "claude-fable-5-1" },
+  { value: "sonnet", displayName: "Sonnet", resolvedModel: "claude-sonnet-5-5" },
+  { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-5-5" },
+]
+const family = (model) => (model.resolvedModel ?? model.value).match(/opus|fable|sonnet|haiku/i)?.[0]?.toLowerCase()
+
+/** "5.2" from claude-fable-5-2, "5" from claude-opus-5, "4.5" from claude-haiku-4-5-20251001. */
+const versionOf = (model) => (model.resolvedModel ?? model.value).match(/-(\d+)(?:-(\d{1,2}))?(?=$|\[|-\d{8})/)
+const versionNumber = (model) => {
+  const match = versionOf(model)
+  return match ? Number(match[1]) + Number(match[2] ?? 0) / 100 : 0
+}
+
+/**
+ * Every Claude model Claude Code offers ("default" left out), named with its version ("Fable 5.1"). Current ones —
+ * Claude Code's aliases (opus, sonnet, haiku, fable) and each family's newest — come first; earlier versions are
+ * marked `older`. New models appear here as soon as Claude Code offers them.
+ */
+function claudeModels() {
+  const listed = (store.models.length ? store.models : claudeModelList()).filter((model) => model.value !== "default")
+  const list = listed.length ? listed : CLAUDE_FALLBACK
+  const newest = {}
+  for (const model of list) {
+    const key = family(model) ?? model.value
+    newest[key] = Math.max(newest[key] ?? 0, versionNumber(model))
+  }
+  const rank = (model) => {
+    const index = CLAUDE_ORDER.indexOf(family(model) ?? "")
+    return (index < 0 ? CLAUDE_ORDER.length : index) * 1000 - versionNumber(model)
+  }
+  return [...list]
+    .sort((a, b) => rank(a) - rank(b))
+    .map((model) => {
+      const version = versionOf(model)
+      const name = model.displayName.replace(/\s*\(.*\)$/, "")
+      const label = version && !/\d/.test(name) ? `${name} ${version[1]}${version[2] ? `.${version[2]}` : ""}` : name
+      const alias = CLAUDE_ORDER.includes(model.value)
+      const older = !alias && versionNumber(model) < (newest[family(model) ?? model.value] ?? 0)
+      return { ...model, displayName: label, older }
+    })
+}
 
 function DialogStash() {
   const [list, setList] = createSignal(config.stash ?? [])
@@ -430,9 +473,7 @@ function DialogModels() {
     }
     // Provider models look like Anthropic ones to the picker: "<provider>/<model>".
     const models = [
-      ...CLAUDE_MODELS.map((value) => store.models.find((model) => model.value === value) ?? { value, displayName: CLAUDE_NAMES[value], description: "" }).map(
-        (model) => ({ ...model, provider: "Anthropic" }),
-      ),
+      ...claudeModels().filter((model) => !model.older).map((model) => ({ ...model, provider: "Anthropic" })),
       ...external().flatMap((provider) =>
         provider.models.map((model) => ({
           value: `${provider.id}/${model.id}`,
@@ -443,6 +484,8 @@ function DialogModels() {
         })),
       ),
     ]
+    // Earlier Claude versions last, in their own group.
+    models.push(...claudeModels().filter((model) => model.older).map((model) => ({ ...model, provider: "Anthropic · older" })))
     const byValue = (value        ) => models.find((model) => model.value === value)
     const favorite = favs.map(byValue).filter(Boolean).map((model) => option(model       , "Favorites"))
     // A favourite or recent model shows in each list it belongs to, its provider's included.
@@ -1246,7 +1289,12 @@ function afterClaudeLogin() {
   forgetPlan()
   void refreshCatalog()
   void pollPlanUsage(true)
-  for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && !tab.store.engine) void tab.restart()
+  for (const tab of tabs()) {
+    if (tab.store.engine) continue
+    // Tabs held by the expired login (and their unsent prompts) come back now; other idle tabs restart.
+    if (tab.store.authRequired || tab.store.fatal) void tab.loggedIn()
+    else if (tab.live && tab.store.status === "idle") void tab.restart()
+  }
 }
 
 function DialogLogin() {

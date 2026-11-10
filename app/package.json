@@ -1,6 +1,6 @@
 {
   "name": "open-claude-code",
-  "version": "4.14.0",
+  "version": "4.16.0",
   "description": "Open Claude Code (occ): Claude Code with an opencode-style terminal UI",
   "scripts": {
     "build": "node scripts/build.mjs",

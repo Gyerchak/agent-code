@@ -11,7 +11,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { execFile, execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs"
 import { diffLines, structuredPatch } from "diff"
 import path from "node:path"
 import { AcpClient, acpContentText, acpToolInput, acpToolName, opencodeApi } from "./acp"
@@ -38,6 +38,11 @@ let claudeModels              = (() => {
     return []
   }
 })()
+
+/** The Claude models Claude Code offers with a Claude login (cached from the last such process). */
+export function claudeModelList() {
+  return claudeModels
+}
 
 function rememberClaudeModels(models             ) {
   if (!models.length || JSON.stringify(models) === JSON.stringify(claudeModels)) return
@@ -1034,6 +1039,18 @@ export function harnessSession(id                    ) {
   return harnessModel(config.sessionModels?.[id])?.harness.id
 }
 
+/** Whether Claude Code's credentials were written after `time` (a login since). */
+function credentialsChangedSince(time) {
+  try {
+    return statSync(path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), ".credentials.json")).mtimeMs > time
+  } catch {
+    return false
+  }
+}
+
+/** An error that means the Claude Code login has to be renewed. */
+const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expired|time limit and cannot be renewed|oauth token has expired|\b401\b/i
+
 export function storedEffort(model        )                          {
   if (!config.modelEffort) {
     config.modelEffort = config.effort && config.model ? { [config.model]: config.effort } : {}
@@ -1268,6 +1285,7 @@ export function createSession(seed             ) {
       void refreshMcp()
       void refreshUsage()
       void attachSurface(gen)
+      if (unsent.length) setTimeout(flushUnsent, 0)
       if (options.resume || options.continue) void refreshContext()
     } catch (error) {
       if (gen !== generation) return
@@ -1282,6 +1300,7 @@ export function createSession(seed             ) {
         setStore("booting", false)
         setStore("fatal", errorMessage(error))
       })
+      if (LOGIN_ERROR.test(errorMessage(error))) needLogin()
     }
   }
 
@@ -1302,6 +1321,7 @@ export function createSession(seed             ) {
         finishTurn({ error: errorMessage(error) })
         setStore("fatal", errorMessage(error))
       })
+      if (LOGIN_ERROR.test(errorMessage(error))) needLogin()
       if (isLimitError(errorMessage(error))) armAutoResume(api, limitResetTime(errorMessage(error)))
     }
   }
@@ -1773,6 +1793,74 @@ export function createSession(seed             ) {
   }
 
   // -------------------------------------------------------------------------
+  // Unsent prompts: kept while Claude Code is down or its login has to be renewed, sent once it runs again
+  // -------------------------------------------------------------------------
+
+  const unsent = []
+
+  /** The login expired or was refused: say so once, and hold prompts until /login. */
+  let loginNeededAt = 0
+  function needLogin() {
+    // Another provider's refused key is not Claude Code's login.
+    if (store.authRequired || splitModel(store.model) || oc) return
+    loginNeededAt = Date.now()
+    setStore("authRequired", true)
+    pushNotice("Claude Code's login has expired or was refused. Run /login — prompts you send meanwhile wait here and go out after you log in.", "warning")
+    emit("attention", { kind: "login" })
+  }
+
+  function holdUnsent(text, extra) {
+    const id = randomUUID()
+    batch(() => {
+      setStore("messages", (list) => [
+        ...list,
+        {
+          type: "user",
+          id,
+          text,
+          files: [...text.matchAll(/(?:^|\s)@([^\s]+)/g)].map((match) => match[1]),
+          unsent: true,
+          pastes: extra.pastes,
+          time: Date.now(),
+          attachments: extra.attachments?.length ? extra.attachments.map(attachmentMeta) : undefined,
+        },
+      ])
+      setStore("view", "session")
+      if (!store.title) setStore("title", text.split("\n")[0].slice(0, 80))
+    })
+    unsent.push({ id, text, extra })
+    emit("sent", { id })
+    // Logged in again outside occ (claude auth login in a terminal): the credentials changed, so go on.
+    if (store.authRequired && credentialsChangedSince(loginNeededAt)) return void loggedIn()
+    // Bring the process back (unless the login has to be renewed first).
+    if (!store.authRequired && !store.booting) void revive()
+  }
+
+  /** Start Claude Code again for this tab: resume its conversation, or begin it. */
+  async function revive() {
+    const started = store.messages.some((m) => m.type === "user" && !m.unsent)
+    if (store.sessionID && started) await start({ resume: store.sessionID })
+    else await start({ sessionId: store.sessionID ?? randomUUID() })
+  }
+
+  /** Send what waited, in order, now that the process runs. */
+  function flushUnsent() {
+    if (!current || store.fatal || store.authRequired || !unsent.length) return
+    const items = unsent.splice(0)
+    setStore("messages", (list) => list.filter((m) => !(m.type === "user" && m.unsent)))
+    for (const item of items) send(item.text, item.extra)
+  }
+
+  /** After /login: clear the hold, bring the process back and send what waited. */
+  async function loggedIn() {
+    if (oc) return
+    setStore("authRequired", undefined)
+    if (current && !store.fatal && store.status === "idle") await restart()
+    else if (!current || store.fatal) await revive()
+    flushUnsent()
+  }
+
+  // -------------------------------------------------------------------------
   // Pause: the work stops at its next tool call and goes on from there, so pausing and resuming send nothing
   // and cost nothing (a PreToolUse hook holds the call). Harnesses without hooks stop the turn instead and get
   // a short "continue" on resume.
@@ -1854,12 +1942,13 @@ export function createSession(seed             ) {
       return
     }
     if (oc) return sendOpencode(text, extra)
-    if (!current) {
-      if (store.dormant) {
-        void ensureStarted().then(() => send(text, extra))
-      }
+    if (!current && store.dormant && !store.authRequired) {
+      void ensureStarted().then(() => send(text, extra))
       return
     }
+    // The process is down (a failed login, a crash) or the login has to be renewed: the prompt stays in the chat,
+    // marked unsent, and goes out once Claude Code runs again — it used to be dropped without a trace.
+    if (!current || store.fatal || store.authRequired) return holdUnsent(text, extra)
     if (store.resumeAt !== undefined) cancelAutoResume(api)
     const id = randomUUID()
     const running = store.status === "running"
@@ -3178,6 +3267,7 @@ export function createSession(seed             ) {
       turn.sdkUuid = message.uuid
       if (msg.model && msg.model !== "<synthetic>") turn.model = msg.model
       if (message.error) turn.error = assistantError(message.error, msg)
+      if (message.error === "authentication_failed") needLogin()
       if (message.error === "rate_limit") limitRefusal = turn.error
       // Claude Code's stand-in reply when a request fails (e.g. a usage limit): show it once, as the error.
       if (msg.model === "<synthetic>") {
@@ -3363,6 +3453,7 @@ export function createSession(seed             ) {
     findToolPart,
     pause,
     resume,
+    loggedIn,
     modRender,
     modPress,
     modInput,

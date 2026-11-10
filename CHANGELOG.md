@@ -1,6 +1,6 @@
 # Changelog
 
-## v4.14.0 — first public release
+## v4.16.0 — first public release
 
 - Claude Code, opencode, DeepSeek Harness and Codex as engines in one terminal UI, with one model picker.
 - Providers (OpenAI, DeepSeek, OpenCode Zen/Go, Ollama, OpenAI-compatible) inside Claude Code via occ's proxy.
