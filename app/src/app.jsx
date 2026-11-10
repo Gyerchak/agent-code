@@ -282,6 +282,29 @@ function claudeModels() {
     })
 }
 
+/** How full a plan limit window gets before "Pause before a limit" pauses (default 90 %). */
+function DialogPauseAt() {
+  const current = config.pauseAt ?? 90
+  return (
+    <DialogSelect
+      title="Pause at"
+      current={String(current)}
+      options={[70, 75, 80, 85, 90, 95, 98, 99].map((value) => ({
+        title: `${value}%`,
+        value: String(value),
+        description: value === 90 ? "default" : value >= 98 ? "just before the limit" : undefined,
+      }))}
+      onSelect={(option) => {
+        config.pauseAt = Number(option.value)
+        if (config.pauseNearLimit === false) config.pauseNearLimit = true
+        saveConfig()
+        dialog.replace(() => <DialogSettings />, undefined, "large")
+        toast.show({ variant: "success", message: `Pausing at ${option.value}% of a plan limit` })
+      }}
+    />
+  )
+}
+
 function DialogStash() {
   const [list, setList] = createSignal(config.stash ?? [])
   return (
@@ -1584,7 +1607,8 @@ function DialogSettings() {
       get: flag("dropFiles", true),
       set: write("dropFiles"),
     },
-    { key: "pauseNearLimit", title: "Pause before a limit", description: "near a plan limit, pause until it resets (no failed request, no continue)", get: flag("pauseNearLimit", true), set: write("pauseNearLimit") },
+    { key: "pauseNearLimit", title: "Pause before a limit", description: "near a plan limit, pause until it resets (resume to go on up to 100%)", get: flag("pauseNearLimit", true), set: write("pauseNearLimit") },
+    { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
     { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what occ draws", get: () => modsEnabled(), set: () => {} },
@@ -1601,6 +1625,7 @@ function DialogSettings() {
       footer: (setting.get() ? "on" : "off") + (setting.tier && config.subagentPriority?.[setting.tier]?.length ? ` · ${config.subagentPriority[setting.tier] .length} first` : ""),
       gutter: <text fg={setting.get() ? theme.success : theme.textMuted}>{setting.get() ? "[x]" : "[ ]"}</text>,
       // Saving, restoring and resetting the settings are actions, not switches.
+      ...(setting.key === "pauseAt" ? { footer: `${config.pauseAt ?? 90}%`, gutter: <text fg={theme.textMuted}>{" % "}</text> } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
       ...(setting.key === "settings.reset" ? { footer: "reset", gutter: <text fg={theme.textMuted}>{" ↺ "}</text> } : {}),
@@ -1616,6 +1641,10 @@ function DialogSettings() {
       onSelect={(option) => {
         if (option.value === "mods.dialog") {
           dialog.replace(() => <DialogMods />, undefined, "large")
+          return
+        }
+        if (option.value === "pauseAt") {
+          dialog.replace(() => <DialogPauseAt />)
           return
         }
         if (option.value === "settings.save") {

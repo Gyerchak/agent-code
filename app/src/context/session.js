@@ -823,6 +823,16 @@ function resumeTime(session         )                     {
   return windows.reduce((a, b) => (b.utilization > a.utilization ? b : a)).resetsAt
 }
 
+// Limit windows whose pause the user resumed: no pause before them again until they reset (key → reset time).
+const waivedPauses = new Map()
+function waivePause(w) {
+  waivedPauses.set(w.key, w.resetsAt)
+}
+function waivedPause(w) {
+  const at = waivedPauses.get(w.key)
+  return at !== undefined && Math.abs(at - w.resetsAt) <= 60_000
+}
+
 /** True when a tab's model is the one a per-model limit ("Fable") is for. */
 export function onModel(store, name) {
   const needle = String(name).toLowerCase()
@@ -1958,10 +1968,10 @@ export function createSession(seed             ) {
   limitResetListeners.add(onLimitReset)
 
   /** Pause until `until` (ms; undefined = until resumed by hand). */
-  function pause(until, reason = "user") {
+  function pause(until, reason = "user", windows) {
     clearTimeout(pauseTimer)
     const stopped = !!oc && store.status === "running"
-    setStore("pause", { until, reason, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
+    setStore("pause", { until, reason, windows, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
     if (until) pauseTimer = setTimeout(() => resume(), Math.max(1000, until - Date.now()))
     if (stopped) void interrupt()
     emit("pause", { until, reason })
@@ -1973,6 +1983,11 @@ export function createSession(seed             ) {
     const was = store.pause
     if (!was) return
     setStore("pause", undefined)
+    // Resumed by hand before the reset: the user chose to go on up to 100 % of these windows.
+    if (was.reason === "limit" && (!was.until || Date.now() < was.until - 30_000)) {
+      for (const w of was.windows ?? []) waivePause(w)
+      if (was.windows?.length) pushNotice("Going on up to 100% of the limit: no more pauses before this window resets.", "info")
+    }
     for (const release of pauseWaiters.splice(0)) release()
     emit("pause", { resumed: true })
     if (was.interrupted && oc) send("Continue where you stopped.")
@@ -1988,17 +2003,25 @@ export function createSession(seed             ) {
 
   /**
    * "Pause before a limit": Anthropic refuses a request that would go past the plan limit, which costs a failed
-   * request and a "continue" later. Near the limit (pauseAt %, default 98) the work pauses until the window resets.
+   * request and a "continue" later. Near the limit (pauseAt %, default 90, a setting) the work pauses until the window
+   * resets. Resuming by hand goes on up to 100 %: that window doesn't pause again until it resets.
    */
   function pauseNearLimit() {
     if (config.pauseNearLimit === false || splitModel(store.model) || store.pause) return
-    const at = config.pauseAt ?? 98
+    const at = config.pauseAt ?? 90
     const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
-    const windows = [limits.fiveHour, limits.week, ...own].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at)
+    const windows = [
+      limits.fiveHour && { key: "fiveHour", ...limits.fiveHour },
+      limits.week && { key: "week", ...limits.week },
+      ...own.map((w) => ({ ...w, key: `scoped:${w.name}` })),
+    ].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at && !waivedPause(w))
     if (!windows.length) return
     const until = Math.max(...windows.map((w) => w.resetsAt)) + 30_000
-    pause(until, "limit")
-    pushNotice(`Paused before the plan limit (${Math.round(Math.max(...windows.map((w) => w.utilization)))}% used); resumes at ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} with nothing extra sent.`, "info")
+    pause(until, "limit", windows.map((w) => ({ key: w.key, resetsAt: w.resetsAt })))
+    pushNotice(
+      `Paused before the plan limit (${Math.round(Math.max(...windows.map((w) => w.utilization)))}% used, pausing at ${at}%); resumes at ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} with nothing extra sent. Resume to go on up to 100%.`,
+      "info",
+    )
   }
 
   /** The PreToolUse hook that holds a tool call while the tab is paused. */

@@ -410,7 +410,7 @@ export function PauseBar() {
       <text fg={paused() ? theme.warning : store.status === "running" ? theme.text : theme.textMuted} wrapMode="none" truncate>
         {label()}
         <Show when={paused() && hover()}>
-          <span style={{ fg: theme.textMuted }}> (click to resume)</span>
+          <span style={{ fg: theme.textMuted }}>{paused().reason === "limit" ? " (click to go on to 100%)" : " (click to resume)"}</span>
         </Show>
       </text>
     </box>
