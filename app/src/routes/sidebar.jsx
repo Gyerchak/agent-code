@@ -103,8 +103,26 @@ export function UsageSection() {
     <Switch>
       <Match when={kind() === "anthropic" && limits.available && (limits.fiveHour || limits.week)}>
         <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? `${catalog.planLabel ?? catalog.plan} plan` : ""}</text>}>
-          <Meter label="5-hour " window={limits.fiveHour} />
+          <Show when={limits.rolling !== false}>
+            <Meter label="5-hour " window={limits.fiveHour} />
+          </Show>
           <Meter label="Weekly " window={limits.week} />
+          {/* Per-model weekly limits (Fable on Max and up: at most a share of the weekly limit). */}
+          <For each={limits.scoped ?? []}>
+            {(w) => (
+              <box>
+                <Meter label={`${w.name} `.padEnd(7).slice(0, Math.max(7, w.name.length + 1))} window={w} />
+                <Show when={w.allowance}>
+                  <text fg={theme.textMuted}>up to {w.allowance}% of the weekly limit</text>
+                </Show>
+              </box>
+            )}
+          </For>
+          <Show when={limits.offer && limits.rolling !== false}>
+            <text fg={theme.warning} onMouseUp={() => runCommand("usage.reset")}>
+              ↻ {limits.offer.label} available{limits.offer.weekly ? " (counts toward weekly)" : ""}
+            </text>
+          </Show>
           <Show when={limits.extra}>
             {(extra                                        ) => (
               <text fg={theme.textMuted} onMouseUp={() => runCommand("usage.extra")}>

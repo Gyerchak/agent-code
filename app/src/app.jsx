@@ -1,7 +1,7 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
-import { billingLabel, contextText, modelMeta, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
+import { billingLabel, catalog, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
 import { lanAddress, phoneLink, phoneQr, phoneServerState, phoneSettings, phoneToken, setPhoneSetting, startPhoneServer, stopPhoneServer } from "./context/remote"
@@ -18,7 +18,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-import { forgetPlan } from "./context/usage"
+import { forgetPlan, planRate } from "./context/usage"
 import { config, listSavedSettings, reloadConfig, resetSettings, restoreSettings, saveConfig, saveSettings } from "./context/config"
 import {
   actions,
@@ -35,7 +35,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, claudeModelList, limits, onSessionEvent, pollPlanUsage } from "./context/session"
+import { AGENTS, agentIndex, claudeModelList, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -460,15 +460,32 @@ function DialogModels() {
     const recent = config.recentModels ?? []
     const favs = favorites()
     // Description: intelligence + context; footer: who pays and how much ($ per million input/output tokens).
+    // Claude on a plan: the API price ($ per million input/output tokens), how fast the model uses the plan next to
+    // Sonnet, and (once occ has measured the plan's worth, see planRate) what its tokens cost on the plan.
+    const rate = catalog.plan ? planRate(catalog.planLabel ?? catalog.plan, config.planPrice) : undefined
+    const sonnet = modelMeta("sonnet").price?.input
+    const claudeFacts = (model, meta) => {
+      if (meta.kind !== "anthropic" || !meta.price) return { facts: [], footer: undefined }
+      const facts = [`API ${priceText(meta.price)}`]
+      if (meta.billing !== "plan") return { facts, footer: undefined }
+      if (sonnet && meta.price.input !== sonnet) facts.push(`${Math.round((meta.price.input / sonnet) * 10) / 10}× Sonnet usage`)
+      const scoped = (limits.scoped ?? []).find((w) => [model.value, model.displayName, model.resolvedModel].some((v) => String(v ?? "").toLowerCase().includes(w.name.toLowerCase())))
+      if (scoped?.allowance) facts.push(`≤${scoped.allowance}% of weekly`)
+      if (!rate?.factor) return { facts, footer: undefined }
+      const plan = { input: meta.price.input * rate.factor, output: meta.price.output * rate.factor }
+      facts.push(`plan ≈${Math.max(1, Math.round(1 / rate.factor))}× cheaper`)
+      return { facts, footer: `${billingLabel(meta, model.provider)} ≈${priceText(plan)}` }
+    }
     const option = (model                                                                          , category        ) => {
       const meta = modelMeta(model.value, (model       ).resolvedModel)
-      const facts = meta.context ? `${contextText(meta.context)} ctx` : ""
+      const claude = claudeFacts(model, meta)
+      const facts = [meta.context ? `${contextText(meta.context)} ctx` : "", ...claude.facts].filter(Boolean).join(" · ")
       return {
         title: model.displayName,
         value: model.value,
         description: facts + (favs.includes(model.value) && category !== "Favorites" ? (facts ? " · " : "") + "favourite" : ""),
         category,
-        footer: billingLabel(meta, model.provider),
+        footer: claude.footer ?? billingLabel(meta, model.provider),
       }
     }
     // Provider models look like Anthropic ones to the picker: "<provider>/<model>".
@@ -1284,6 +1301,28 @@ async function claudeStatus() {
   }
 }
 
+/**
+ * Reset the 5-hour limit: an offer occ can see is used directly; otherwise Claude Code's own /limit-reset runs in
+ * this terminal (Anthropic may offer it only there), and occ reads the usage again afterwards.
+ */
+let appRenderer
+export async function resetLimit() {
+  if (limits.offer) {
+    const message = await useLimitReset(false)
+    return toast.show({ variant: /^5-hour limit reset/.test(message) ? "success" : "warning", message })
+  }
+  const claude = findBinary("claude")
+  if (!claude) return toast.show({ variant: "warning", message: "No limit reset is offered right now" })
+  const before = limits.fiveHour?.utilization ?? 0
+  await runInTerminal(appRenderer, claude, ["/limit-reset"], "Claude Code /limit-reset (quit Claude Code with /exit when done)")
+  await pollPlanUsage(true)
+  const after = limits.fiveHour?.utilization ?? 0
+  if (before >= 90 && after < before - 20) {
+    limitWasReset()
+    toast.show({ variant: "success", message: "5-hour limit reset" })
+  } else toast.show({ variant: "info", message: "The 5-hour limit wasn't reset" })
+}
+
 /** After a Claude Code login or logout: the plan and usage may be another account's; idle tabs pick it up now. */
 function afterClaudeLogin() {
   forgetPlan()
@@ -1516,6 +1555,7 @@ function DialogSettings() {
     { key: "subagentPick", title: "  Claude picks", description: "Claude chooses each subagent's model + effort", get: flag("subagentPick", true), set: write("subagentPick"), restart: true },
     { key: "subagentSame", title: "  Same as session", description: "always this session's model + effort", get: flag("subagentSame", false), set: write("subagentSame"), restart: true },
     { key: "autoResume", title: "Auto resume", description: "continue after a 5-hour/weekly limit resets", get: flag("autoResume", false), set: write("autoResume") },
+    { key: "autoLimitReset", title: "  Use limit resets", description: "with auto resume: use a 5-hour reset Anthropic offers at the limit", get: flag("autoLimitReset", true), set: write("autoLimitReset") },
     { key: "autoModel", title: "Auto model", description: "Haiku picks model + effort for new sessions", get: flag("autoModel", false), set: write("autoModel") },
     {
       key: "smallSessions",
@@ -1752,6 +1792,7 @@ function Home() {
 
 export function App() {
   const renderer = useRenderer()
+  appRenderer = renderer
   const dimensions = useTerminalDimensions()
 
   setDialogRefocus(() => focusPrompt())
@@ -2013,6 +2054,14 @@ export function App() {
       slash: "skills",
       enabled: () => store.commands.length > 0,
       run: () => dialog.replace(() => <DialogSkills />, undefined, "large"),
+    },
+    {
+      id: "usage.reset",
+      title: limits.offer ? `Use ${limits.offer.label}` : "Reset the 5-hour limit (Claude Code)",
+      category: "System",
+      slash: "limit-reset",
+      enabled: () => limits.rolling !== false,
+      run: () => void resetLimit(),
     },
     {
       id: "usage.extra",

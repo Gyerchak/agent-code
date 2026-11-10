@@ -6,14 +6,14 @@ import { modelVariants } from "../context/variants"
 import { catalog, modelMeta } from "../context/catalog"
 import { local, pollLocal } from "../context/local"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createMemo, For, Match, on, onCleanup, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js"
 import { createStore } from "solid-js/store"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { config, saveConfig } from "../context/config"
 import { clock, draft, exit, focusPrompt, SIDEBAR_DOCK_WIDTH, sidebarShown, promptMode, refs, setPromptMode, setRoute, showDetails } from "../context/app"
 import { allCommands, leaderActive, matchesId, runCommand, shortcut, useLayer } from "../context/keymap"
-import { agentIndex, limits, stripAnsi } from "../context/session"
+import { agentIndex, limits, onModel, stripAnsi } from "../context/session"
 import { active, currentAgent, interrupt, modelLabel, pickModel, store } from "../context/tabs"
 import { agentColor, syntax, theme, tint } from "../context/theme"
 import { listFiles, rankFiles } from "../context/files"
@@ -645,14 +645,29 @@ export function Prompt(props                                         ) {
   const kind = createMemo(() => providerKind(store.model))
   const roomForLimits = () => (props.home ? width() >= 70 : dimensions().width >= 60)
   const showLimits = createMemo(() => kind() === "anthropic" && !!limits.available && !!(limits.fiveHour || limits.week) && roomForLimits())
+  // A per-model weekly limit (Fable on Max and up) shows while a tab is on that model.
+  const ownScoped = createMemo(() => (kind() === "anthropic" ? (limits.scoped ?? []).find((w) => onModel(store, w.name)) : undefined))
+  // A 5-hour reset Anthropic offers at the limit: a button at the bottom left.
+  const resetOffer = createMemo(() => !props.home && kind() === "anthropic" && limits.rolling !== false && !!limits.offer && (limits.fiveHour?.utilization ?? 0) >= 99)
+  const RESET_LABEL = "↻ reset 5h limit"
+  // The footer row's real width (the sidebar, docked mod panes and padding are already taken off).
+  const [rowWidth, setRowWidth] = createSignal(0)
+  let footerRow
+  // What the left side needs: the scanner while working, the folder (truncated) otherwise.
+  const leftReserve = createMemo(() => {
+    let size = store_.routing || running() ? 9 : 12
+    if (running() && store_.interrupt > 0) size += 23
+    if (resetOffer()) size += RESET_LABEL.length + 2
+    return size
+  })
   const showGo = createMemo(() => kind() === "go" && !!catalog.go && roomForLimits())
 
-  // The footer's right side is one line, so it gets a width budget: tokens and cost always show, then the
-  // warning and resume time, then the plan meters, and the key hints only when there is room left. Whatever
-  // doesn't fit is left out whole (the row used to run off the edge and cut the cost off).
+  // The footer is one line, so its right side gets a width budget measured from the real row: tokens and cost
+  // always show, then the warning and resume time, then the plan meters (with reset times, then without, and
+  // only then fewer of them), and the key hints only when there is room left. Nothing may push the cost off.
   const fit = createMemo(() => {
     const GAP = 2
-    let left = width() - 18 // the prompt's border and padding, and at least this much of the folder path
+    let left = (rowWidth() || width()) - leftReserve() - GAP - 1
     const take = (size) => {
       if (!size) return true
       if (size + GAP > left) return false
@@ -664,13 +679,26 @@ export function Prompt(props                                         ) {
     if (!props.home && warning()) take(warning().text.length)
     if (store.resumeAt !== undefined) take(18)
     if (subagents()) take(subagents().length)
-    const bar = 22 // "5h ▰▰▰▱▱▱ 42% 2h13m"
-    const fiveHour = showLimits() && !!limits.fiveHour && take(bar)
-    const week = showLimits() && !!limits.week && take(bar)
-    const go = showGo() && take(bar * [catalog.go?.rolling, catalog.go?.weekly, catalog.go?.monthly].filter(Boolean).length)
+    const shown = {}
+    let compact = false
+    if (showLimits()) {
+      // The fuller of 5h/week first, then the other, then this model's own weekly limit.
+      const main = [
+        limits.fiveHour && { key: "fiveHour", label: "5h", window: limits.fiveHour },
+        limits.week && { key: "week", label: "wk", window: limits.week },
+      ].filter(Boolean).sort((a, b) => barUsed(b.window) - barUsed(a.window))
+      const bars = [...main, ownScoped() && { key: "scoped", label: ownScoped().name.slice(0, 2).toLowerCase(), window: ownScoped() }].filter(Boolean)
+      const room = (list, reset) => list.reduce((sum, bar) => sum + barLength(bar.label, bar.window, reset) + GAP, 0)
+      let list = bars
+      while (list.length && room(list, false) > left) list = list.slice(0, -1)
+      compact = room(list, true) > left
+      left -= room(list, !compact)
+      for (const bar of list) shown[bar.key] = true
+    }
+    const go = showGo() && take(22 * [catalog.go?.rolling, catalog.go?.weekly, catalog.go?.monthly].filter(Boolean).length)
     const commands = take(shortcut("command.palette.show").length + 9)
     const agents = width() >= 44 && take(shortcut("agent.cycle").replace("shift+tab", "tab").length + 7)
-    return { fiveHour, week, go, commands, agents }
+    return { fiveHour: !!shown.fiveHour, week: !!shown.week, scoped: !!shown.scoped, compact, go, commands, agents }
   })
 
   const metadata = createMemo(() => {
@@ -905,8 +933,22 @@ export function Prompt(props                                         ) {
         >
           <box height={1} border={["bottom"]} borderColor={promptBg()} customBorderChars={{ ...EmptyBorder, horizontal: "▀" }} />
         </box>
-        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
-          <box flexGrow={1} flexShrink={1} minWidth={Math.min(28, Math.floor(width() / 3))}>
+        <box
+          ref={(r) => (footerRow = r)}
+          onSizeChange={() => footerRow && setRowWidth(footerRow.width)}
+          width="100%"
+          flexDirection="row"
+          justifyContent="space-between"
+          gap={2}
+        >
+          <box flexGrow={1} flexShrink={1} minWidth={leftReserve()} flexDirection="row" gap={2}>
+            <Show when={resetOffer()}>
+              <box flexShrink={0} backgroundColor={theme.backgroundElement} onMouseUp={() => runCommand("usage.reset")}>
+                <text fg={theme.warning} wrapMode="none">
+                  {RESET_LABEL}
+                </text>
+              </box>
+            </Show>
             <Switch>
               <Match when={store_.routing}>
                 <box flexDirection="row" gap={1} flexGrow={1}>
@@ -923,15 +965,12 @@ export function Prompt(props                                         ) {
                   <box marginLeft={1}>
                     <Scanner color={color()} />
                   </box>
-                  <Show when={store.compacting}>
-                    <text fg={theme.textMuted}>compacting…</text>
+                  {/* Just the animation: compaction shows in the chat, and esc's hint only once it was pressed. */}
+                  <Show when={store_.interrupt > 0}>
+                    <text fg={theme.warning} wrapMode="none" truncate flexShrink={1}>
+                      esc again to interrupt
+                    </text>
                   </Show>
-                  <text fg={store_.interrupt > 0 ? theme.warning : theme.text} wrapMode="none" truncate flexShrink={1}>
-                    esc{" "}
-                    <span style={{ fg: store_.interrupt > 0 ? theme.warning : theme.textMuted }}>
-                      {store_.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                    </span>
-                  </text>
                 </box>
               </Match>
               <Match when={store.booting}>
@@ -977,10 +1016,13 @@ export function Prompt(props                                         ) {
                     {shortcut("command.palette.show")} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
                 </Show>
-                <Show when={fit().fiveHour || fit().week}>
+                <Show when={fit().fiveHour || fit().week || fit().scoped}>
                   <box flexDirection="row" gap={2} flexShrink={0}>
-                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={w()} />}</Show>
-                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={w()} />}</Show>
+                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={w()} reset={!fit().compact} />}</Show>
+                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={w()} reset={!fit().compact} />}</Show>
+                    <Show when={fit().scoped && ownScoped()}>
+                      {(w) => <UsageBar label={w().name.slice(0, 2).toLowerCase()} window={w()} reset={!fit().compact} />}
+                    </Show>
                   </box>
                 </Show>
                 <Show when={fit().go}>
@@ -1030,10 +1072,20 @@ export function shortReset(at        ) {
   return `${Math.floor(hours / 24)}d${hours % 24}h`
 }
 
+/** A window's used share; one whose reset time has passed is empty, even before the next poll confirms it. */
+export function barUsed(window) {
+  return window.resetsAt && window.resetsAt <= clock() ? 0 : window.utilization
+}
+
+/** Columns a footer UsageBar takes: "5h ▰▰▰▱▱▱ 42%" and, with `reset`, " 2h13m". */
+function barLength(label, window, reset) {
+  const time = reset && window.resetsAt && window.resetsAt > clock() ? 1 + shortReset(window.resetsAt).length : 0
+  return label.length + 1 + BAR_WIDTH + 1 + String(Math.round(barUsed(window))).length + 1 + time
+}
+
 export function UsageBar(props                                                                             ) {
   const width = () => props.width ?? BAR_WIDTH
-  // A window whose reset time has passed is empty, even before the next poll confirms it.
-  const used = () => (props.window.resetsAt && props.window.resetsAt <= clock() ? 0 : props.window.utilization)
+  const used = () => barUsed(props.window)
   const filled = () => Math.min(width(), Math.round((used() / 100) * width()))
   const color = () => (used() >= 90 ? theme.error : used() >= 75 ? theme.warning : theme.success)
   return (

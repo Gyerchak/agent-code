@@ -26,7 +26,7 @@ import { ensureBoxTrusted } from "./box"
 import { occMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
-import { fetchPlanUsage, isLimitError, limitResetTime, onSharedPlanUsage, planDetails, publishPlanUsage } from "./usage"
+import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
 // renames every Claude alias to that provider's model (and drops some), so those tabs use this list.
@@ -577,8 +577,9 @@ function updateLimitsFromUsage(usage     ) {
       : undefined
   setLimits({
     available: true,
-    fiveHour: window(usage.rate_limits.five_hour),
-    week: window(usage.rate_limits.seven_day),
+    // Claude Code's own reading leaves windows out now and then: keep the last known one rather than dropping it.
+    fiveHour: window(usage.rate_limits.five_hour) ?? (limits.rolling === false ? undefined : limits.fiveHour),
+    week: window(usage.rate_limits.seven_day) ?? limits.week,
     updated: Date.now(),
   })
 }
@@ -609,15 +610,13 @@ export async function pollPlanUsage(force = false) {
       if (plan && plan.type !== catalog.plan) setCatalog("plan", plan.type)
       if (plan && plan.label !== catalog.planLabel) setCatalog("planLabel", plan.label)
     })
-    if (usage)
-      setLimits({
-        available: true,
-        fiveHour: keepHit(limits.fiveHour, usage.fiveHour),
-        week: keepHit(limits.week, usage.week),
-        all: usage.all,
-        extra: usage.extra,
-        updated: Date.now(),
-      })
+    if (usage) {
+      applyUsage(usage)
+      if (catalog.plan && !usage.week?.hit) samplePlanRate(usage.week?.utilization, catalog.planLabel ?? catalog.plan)
+    }
+    // At the 5-hour wall Anthropic may offer a reset: look (at most once a minute).
+    if (limits.rolling !== false && (limits.fiveHour?.utilization ?? 0) >= 99) void checkResetOffer()
+    else if (limits.offer) setLimits("offer", undefined)
     checkAutoResume()
     return planExact
   } finally {
@@ -644,29 +643,101 @@ export function markLimitHit(type         , resetsAt         ) {
   let key = windowKey(type)
   if (!key) {
     // Unknown window (e.g. only an error text): the fuller of the two.
-    key = (limits.week?.utilization ?? 0) > (limits.fiveHour?.utilization ?? 0) ? "week" : "fiveHour"
+    key = limits.fiveHour && (limits.fiveHour.utilization ?? 0) >= (limits.week?.utilization ?? 0) ? "fiveHour" : "week"
   }
+  // A plan without a rolling limit (Ultra) can only be stopped by a weekly one.
+  if (key === "fiveHour" && limits.rolling === false) key = "week"
   const current = limits[key                       ]
   setLimits(key                       , { utilization: 100, resetsAt: resetsAt ?? current?.resetsAt, hit: true })
   setLimits("available", true)
   shareLimits()
   void pollPlanUsage(true)
+  if (key === "fiveHour") void checkResetOffer(true)
+}
+
+// ---------------------------------------------------------------------------
+// Limit resets Anthropic offers at the 5-hour wall (see fetchResetOffer). Shown as a button at the bottom left;
+// with auto-resume on (and "Use limit resets" not turned off) it is used by itself once the limit is reached.
+// ---------------------------------------------------------------------------
+
+const limitResetListeners = new Set()
+let claiming = false
+
+/** Re-read the offer (after a 5-hour limit hit); claim it at once when auto-resume may. */
+export async function checkResetOffer(force = false) {
+  if (limits.rolling === false) return
+  const offer = await fetchResetOffer(force)
+  if (JSON.stringify(offer) !== JSON.stringify(limits.offer)) {
+    setLimits("offer", offer)
+    shareLimits()
+  }
+  const blocked = (limits.fiveHour?.utilization ?? 0) >= 99
+  if (offer && blocked && config.autoResume === true && config.autoLimitReset !== false) await useLimitReset(true)
+}
+
+/** The 5-hour limit was reset (here or by Claude Code's own /limit-reset): waiting and paused tabs go on now. */
+export function limitWasReset() {
+  setLimits("fiveHour", { utilization: 0, resetsAt: undefined })
+  setLimits("offer", undefined)
+  shareLimits()
+  void pollPlanUsage(true)
+  for (const session of waitingResume) if (!session.disposed && session.store.resumeAt !== undefined) setResumeAt(session, Date.now())
+  checkAutoResume()
+  for (const fn of limitResetListeners) fn()
+}
+
+/** Use the offered reset. Resolves to a sentence for the user. */
+export async function useLimitReset(auto = false) {
+  const offer = limits.offer
+  if (!offer || claiming) return claiming ? "A limit reset is already on its way" : "No limit reset is offered right now"
+  claiming = true
+  try {
+    const result = await claimResetOffer(offer)
+    setLimits("offer", undefined)
+    if (result === "reset") {
+      log(`limit reset used${auto ? " automatically" : ""}`)
+      limitWasReset()
+      return `5-hour limit reset${offer.weekly ? " · it still counts toward your weekly limit" : ""}`
+    }
+    void checkResetOffer(true)
+    return {
+      already_used: "This week's limit reset was already used",
+      not_limited: "Nothing to reset: the 5-hour limit isn't reached",
+      ineligible: "A limit reset isn't available for this account right now",
+      auth_error: "Couldn't reset the limit with this login: run /login, then try again",
+      rate_limited: "Couldn't reset the limit right now: try again in a moment",
+    }[result] ?? "Couldn't reset the limit right now: try again in a moment"
+  } finally {
+    claiming = false
+  }
 }
 
 /** Hand what this window knows to every other occ window (they pick it up within ~2 s). */
 function shareLimits() {
-  publishPlanUsage({ fiveHour: limits.fiveHour, week: limits.week, all: limits.all, extra: limits.extra })
+  publishPlanUsage({ fiveHour: limits.fiveHour, week: limits.week, all: limits.all, scoped: limits.scoped, rolling: limits.rolling, extra: limits.extra, offer: limits.offer })
 }
 
-function applySharedUsage(usage                             ) {
+/**
+ * Take a reading from Anthropic (or another occ window). A plan without a rolling window (Ultra) has no 5-hour
+ * meter at all; a weekly window missing from one reading keeps its last value instead of vanishing.
+ */
+function applyUsage(usage) {
+  const rolling = usage.rolling ?? limits.rolling
   setLimits({
     available: true,
-    fiveHour: keepHit(limits.fiveHour, usage.fiveHour),
-    week: keepHit(limits.week, usage.week),
+    rolling,
+    fiveHour: rolling === false ? undefined : keepHit(limits.fiveHour, usage.fiveHour),
+    week: keepHit(limits.week, usage.week) ?? (usage.week === undefined && limits.week?.resetsAt > Date.now() ? limits.week : undefined),
     all: usage.all ?? limits.all,
+    scoped: usage.scoped ?? limits.scoped,
     extra: usage.extra ?? limits.extra,
     updated: Date.now(),
   })
+}
+
+function applySharedUsage(usage                             ) {
+  applyUsage(usage)
+  if ("offer" in usage) setLimits("offer", usage.offer)
   checkAutoResume()
 }
 
@@ -737,12 +808,18 @@ function resumeTime(session         )                     {
   const go = providerKind(session.store.model) === "go"
   if (!go && splitModel(session.store.model)) return undefined
   const windows = (go ? [catalog.go?.rolling, catalog.go?.weekly, catalog.go?.monthly] : [limits.fiveHour, limits.week, ...(limits.all ?? [])]).filter(
-    (w)                       => !!w && !!w.resetsAt && w.resetsAt > Date.now(),
+    (w)                       => !!w && !!w.resetsAt && w.resetsAt > Date.now() && (!w.model || onModel(session.store, w.model)),
   )
   if (!windows.length) return undefined
   const full = windows.filter((w) => w.utilization >= 99)
   if (full.length) return Math.max(...full.map((w) => w.resetsAt ))
   return windows.reduce((a, b) => (b.utilization > a.utilization ? b : a)).resetsAt
+}
+
+/** True when a tab's model is the one a per-model limit ("Fable") is for. */
+export function onModel(store, name) {
+  const needle = String(name).toLowerCase()
+  return [store.modelId, store.model].some((m) => typeof m === "string" && m.toLowerCase().includes(needle))
 }
 
 /** A turn was refused by a limit: wait for the reset, then continue on our own. */
@@ -1359,6 +1436,7 @@ export function createSession(seed             ) {
   function dispose() {
     stop()
     disposed = true
+    limitResetListeners.delete(onLimitReset)
     clearTimeout(mcpPoll)
     emit("closed")
   }
@@ -1868,6 +1946,9 @@ export function createSession(seed             ) {
 
   let pauseWaiters = []
   let pauseTimer
+  // A limit reset was used: a pause before the limit is over.
+  const onLimitReset = () => store.pause?.reason === "limit" && resume()
+  limitResetListeners.add(onLimitReset)
 
   /** Pause until `until` (ms; undefined = until resumed by hand). */
   function pause(until, reason = "user") {
@@ -1905,7 +1986,8 @@ export function createSession(seed             ) {
   function pauseNearLimit() {
     if (config.pauseNearLimit === false || splitModel(store.model) || store.pause) return
     const at = config.pauseAt ?? 98
-    const windows = [limits.fiveHour, limits.week].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at)
+    const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
+    const windows = [limits.fiveHour, limits.week, ...own].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at)
     if (!windows.length) return
     const until = Math.max(...windows.map((w) => w.resetsAt)) + 30_000
     pause(until, "limit")
@@ -3382,6 +3464,8 @@ export function createSession(seed             ) {
           message.total_cost_usd >= store.lastResultCost ? message.total_cost_usd - store.lastResultCost : message.total_cost_usd
         setStore("cost", (cost) => cost + delta)
         setStore("lastResultCost", message.total_cost_usd)
+        // Claude on the plan: count it toward the plan's measured worth (see planRate).
+        if (catalog.plan && !splitModel(store.model)) notePlanSpend(delta)
       }
       finishTurn({ error: error && !interrupted ? error : undefined })
       setStore("compacting", false)

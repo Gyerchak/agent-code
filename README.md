@@ -19,7 +19,8 @@ occ drives Claude Code through the Claude Agent SDK and the other harnesses thro
   timeline, session list.
 - **Attachments** — drop or paste files of any kind; pictures, GIFs, video and sound preview in the chat
   (click to view full size or play).
-- **Plan usage at a glance** — exact 5-hour and weekly Claude plan meters, auto-resume after a limit resets.
+- **Plan usage at a glance** — exact 5-hour, weekly and per-model (Fable) Claude plan meters, auto-resume after a
+  limit resets, a one-click 5-hour reset when Anthropic offers one, and each model's API and effective plan price.
 - **Extensible** — Claude Code mods (plugins with UI) are drawn in occ; occ has its own plugin API as well.
 - **33 themes**, subagent views, MCP servers, skills, voice input/output (optional), and much more.
 
