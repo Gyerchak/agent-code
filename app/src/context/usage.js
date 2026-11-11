@@ -303,7 +303,9 @@ export function planRate(label, price) {
   if (!rate.perPercent || (label && rate.plan && rate.plan !== label)) return undefined
   const monthly = rate.perPercent * 100 * (30.44 / 7)
   const cost = price ?? PLAN_PRICES[String(label ?? "").toLowerCase()]
-  return { perPercent: rate.perPercent, monthly, factor: cost ? cost / monthly : undefined, samples: rate.samples ?? 1 }
+  // Shown only once it is believable: a few readings, and a plan that comes out cheaper than the API.
+  const factor = cost && (rate.samples ?? 1) >= 3 && cost / monthly < 1 ? cost / monthly : undefined
+  return { perPercent: rate.perPercent, monthly, factor, samples: rate.samples ?? 1 }
 }
 
 // ---------------------------------------------------------------------------

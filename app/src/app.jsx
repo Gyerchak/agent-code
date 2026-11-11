@@ -25,7 +25,9 @@ import {
   actions,
   exit,
   focusPrompt,
+  promptMode,
   refs,
+  setPromptMode,
   route,
   setRoute,
   setSidebarOpen,
@@ -370,6 +372,94 @@ function DialogPauseAt(props) {
       }}
     />
   )
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees and the session terminal (opencode's desktop has both; here each opens in its own window)
+// ---------------------------------------------------------------------------
+
+const gitOut = (cwd, ...args) => {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 })
+  return result.status === 0 ? String(result.stdout).trim() : undefined
+}
+
+/** A new terminal window running `command` in `cwd` (acode-window finds the terminal app). */
+function openWindow(cwd, command, title) {
+  const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-window")
+  if (isWindows || !existsSync(launcher)) return toast.show({ variant: "warning", message: `Open a terminal in ${cwd} and run: ${command.join(" ")}`, duration: 8000 })
+  spawn(launcher, ["--title", title, ...command], { cwd, detached: true, stdio: "ignore" }).unref()
+}
+
+const openWorktree = (dir) => openWindow(dir, [path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode"), dir], APP_NAME)
+
+/** Git worktrees of this project: pick one to open Agent Code there in a new window, or make a new one. */
+function DialogWorktrees() {
+  const list = () =>
+    (gitOut(store.cwd, "worktree", "list", "--porcelain") ?? "")
+      .split("\n\n")
+      .map((block) => ({ dir: block.match(/^worktree (.+)$/m)?.[1], branch: block.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? "(detached)" }))
+      .filter((item) => item.dir)
+  return (
+    <DialogSelect
+      title="Worktrees"
+      emptyText="Not a git repository"
+      options={[
+        ...list().map((item) => ({ title: item.branch, value: item.dir, description: item.dir, footer: item.dir === store.cwd ? "here" : "open in a new window" })),
+        ...(gitOut(store.cwd, "rev-parse", "--show-toplevel") ? [{ title: "New worktree…", value: "new", description: "a new branch in its own folder, from a base branch you choose" }] : []),
+      ]}
+      onSelect={(option) => {
+        if (option.value === "new") return newWorktree()
+        dialog.clear()
+        if (option.value !== store.cwd) openWorktree(option.value)
+      }}
+    />
+  )
+}
+
+/** New worktree: a name, then the base branch (opencode's "Choose base branch"), then it opens in a new window. */
+function newWorktree() {
+  const root = gitOut(store.cwd, "rev-parse", "--show-toplevel")
+  if (!root) return toast.show({ variant: "warning", message: "Not a git repository" })
+  dialog.replace(() => (
+    <DialogPrompt
+      title="New worktree: branch name"
+      placeholder="e.g. fix-login"
+      onConfirm={(name) => {
+        name = name.trim().replace(/\s+/g, "-")
+        if (!name) return dialog.clear()
+        const branches = (gitOut(root, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads") ?? "").split("\n").filter(Boolean)
+        const current = gitOut(root, "branch", "--show-current")
+        dialog.replace(() => (
+          <DialogSelect
+            title={`Base branch for ${name}`}
+            current={current}
+            options={branches.map((branch) => ({ title: branch, value: branch, description: branch === current ? "current" : undefined }))}
+            onSelect={(base) => {
+              const dir = path.join(path.dirname(root), `${path.basename(root)}-${name}`)
+              const made = spawnSync("git", ["worktree", "add", "-b", name, dir, base.value], { cwd: root, encoding: "utf8", timeout: 60_000 })
+              dialog.clear()
+              if (made.status !== 0) return toast.show({ variant: "error", title: "Worktree not created", message: String(made.stderr || made.stdout).trim().slice(0, 300), duration: 8000 })
+              toast.show({ variant: "success", message: `Worktree ${name} (from ${base.value}) at ${dir}`, duration: 5000 })
+              openWorktree(dir)
+            }}
+          />
+        ))
+      }}
+    />
+  ))
+}
+
+/**
+ * The session's own terminal: a window in the tab's folder. With zellij or tmux installed it is a named session that
+ * keeps running (and its scrollback) when the window or Agent Code closes; opening it again attaches to it.
+ */
+function openTerminal() {
+  const name = `acode-${(store.sessionID ?? path.basename(store.cwd)).replace(/[^a-zA-Z0-9]/g, "").slice(0, 12)}`
+  const zellij = findBinary("zellij")
+  const tmux = findBinary("tmux")
+  const command = zellij ? [zellij, "attach", "--create", name] : tmux ? [tmux, "new-session", "-A", "-s", name] : [process.env.SHELL || "sh"]
+  openWindow(store.cwd, command, `${store.title?.slice(0, 40) ?? "Terminal"} · terminal`)
+  if (!zellij && !tmux) toast.show({ variant: "info", message: "Opened a plain shell. Install zellij or tmux and the session's terminal will survive closing its window.", duration: 6000 })
 }
 
 function DialogStash() {
@@ -2370,6 +2460,15 @@ export function App() {
         void newSession()
         dialog.clear()
       },
+    },
+    { id: "worktree.list", title: "Worktrees", category: "Session", slash: "worktree", slashAliases: ["worktrees"], run: () => dialog.replace(() => <DialogWorktrees />, undefined, "large") },
+    { id: "worktree.new", title: "New worktree (choose base branch)", category: "Session", run: () => newWorktree() },
+    { id: "terminal.open", title: "Session terminal", category: "Session", slash: "terminal", run: () => openTerminal() },
+    {
+      id: "prompt.shell.toggle",
+      title: promptMode() === "shell" ? "Leave shell mode" : "Shell mode",
+      category: "Prompt",
+      run: () => setPromptMode(promptMode() === "shell" ? "normal" : "shell"),
     },
     {
       id: "tab.reopen",

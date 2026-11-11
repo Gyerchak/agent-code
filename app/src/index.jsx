@@ -6,6 +6,7 @@ import * as solid from "solid-js"
 import * as solidStore from "solid-js/store"
 import { createRoot } from "solid-js"
 import { statSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { App } from "./app"
 import { refreshCatalog } from "./context/catalog"
 import { refreshProviders } from "./context/providers"
@@ -134,6 +135,21 @@ process.on("exit", () => {
     process.stdout.write("\x1b]111\x07")
   } catch {}
 })
+
+// Alacritty keeps a strip around the cell grid (the window is rarely a whole number of cells) and draws it with the
+// window's own opacity, so with a translucent terminal it showed as see-through bands above and below the app.
+// While Agent Code runs, this window is made opaque and unpadded; it gets its own settings back on exit.
+const alacrittyWindow = process.env.ALACRITTY_WINDOW_ID && process.env.ALACRITTY_SOCKET ? process.env.ALACRITTY_WINDOW_ID : undefined
+if (alacrittyWindow) {
+  try {
+    spawnSync("alacritty", ["msg", "config", "-w", alacrittyWindow, "window.opacity=1.0", "window.padding.x=0", "window.padding.y=0", "window.dynamic_padding=true"], { stdio: "ignore", timeout: 3000 })
+  } catch {}
+  process.on("exit", () => {
+    try {
+      spawnSync("alacritty", ["msg", "config", "-w", alacrittyWindow, "--reset"], { stdio: "ignore", timeout: 3000 })
+    } catch {}
+  })
+}
 
 void render(() => <App />, renderer)
 

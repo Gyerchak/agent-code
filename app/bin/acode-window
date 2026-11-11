@@ -20,7 +20,7 @@ if [ -z "$TERM_APP" ]; then
   done
 fi
 # No padding, and a window that resizes in whole character cells: nothing is left over around the app.
-FIT="-o window.padding.x=0 -o window.padding.y=0 -o window.dynamic_padding=true -o window.resize_increments=true"
+FIT="-o window.opacity=1.0 -o window.padding.x=0 -o window.padding.y=0 -o window.dynamic_padding=true -o window.resize_increments=true"
 case "$(basename "${TERM_APP:-}")" in
   alacritty)
     if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
