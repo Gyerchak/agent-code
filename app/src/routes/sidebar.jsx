@@ -16,6 +16,7 @@ import { actions, clock } from "../context/app"
 import { dialog } from "../ui/dialog"
 import { Spinner } from "../component/spinner"
 import { UsageBar } from "../component/prompt"
+import { FileTreeSection } from "../component/filetree"
 import { openChild, TASK_KINDS, taskEntries } from "./session"
 import { Slot } from "../plugin/slots"
 import { pluginStatus } from "../plugin/runtime"
@@ -515,6 +516,31 @@ export function SidebarFooter() {
   )
 }
 
+// The side panel's tabs (as in opencode's desktop app): everything, the files, or the work in progress.
+const SIDE_TABS = [
+  { id: "session", title: "Session" },
+  { id: "files", title: "Files" },
+  { id: "work", title: "Work" },
+]
+const [sideTab, setSideTab] = createSignal("session")
+export const nextSideTab = () => setSideTab((id) => SIDE_TABS[(SIDE_TABS.findIndex((tab) => tab.id === id) + 1) % SIDE_TABS.length].id)
+
+function SideTabs() {
+  return (
+    <box flexShrink={0} flexDirection="row" gap={1} paddingBottom={1}>
+      <For each={SIDE_TABS}>
+        {(tab) => (
+          <box paddingLeft={1} paddingRight={1} backgroundColor={sideTab() === tab.id ? theme.backgroundElement : undefined} onMouseUp={() => setSideTab(tab.id)}>
+            <text fg={sideTab() === tab.id ? theme.text : theme.textMuted} attributes={sideTab() === tab.id ? TextAttributes.BOLD : undefined}>
+              {tab.title}
+            </text>
+          </box>
+        )}
+      </For>
+    </box>
+  )
+}
+
 export function Sidebar() {
   const title = createMemo(() => store.title ?? "New session")
   return (
@@ -534,9 +560,26 @@ export function Sidebar() {
           </text>
         </Slot>
       </box>
+      <SideTabs />
       <scrollbox flexGrow={1} minHeight={0} horizontalScrollbarOptions={{ visible: false }} verticalScrollbarOptions={{ visible: false }}>
         <box flexShrink={0} gap={1} paddingRight={1}>
-          <Slot name="sidebar_content" session_id={store.sessionID ?? ""} />
+          <Switch>
+            <Match when={sideTab() === "files"}>
+              <FilesSection />
+              <FileTreeSection />
+            </Match>
+            <Match when={sideTab() === "work"}>
+              <TasksSection />
+              <PlanSection />
+              <TodoSection />
+              <Show when={!taskEntries().length && !store.todos?.length}>
+                <text fg={theme.textMuted}>No tasks, plan or checklist in this session yet.</text>
+              </Show>
+            </Match>
+            <Match when={true}>
+              <Slot name="sidebar_content" session_id={store.sessionID ?? ""} />
+            </Match>
+          </Switch>
         </box>
       </scrollbox>
       <box flexShrink={0} gap={1} paddingTop={1}>

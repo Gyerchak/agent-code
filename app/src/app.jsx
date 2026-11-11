@@ -80,6 +80,7 @@ import { cycleChild, openChild, Session, subagentParts, TASK_KINDS, taskEntries 
 import { dialog, DialogConfirm, DialogHost, DialogPrompt, DialogSelect, setDialogRefocus } from "./ui/dialog"
 import { toast, ToastHost } from "./ui/toast"
 import { TabBar, tabBarVisible } from "./component/tabs"
+import { nextSideTab } from "./routes/sidebar"
 import { Slot } from "./plugin/slots"
 import { pluginRoute, routeRender, showPluginRoute } from "./plugin/routes"
 import { deleteSession, getSessionMessages, renameSession } from "@anthropic-ai/claude-agent-sdk"
@@ -2461,6 +2462,7 @@ export function App() {
         dialog.clear()
       },
     },
+    { id: "sidebar.tab.next", title: "Sidebar: next tab (Session, Files, Work)", category: "Session", run: () => nextSideTab() },
     { id: "worktree.list", title: "Worktrees", category: "Session", slash: "worktree", slashAliases: ["worktrees"], run: () => dialog.replace(() => <DialogWorktrees />, undefined, "large") },
     { id: "worktree.new", title: "New worktree (choose base branch)", category: "Session", run: () => newWorktree() },
     { id: "terminal.open", title: "Session terminal", category: "Session", slash: "terminal", run: () => openTerminal() },

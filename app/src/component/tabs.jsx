@@ -64,6 +64,13 @@ export function TabBar() {
           const over = () => {
             lastOver = ++events
             setHover(session.key)
+            // A tab held down and moved over this one takes its place (the drag events themselves go to whatever
+            // cell was pressed and never reached the tab, so the move is made here and on release).
+            const held = dragging()
+            if (held && held !== session && !held.disposed) {
+              dragged = true
+              moveTabTo(held, tabs().indexOf(session))
+            }
           }
           const attention = () => session.store.permissions.length > 0 || session.store.questions.length > 0 || session.store.unseen === "attention"
           return (
@@ -87,8 +94,15 @@ export function TabBar() {
                 setTimeout(() => lastOver < seq && hover() === session.key && setHover(undefined), 40)
               }}
               onMouseUp={() => {
+                const held = dragging()
                 setDragging(undefined)
-                focusTab(session)
+                // Released on another tab: the held tab goes there (and stays the one in front).
+                if (held && held !== session && !held.disposed) {
+                  moveTabTo(held, tabs().indexOf(session))
+                  focusTab(held)
+                  return
+                }
+                focusTab(held && dragged ? held : session)
               }}
             >
               <text fg={theme.textMuted}>{index() <= 9 ? index() : "·"}</text>

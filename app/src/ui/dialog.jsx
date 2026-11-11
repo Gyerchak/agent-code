@@ -407,6 +407,13 @@ export function DialogSelect   (props
                         onMouseDrag={dragTo}
                         onMouseDragEnd={() => (dragValue = undefined)}
                         onMouseUp={() => {
+                          // Released on another row: the held row moves there (drag events don't reach the rows).
+                          if (props.onReorder && dragValue !== undefined && dragValue !== option.value) {
+                            if (props.onReorder(dragValue, option.value) !== false) {
+                              dragValue = undefined
+                              return
+                            }
+                          }
                           dragValue = undefined
                           choose(option)
                         }}
