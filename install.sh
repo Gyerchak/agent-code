@@ -5,11 +5,11 @@
 #   ./install.sh            (from a downloaded copy of the repository)
 #
 # Environment: OCC_REPO (owner/name, default Gyerchak/agent-code), OCC_HOME (install folder, default
-# ~/.local/share/agent-code), OCC_BIN (folder for the command, default ~/.local/bin).
+# ~/.local/share/agentcode), OCC_BIN (folder for the command, default ~/.local/bin).
 set -eu
 
 REPO="${OCC_REPO:-Gyerchak/agent-code}"
-HOME_DIR="${OCC_HOME:-$HOME/.local/share/agent-code}"
+HOME_DIR="${OCC_HOME:-$HOME/.local/share/agentcode}"
 BIN_DIR="${OCC_BIN:-$HOME/.local/bin}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }

@@ -3,10 +3,10 @@
 #   irm https://raw.githubusercontent.com/Gyerchak/agent-code/main/install.ps1 | iex
 #   .\install.ps1            (from a downloaded copy of the repository; or double-click install.cmd)
 #
-# Environment: OCC_REPO (owner/name, default Gyerchak/agent-code), OCC_HOME (install folder, default %LOCALAPPDATA%\agent-code).
+# Environment: OCC_REPO (owner/name, default Gyerchak/agent-code), OCC_HOME (install folder, default %LOCALAPPDATA%\agentcode).
 $ErrorActionPreference = "Stop"
 $Repo = if ($env:OCC_REPO) { $env:OCC_REPO } else { "Gyerchak/agent-code" }
-$HomeDir = if ($env:OCC_HOME) { $env:OCC_HOME } else { Join-Path $env:LOCALAPPDATA "agent-code" }
+$HomeDir = if ($env:OCC_HOME) { $env:OCC_HOME } else { Join-Path $env:LOCALAPPDATA "agentcode" }
 $BinDir = Join-Path $HomeDir "bin"
 
 function Say($text) { Write-Host $text -ForegroundColor Cyan }

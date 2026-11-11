@@ -42,7 +42,7 @@ irm https://raw.githubusercontent.com/Gyerchak/agent-code/main/install.ps1 | iex
 ```
 
 Or download this repository and run `install.sh` (Linux/macOS) or double-click `install.cmd` (Windows).
-The installer copies Agent Code to `~/.local/share/agent-code` (Windows: `%LOCALAPPDATA%\agent-code`), builds it and adds the
+The installer copies Agent Code to `~/.local/share/agentcode` (Windows: `%LOCALAPPDATA%\agentcode`), builds it and adds the
 `agentcode` command to your PATH.
 
 ### Optional harnesses
