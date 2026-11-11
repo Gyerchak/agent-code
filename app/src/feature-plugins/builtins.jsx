@@ -40,7 +40,7 @@ function HomeFooter() {
     <box
       width="100%"
       paddingTop={dimensions().height < 16 ? 0 : 1}
-      paddingBottom={dimensions().height < 16 ? 0 : 1}
+      paddingBottom={0}
       paddingLeft={2}
       paddingRight={2}
       flexDirection="row"

@@ -522,8 +522,8 @@ export function Sidebar() {
       backgroundColor={theme.backgroundPanel}
       width={SIDEBAR_WIDTH}
       height="100%"
-      paddingTop={1}
-      paddingBottom={1}
+      paddingTop={0}
+      paddingBottom={0}
       paddingLeft={2}
       paddingRight={2}
     >

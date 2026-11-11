@@ -19,12 +19,14 @@ if [ -z "$TERM_APP" ]; then
     command -v "$t" >/dev/null 2>&1 && { TERM_APP="$t"; break; }
   done
 fi
+# No padding, and a window that resizes in whole character cells: nothing is left over around the app.
+FIT="-o window.padding.x=0 -o window.padding.y=0 -o window.dynamic_padding=true -o window.resize_increments=true"
 case "$(basename "${TERM_APP:-}")" in
   alacritty)
     if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
-      exec env -u WAYLAND_DISPLAY ACODE_WAYLAND_DISPLAY="$WAYLAND_DISPLAY" alacritty --title "$TITLE" -e "$@"
+      exec env -u WAYLAND_DISPLAY ACODE_WAYLAND_DISPLAY="$WAYLAND_DISPLAY" alacritty $FIT --title "$TITLE" -e "$@"
     fi
-    exec alacritty --title "$TITLE" -e "$@" ;;
+    exec alacritty $FIT --title "$TITLE" -e "$@" ;;
   konsole) exec konsole -e "$@" ;;
   kitty) exec kitty --title "$TITLE" "$@" ;;
   foot) exec foot --title "$TITLE" "$@" ;;
