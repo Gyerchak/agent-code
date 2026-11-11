@@ -68,7 +68,7 @@ function rememberSessionModel(sessionID                    , model        ) {
 }
 
 /**
- * The model a saved conversation used: occ's own record, else the last model in its transcript.
+ * The model a saved conversation used: Agent Code's own record, else the last model in its transcript.
  * The transcript only has the bare id, so a provider model is matched against the user's recent ones.
  */
 function savedModel(sessionID        , history       )                     {
@@ -442,8 +442,17 @@ function claudeExecutable() {
   return executablePath
 }
 
+/** Build and Plan plus the user's own modes (config.agentModes: a name, a permission mode, an instruction). */
+export function agentList() {
+  return [...AGENTS, ...(config.agentModes ?? []).filter((mode) => mode?.id && mode.name && !AGENTS.some((agent) => agent.id === mode.id))]
+}
+
 export function agentIndex(id        ) {
-  return Math.max(0, AGENTS.findIndex((agent) => agent.id === id))
+  return Math.max(0, agentList().findIndex((agent) => agent.id === id))
+}
+
+export function agentName(id) {
+  return agentList().find((agent) => agent.id === id)?.name ?? (id === "plan" ? "Plan" : "Build")
 }
 
 function readBranch(cwd        ) {
@@ -483,7 +492,7 @@ export function errorMessage(error         ) {
 
 export function prettyModel(id        ) {
   const match = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?/)
-  // occ's GPU-sized local variants ("qwen3:4b-occ88k") read as the model itself.
+  // Agent Code's GPU-sized local variants ("qwen3:4b-occ88k") read as the model itself.
   if (!match) return id.replace(/-occ\d+k$/, "")
   const family = match[1][0].toUpperCase() + match[1].slice(1)
   return `Claude ${family} ${match[2]}${match[3] && match[3].length < 3 ? "." + match[3] : ""}`
@@ -595,15 +604,19 @@ let planExact = false
 let planLast = 0
 
 /** Refresh the exact plan usage (throttled to one request per 15 s unless forced); true when it came from Anthropic. */
+// While a turn is running the meters are read every 20 s (they climb as the work goes), otherwise every 2 minutes.
+let lastWork = 0
+const working = () => Date.now() - lastWork < 45_000
+
 export async function pollPlanUsage(force = false) {
-  if (planInflight || (!force && Date.now() - planLast < 30_000)) {
+  if (planInflight || (!force && Date.now() - planLast < (working() ? 18_000 : 30_000))) {
     checkAutoResume()
     return planExact
   }
   planInflight = true
   planLast = Date.now()
   try {
-    const usage = await fetchPlanUsage(force)
+    const usage = await fetchPlanUsage(force, working() ? 18_000 : 100_000)
     planExact = !!usage
     // Claude Code rewrites the plan into its credentials when the login refreshes (e.g. after a plan change).
     void planDetails().then((plan) => {
@@ -714,13 +727,13 @@ export async function useLimitReset(auto = false) {
   }
 }
 
-/** Hand what this window knows to every other occ window (they pick it up within ~2 s). */
+/** Hand what this window knows to every other Agent Code window (they pick it up within ~2 s). */
 function shareLimits() {
   publishPlanUsage({ fiveHour: limits.fiveHour, week: limits.week, all: limits.all, scoped: limits.scoped, rolling: limits.rolling, extra: limits.extra, offer: limits.offer })
 }
 
 /**
- * Take a reading from Anthropic (or another occ window). A plan without a rolling window (Ultra) has no 5-hour
+ * Take a reading from Anthropic (or another Agent Code window). A plan without a rolling window (Ultra) has no 5-hour
  * meter at all; a weekly window missing from one reading keeps its last value instead of vanishing.
  */
 function applyUsage(usage) {
@@ -738,7 +751,7 @@ function applyUsage(usage) {
 }
 
 function applySharedUsage(usage                             ) {
-  // A window from before a reset (an older occ still running publishes what it last saw) doesn't replace a newer one.
+  // A window from before a reset (an older Agent Code still running publishes what it last saw) doesn't replace a newer one.
   const stale = (theirs, mine) =>
     !!theirs?.resetsAt && !!mine?.resetsAt && mine.resetsAt > Date.now() && (theirs.resetsAt <= Date.now() || theirs.resetsAt < mine.resetsAt - 60_000)
   if (stale(usage.week, limits.week) || stale(usage.fiveHour, limits.fiveHour))
@@ -753,7 +766,8 @@ function startPlanPoll() {
   onSharedPlanUsage(applySharedUsage)
   void pollPlanUsage()
   // Not forced: forcing skips the shared cache, so every open window hit the endpoint itself and earned 429s.
-  planPoll = setInterval(() => void pollPlanUsage(), 120_000)
+  let ticks = 0
+  planPoll = setInterval(() => (working() || ++ticks % 6 === 0) && void pollPlanUsage(), 20_000)
   planPoll.unref?.()
 }
 
@@ -764,9 +778,9 @@ const waitingResume = new Set         ()
 const refusedUntil = new WeakMap                 ()
 const resumeTries = new WeakMap                 ()
 
-// Waits survive a restart of occ (crash, reboot, update): session id → resume time.
+// Waits survive a restart of Agent Code (crash, reboot, update): session id → resume time.
 const resumeFile = path.join(stateDir, "auto-resume.json")
-/** A wait this long overdue when occ starts again is stale: leave that session alone. */
+/** A wait this long overdue when Agent Code starts again is stale: leave that session alone. */
 const RESUME_KEEP = 12 * 3_600_000
 
 function readPendingResumes() {
@@ -906,7 +920,7 @@ export function cancelAutoResume(session         ) {
   if (session.store.resumeAt !== undefined) setResumeAt(session, undefined)
 }
 
-/** A tab came back after occ restarted: pick up the wait it was in (the time may already have passed). */
+/** A tab came back after Agent Code restarted: pick up the wait it was in (the time may already have passed). */
 function restoreAutoResume(session         , id        ) {
   const pending = readPendingResumes()
   const at = pending[id]
@@ -950,7 +964,7 @@ const NO_QUESTIONS_PROMPT =
 const PLANNING_PROMPT =
   "For any task with three or more steps, keep a checklist with the mcp__occ__todowrite tool: write the plan before starting, mark exactly one item in_progress while working on it, and mark items completed as soon as they are done. The user sees it as a checklist."
 
-/** occ's own checklist tool (this Claude Code build ships no TodoWrite); lives in the in-process "occ" MCP server. */
+/** Agent Code's own checklist tool (this Claude Code build ships no TodoWrite); lives in the in-process "occ" MCP server. */
 export const OCC_MCP = "occ"
 export const TODO_TOOL = "mcp__occ__todowrite"
 export const isTodoTool = (name        ) => name === "TodoWrite" || name === TODO_TOOL
@@ -1039,7 +1053,7 @@ export function behaviourPrompt(extra           = [], context = {}) {
 
 // ---------------------------------------------------------------------------
 // Subagent policy (Settings → Subagents). Enforced by rewriting each Agent call's model/effort in a
-// PreToolUse hook; other providers need occ's router so one Claude Code process can reach several APIs.
+// PreToolUse hook; other providers need Agent Code's router so one Claude Code process can reach several APIs.
 // ---------------------------------------------------------------------------
 
 const CLAUDE_ALIASES = ["opus", "sonnet", "haiku", "fable"]
@@ -1253,8 +1267,30 @@ export function createSession(seed             ) {
     return relativeTo(store.cwd, file)
   }
 
+  // The tab's own mode (kept per session); it holds while the permission mode is still the one it set.
+  let modeNote
   function currentAgent()        {
+    const id = store.agentMode ?? (store.sessionID ? config.sessionAgentMode?.[store.sessionID] : undefined)
+    const own = id ? agentList().find((agent) => agent.id === id) : undefined
+    if (own && own.mode === store.mode) return own
     return store.mode === "plan" ? AGENTS[1] : AGENTS[0]
+  }
+
+  /** Switch to a mode: its permission mode now, its instruction with the next prompt. */
+  function setAgent(id) {
+    const agent = agentList().find((item) => item.id === id)
+    if (!agent) return
+    const custom = !AGENTS.includes(agent)
+    setStore("agentMode", custom ? agent.id : undefined)
+    if (store.sessionID) {
+      const all = { ...(config.sessionAgentMode ?? {}) }
+      if (custom) all[store.sessionID] = agent.id
+      else delete all[store.sessionID]
+      config.sessionAgentMode = all
+      saveConfig()
+    }
+    modeNote = custom && agent.prompt?.trim() ? `[Mode "${agent.name}": ${agent.prompt.trim()}]` : custom ? undefined : modeNote && `[Mode "${agent.name}": the earlier mode's instruction no longer applies.]`
+    void setMode(agent.mode)
   }
 
   // -------------------------------------------------------------------------
@@ -1300,7 +1336,7 @@ export function createSession(seed             ) {
     const policy = subagentPolicy()
     const external = splitModel(store.model)
     const sessionKey = options.sessionId ?? options.resume ?? store.sessionID
-    // Mixing providers: Claude Code keeps its Claude login and every request goes through occ's router.
+    // Mixing providers: Claude Code keeps its Claude login and every request goes through Agent Code's router.
     const routed = policy.providers
     const providerVars = routed ? await routerEnv(sessionKey, store.model) : external ? await providerEnv(store.model, sessionKey) : undefined
     if (gen !== generation) return
@@ -1323,7 +1359,7 @@ export function createSession(seed             ) {
         cwd: store.cwd,
         // The router reads the provider from "<provider>/<model>"; direct provider sessions want the bare id.
         model: external ? (routed ? store.model : (providerVars?.ANTHROPIC_MODEL ?? external.model)) : store.model === "default" ? undefined : store.model,
-        // A provider model's variant is written into its requests by occ's proxy (variants.ts).
+        // A provider model's variant is written into its requests by Agent Code's proxy (variants.ts).
         effort: external ? undefined : store.effort,
         permissionMode: store.mode,
         includePartialMessages: true,
@@ -1336,7 +1372,7 @@ export function createSession(seed             ) {
         agents: Object.keys(agents).length ? agents : undefined,
         settings: extraSettings(store.model)       ,
         hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) : []), pauseHook()] },
-        // occ's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
+        // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
         mcpServers: { ...occMcpServers(), ...(config.planning ? { [OCC_MCP]: planningServer() } : {}) },
         plugins: modPlugins(),
         allowedTools: config.planning ? [TODO_TOOL] : undefined,
@@ -1350,9 +1386,9 @@ export function createSession(seed             ) {
         onElicitation: (request, { signal }) => requestElicitation(request, signal),
         stderr: (data) => log("stderr", data),
         env: {
-          // occ passes CLAUDE_CODE_PLUGIN_DIRS mods itself (as `plugins`), so each can be switched off.
+          // Agent Code passes CLAUDE_CODE_PLUGIN_DIRS mods itself (as `plugins`), so each can be switched off.
           ...withoutKey(process.env, "CLAUDE_CODE_PLUGIN_DIRS"),
-          CLAUDE_AGENT_SDK_CLIENT_APP: "open-claude-code",
+          CLAUDE_AGENT_SDK_CLIENT_APP: "agent-code",
           ...providerVars,
           // Claude Code assumes 200K for models it doesn't know: give it the real window so it compacts in time.
           ...(external && !routed ? contextEnv(store.model, providerVars?.ANTHROPIC_MODEL) : {}),
@@ -1519,7 +1555,10 @@ export function createSession(seed             ) {
       oc.caps = { models: acpModels(result) ?? oc.caps.models, effort: acpEffort(result) ?? oc.caps.effort, modes: acpModes(result) ?? oc.caps.modes }
     }
     try {
-      await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} })
+      const hello = await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} })
+      // The harness's own version, for the sidebar's version line.
+      const info = hello?.agentInfo ?? hello?.agent_info
+      if (info?.version) setStore("engineVersion", String(info.version))
       let id = resume
       if (resume) {
         replaying = true
@@ -1854,7 +1893,7 @@ export function createSession(seed             ) {
     if (ocQueue.length) void promptOpencode()
   }
 
-  /** Give prompts sent from occ the ids opencode stored them under (revert and fork need those). */
+  /** Give prompts sent from Agent Code the ids opencode stored them under (revert and fork need those). */
   async function syncOpencodeIds() {
     const session = oc
     if (!session?.id) return
@@ -1925,7 +1964,7 @@ export function createSession(seed             ) {
     })
     unsent.push({ id, text, extra })
     emit("sent", { id })
-    // Logged in again outside occ (claude auth login in a terminal): the credentials changed, so go on.
+    // Logged in again outside Agent Code (claude auth login in a terminal): the credentials changed, so go on.
     if (store.authRequired && credentialsChangedSince(loginNeededAt)) return void loggedIn()
     // Bring the process back (unless the login has to be renewed first).
     if (!store.authRequired && !store.booting) void revive()
@@ -2088,11 +2127,15 @@ export function createSession(seed             ) {
     for (const image of extra.images ?? [])
       content.push({ type: "image", source: { type: "base64", media_type: image.mime, data: image.data } })
     content.push(...attachmentBlocks(extra.attachments ?? []))
-    content.push({ type: "text", text })
+    // A mode's instruction goes to the model once, with the first prompt after switching to it.
+    lastWork = Date.now()
+    const forModel = modeNote ? `${modeNote}\n\n${text}` : text
+    modeNote = undefined
+    content.push({ type: "text", text: forModel })
     current.input.push({
       type: "user",
       uuid: id       ,
-      message: { role: "user", content: content.length === 1 ? text : content },
+      message: { role: "user", content: content.length === 1 ? forModel : content },
       parent_tool_use_id: null,
       inline_pastes: extra.pastes?.length ? extra.pastes : undefined,
     })
@@ -2222,7 +2265,7 @@ export function createSession(seed             ) {
   async function setEffort(value                         ) {
     setStore("effort", value)
     if (oc) return acpSetEffort(value)
-    // Provider models: occ's proxy reads the stored variant on every request.
+    // Provider models: Agent Code's proxy reads the stored variant on every request.
     if (splitModel(store.model)) return
     try {
       await current?.q.applyFlagSettings({ effortLevel: value ?? null }       )
@@ -2251,10 +2294,10 @@ export function createSession(seed             ) {
   }
 
   function cycleAgent(direction = 1) {
+    const list = agentList()
     const index = agentIndex(currentAgent().id)
-    const next = AGENTS[(index + direction + AGENTS.length) % AGENTS.length]
     // Leaving plan restores the default mode; entering plan switches Claude Code into plan mode.
-    void setMode(next.mode)
+    setAgent(list[(index + direction + list.length) % list.length].id)
   }
 
   function currentModel() {
@@ -2274,7 +2317,7 @@ export function createSession(seed             ) {
   async function refreshMcp() {
     try {
       const list = await current?.q.mcpServerStatus()
-      // occ's own in-process server is an implementation detail, not a user MCP.
+      // Agent Code's own in-process server is an implementation detail, not a user MCP.
       if (list) setStore("mcp", reconcile(list.filter((server) => server.name !== OCC_MCP)))
       // Servers connect asynchronously; keep polling while any is still pending.
       clearTimeout(mcpPoll)
@@ -2319,7 +2362,7 @@ export function createSession(seed             ) {
   }
 
   // -------------------------------------------------------------------------
-  // Mods: occ is a remote surface of the engine (as Claude Code Desktop is)
+  // Mods: Agent Code is a remote surface of the engine (as Claude Code Desktop is)
   // -------------------------------------------------------------------------
 
   const SURFACE = { surface: "desktop", client_id: "occ" }
@@ -2336,7 +2379,7 @@ export function createSession(seed             ) {
     }
   }
 
-  /** Join the engine's roster of surfaces once the mods have loaded, so their UI pushes reach occ. */
+  /** Join the engine's roster of surfaces once the mods have loaded, so their UI pushes reach Agent Code. */
   async function attachSurface(gen        ) {
     if (!modPlugins().length) return
     const attached = await modRequest({ subtype: "ui_attach", ...SURFACE, viewport: viewport() })
@@ -2485,7 +2528,7 @@ export function createSession(seed             ) {
     }
   }
 
-  /** A Claude Code tab reverted before occ quit comes back reverted. */
+  /** A Claude Code tab reverted before Agent Code quit comes back reverted. */
   function loadRevert() {
     const file = revertFile()
     if (!file || !existsSync(file)) return
@@ -2816,6 +2859,7 @@ export function createSession(seed             ) {
       parts: [],
       agent: currentAgent().id,
       model: store.modelId ?? store.model,
+      effort: store.effort,
       // Measure from the prompt being sent (or dequeued), like opencode's turn duration.
       start: user?.time && !user.queued ? Math.min(user.time, Date.now()) : Date.now(),
     }
@@ -2945,6 +2989,7 @@ export function createSession(seed             ) {
         if (message.parent_tool_use_id) return
         return handleStream(message.event       )
       case "assistant":
+        lastWork = Date.now()
         return handleAssistant(message)
       case "user":
         return handleUser(message       )
@@ -2960,6 +3005,7 @@ export function createSession(seed             ) {
         setStore("suggestion", message.suggestion)
         return
       case "rate_limit_event"       : {
+        lastWork = Date.now()
         const info = (message       ).rate_limit_info
         if (!info) return
         const resetsAt = info.resetsAt ? info.resetsAt * (info.resetsAt < 1e12 ? 1000 : 1) : undefined
@@ -3001,7 +3047,7 @@ export function createSession(seed             ) {
           setStore("mode", message.permissionMode)
           setStore("version", message.claude_code_version)
           if (message.output_style) setStore("outputStyle", message.output_style)
-          // Provider models' variants are occ's own (applied by its proxy), not Claude Code's effort.
+          // Provider models' variants are Agent Code's own (applied by its proxy), not Claude Code's effort.
           if (message.effort !== undefined && message.effort !== null && !splitModel(store.model)) setStore("effort", message.effort)
           if (message.fast_mode_state) setStore("fast", message.fast_mode_state === "on" || message.fast_mode_state === "enabled")
           setStore("skills", reconcile(message.skills ?? []))
@@ -3547,6 +3593,7 @@ export function createSession(seed             ) {
     setFast,
     setMode,
     cycleAgent,
+    setAgent,
     currentAgent,
     currentModel,
     modelLabel,

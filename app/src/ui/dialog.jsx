@@ -258,8 +258,23 @@ export function DialogSelect   (props
 
   const optionId = (option                 ) => `dialog-option-${flat().indexOf(option)}`
 
+  // Dragging a row onto another (`onReorder`): rows are one line each, so the pointer's line names the row.
+  let dragValue
+  let dragMoved = false
+  const rowAt = (y) => {
+    const child = scroll?.getChildren().find((item) => item.id?.startsWith("dialog-option-") && item.y === y)
+    return child ? flat()[Number(child.id.slice(14))] : undefined
+  }
+  const dragTo = (event) => {
+    if (!props.onReorder || dragValue === undefined) return
+    const over = rowAt(event.y)
+    if (!over || over.value === dragValue) return
+    if (props.onReorder(dragValue, over.value) !== false) dragMoved = true
+  }
+
   function choose(option                  ) {
     if (!option) return
+    if (dragMoved) return void (dragMoved = false)
     option.onSelect?.()
     props.onSelect?.(option)
   }
@@ -268,6 +283,14 @@ export function DialogSelect   (props
     priority: 101,
     commands: () => [],
     handler: (event) => {
+      // Actions first: one may use a modified arrow key (ctrl+up moves a favourite).
+      for (const action of props.actions ?? []) {
+        if (action.keybind.includes("+") && keyMatches(event, action.keybind)) {
+          const option = selected()
+          if (option) action.run(option)
+          return true
+        }
+      }
       if (matchesId(event, "dialog.select.prev")) {
         move(-1)
         return true
@@ -377,7 +400,16 @@ export function DialogSelect   (props
                           const i = flat().indexOf(option)
                           if (i >= 0 && i !== store.selected) setStore("selected", i)
                         }}
-                        onMouseUp={() => choose(option)}
+                        onMouseDown={() => {
+                          dragMoved = false
+                          dragValue = props.onReorder ? option.value : undefined
+                        }}
+                        onMouseDrag={dragTo}
+                        onMouseDragEnd={() => (dragValue = undefined)}
+                        onMouseUp={() => {
+                          dragValue = undefined
+                          choose(option)
+                        }}
                       >
                         <Show when={current()}>
                           <text flexShrink={0} fg={fg()}>

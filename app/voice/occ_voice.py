@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""occ voice worker — one persistent process per role, JSON lines on stdin/stdout.
+"""Agent Code voice worker — one persistent process per role, JSON lines on stdin/stdout.
 
     occ_voice.py kokoro    (run with a Python that has `kokoro`)            text -> wav
     occ_voice.py rvc       (run with Applio's Python, --applio <dir>)       wav -> wav in an RVC voice

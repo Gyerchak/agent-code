@@ -1,5 +1,5 @@
 // occ-memory: a view onto Claude Code's own auto-memory (~/.claude/projects/<project>/memory), after
-// OpenCodeBox's memory layer. Browse, add, edit and forget memories; turn memory off per occ; and have Claude
+// OpenCodeBox's memory layer. Browse, add, edit and forget memories; turn memory off per Agent Code; and have Claude
 // save a lesson whenever something fails (OpenCodeBox's learned.md habit, written as normal memories).
 import { TextAttributes } from "@opentui/core"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
@@ -75,6 +75,19 @@ export function memories(dir = storeOf(store.model))           {
     .map((file) => parse(path.join(dir, file)))
     .filter(Boolean)
     .sort((a, b) => b .time - a .time)
+}
+
+/**
+ * What memory adds to every conversation: only the index (MEMORY.md: one line per memory, its name and a hook) is
+ * loaded; a memory's own text is read when it is relevant. Estimated at about 3.5 characters a token.
+ */
+export function memoryTokens(dir = storeOf(store.model)) {
+  version()
+  try {
+    return Math.ceil(readFileSync(path.join(dir, "MEMORY.md"), "utf8").length / 3.5)
+  } catch {
+    return 0
+  }
 }
 
 /** Every store of this project: the shared one and one per model that has written anything. */
@@ -334,6 +347,11 @@ export function MemorySection() {
         </text>
         <text fg={useOn() ? theme.textMuted : theme.warning}>{useOn() ? (list().length ? String(list().length) : "") : "off"}</text>
       </box>
+      <Show when={useOn() && memoryTokens() > 0}>
+        <text fg={theme.textMuted} wrapMode="none" truncate>
+          names only in context · ≈{memoryTokens().toLocaleString()} tok
+        </text>
+      </Show>
       <Show when={list().length} fallback={<text fg={theme.textMuted}>{useOn() ? "nothing yet · click to add" : "memory is off"}</text>}>
         <For each={shown()}>
           {(memory) => (
@@ -377,7 +395,7 @@ function linkOpenCodeBox() {
 export const memoryPlugin         = (api) => {
   api.lifecycle.onDispose(
     registerSettingsPart("occ-memory", (model) => {
-      // An occ-box keeps its own memory/ folder (its CLAUDE.md protocol): Claude's auto-memory stays off there.
+      // An agentcode-box keeps its own memory/ folder (its CLAUDE.md protocol): Claude's auto-memory stays off there.
       if (config.memoryUse === false || boxDir) return { autoMemoryEnabled: false }
       // Non-Claude models remember into their own folder unless given full access.
       return hasFullMemory(model) ? undefined : { autoMemoryDirectory: modelMemoryDir(model) }

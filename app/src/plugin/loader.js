@@ -9,12 +9,12 @@ import { cacheDir as appCache } from "../context/paths"
 
 export const cacheDir = path.join(appCache, "plugins")
 
-// occ's install root (dist/ lives directly under it).
+// Agent Code's install root (dist/ lives directly under it).
 const occRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const occRootUrl = pathToFileURL(occRoot + path.sep).href
 const HOST = Symbol.for("occ.host")
 
-/** Modules plugins must share with occ (one Solid runtime, one renderer). */
+/** Modules plugins must share with Agent Code (one Solid runtime, one renderer). */
 export function provideHostModules(modules                                         ) {
   ;(globalThis       )[HOST] = modules
 }
@@ -27,7 +27,7 @@ function installHooks() {
   if (installed) return
   installed = true
   const hooks = (module       ).registerHooks
-  if (!hooks) throw new Error("this Node version can't load occ plugins (needs module.registerHooks)")
+  if (!hooks) throw new Error("this Node version can't load Agent Code plugins (needs module.registerHooks)")
   hooks({
     resolve(specifier        , context     , next     ) {
       const parent                     = context.parentURL
@@ -39,7 +39,7 @@ function installHooks() {
       if (url.startsWith("occ-host:")) {
         const spec = url.slice("occ-host:".length)
         const host = (globalThis       )[HOST]?.[spec]
-        if (!host) throw new Error(`occ does not provide ${spec}`)
+        if (!host) throw new Error(`agentcode does not provide ${spec}`)
         const names = Object.keys(host).filter((name) => name !== "default" && /^[A-Za-z_$][\w$]*$/.test(name))
         const source = [
           `const m = globalThis[Symbol.for("occ.host")][${JSON.stringify(spec)}];`,
@@ -61,7 +61,7 @@ function installHooks() {
 let babel
 const compiled = new Map                                         ()
 
-/** Compile a local plugin file the same way occ's own sources are built (Solid universal JSX for OpenTUI). */
+/** Compile a local plugin file the same way Agent Code's own sources are built (Solid universal JSX for OpenTUI). */
 function compile(file        ) {
   const mtime = statSync(file).mtimeMs
   const cached = compiled.get(file)
@@ -98,7 +98,7 @@ function exportTarget(value         )                     {
   return undefined
 }
 
-/** Resolve an npm plugin installed under occ's plugin cache: exports["./tui"], then "occ", then the main entry. */
+/** Resolve an npm plugin installed under Agent Code's plugin cache: exports["./tui"], then "occ", then the main entry. */
 function resolveNpm(spec        ) {
   const name = spec.startsWith("@") ? spec.split("@").slice(0, 2).join("@") : spec.split("@")[0]
   const dir = path.join(cacheDir, "node_modules", name)

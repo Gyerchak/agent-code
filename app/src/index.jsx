@@ -42,7 +42,7 @@ function parseArgs(argv          ) {
   if (rest.length) {
     const first = rest[0]
     try {
-      // `occ <dir>` opens a project directory, like `opencode <dir>`.
+      // `agentcode <dir>` opens a project directory, like `opencode <dir>`.
       const stat = statSync(first)
       if (stat.isDirectory()) {
         process.chdir(first)
@@ -57,9 +57,9 @@ function parseArgs(argv          ) {
 const args = parseArgs(process.argv.slice(2))
 
 if (args.help) {
-  console.log(`Open Claude Code (occ) — Claude Code with an opencode-style TUI
+  console.log(`Agent Code — one terminal for every coding agent (Claude Code, opencode, DeepSeek Harness, Codex)
 
-Usage: occ [dir] [prompt] [options]
+Usage: agentcode [dir] [prompt] [options]
 
 Options:
   -c, --continue        Continue the most recent session in this directory
@@ -73,7 +73,7 @@ Options:
 setApp("cwd", process.cwd())
 if (args.model) setApp("defaultModel", args.model)
 initTabs()
-// Plugins import these and must get occ's instances (one Solid runtime, one renderer).
+// Plugins import these and must get Agent Code's instances (one Solid runtime, one renderer).
 provideHostModules({ "solid-js": solid, "solid-js/store": solidStore, "@opentui/solid": opentuiSolid, "@opentui/core": opentuiCore })
 
 const renderer = await createCliRenderer({
@@ -107,7 +107,7 @@ async function shutdown(code = 0) {
   // The terminal may already be gone (window closed): nothing left to restore or print to.
   try {
     renderer.destroy()
-    if (sessionID && hasMessages) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  occ -r ${sessionID}\n\n`)
+    if (sessionID && hasMessages) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  agentcode -r ${sessionID}\n\n`)
   } catch {}
 }
 setExitHandler((code) => void shutdown(code ?? 0))
@@ -119,6 +119,21 @@ process.on("uncaughtException", (error                       ) => {
   if (error?.code === "EIO" || error?.code === "EPIPE") void shutdown(0)
 })
 process.on("unhandledRejection", (error) => log("unhandled", error))
+
+// The terminal's own background takes the theme's colour (OSC 11), so the strip a terminal leaves around the cell
+// grid (window size not a multiple of the cell size, padding) looks filled instead of showing another colour.
+const paintTerminal = () => {
+  try {
+    const [r, g, b] = theme.background.toInts()
+    process.stdout.write(`\x1b]11;#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("")}\x07`)
+  } catch {}
+}
+createRoot(() => solid.createEffect(paintTerminal))
+process.on("exit", () => {
+  try {
+    process.stdout.write("\x1b]111\x07")
+  } catch {}
+})
 
 void render(() => <App />, renderer)
 
@@ -145,7 +160,7 @@ createRoot(async () => {
     await startFresh()
     await restoreTabs({ keepActive: true })
   } else {
-    // Plain `occ` reopens the tabs left open last time, or else the most recent session.
+    // Plain `agentcode` reopens the tabs left open last time, or else the most recent session.
     const restored = await restoreTabs()
     if (!restored && args.resume !== true) await continueLast()
     else if (!restored) await startFresh()

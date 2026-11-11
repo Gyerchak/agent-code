@@ -6,21 +6,21 @@ import { flushConfig } from "./config"
 import { log } from "./log"
 
 // ---------------------------------------------------------------------------
-// occ-box: when occ runs inside a box (launched by box/scripts/occ-box.sh, which sets OCC_BOX_DIR), the box
-// uses occ's own settings by default. "Own settings" gives the box its own copy (cfg/open-claude-code,
-// switched on by the cfg/own-settings marker); "Reset to factory default" goes back to occ's settings.
-// Changing either restarts occ: exit code 75 tells the launcher to start it again.
+// agentcode-box: when Agent Code runs inside a box (launched by box/scripts/agentcode-box.sh, which sets OCC_BOX_DIR), the box
+// uses Agent Code's own settings by default. "Own settings" gives the box its own copy (cfg/agent-code,
+// switched on by the cfg/own-settings marker); "Reset to factory default" goes back to Agent Code's settings.
+// Changing either restarts Agent Code: exit code 75 tells the launcher to start it again.
 // ---------------------------------------------------------------------------
 
 export const boxDir = process.env.OCC_BOX_DIR || undefined
 export const BOX_RESTART = 75
 
 const marker = () => path.join(boxDir , "cfg", "own-settings")
-const boxConfig = () => path.join(boxDir , "cfg", "open-claude-code", "config.json")
+const boxConfig = () => path.join(boxDir , "cfg", "agent-code", "config.json")
 const boxDefaults = () => path.join(boxDir , "box", "settings.json")
-const mainConfig = () => process.env.OCC_MAIN_CONFIG || path.join(os.homedir(), ".config", "open-claude-code", "config.json")
+const mainConfig = () => process.env.OCC_MAIN_CONFIG || path.join(os.homedir(), ".config", "agent-code", "config.json")
 
-/** True when this box keeps its own settings (false: occ's shared settings). */
+/** True when this box keeps its own settings (false: Agent Code's shared settings). */
 export function ownSettings() {
   return !!boxDir && existsSync(marker())
 }
@@ -34,8 +34,8 @@ const read = (file        ) => {
 }
 
 /**
- * A box's own settings start from its defaults (box/settings.json, written by `occ-box` from
- * ~/.config/open-claude-code/occ-box/settings.json), plus occ's providers so its models stay available.
+ * A box's own settings start from its defaults (box/settings.json, written by `agentcode-box` from
+ * ~/.config/agent-code/agentcode-box/settings.json), plus Agent Code's providers so its models stay available.
  */
 function initialOwnSettings() {
   const main = read(mainConfig()) ?? {}
@@ -46,7 +46,7 @@ function initialOwnSettings() {
   return out
 }
 
-/** Switch the box to its own settings (its defaults, or the copy it had) or back to occ's. */
+/** Switch the box to its own settings (its defaults, or the copy it had) or back to Agent Code's. */
 export function setOwnSettings(on         ) {
   if (!boxDir) return
   flushConfig()
@@ -55,11 +55,11 @@ export function setOwnSettings(on         ) {
       mkdirSync(path.dirname(boxConfig()), { recursive: true })
       writeFileSync(boxConfig(), JSON.stringify(initialOwnSettings(), null, 2) + "\n")
     }
-    writeFileSync(marker(), "This box uses its own occ settings (cfg/open-claude-code). Remove this file to use occ's settings.\n")
+    writeFileSync(marker(), "This box uses its own Agent Code settings (cfg/agent-code). Remove this file to use Agent Code's settings.\n")
   } else rmSync(marker(), { force: true })
 }
 
-/** Factory default: the box uses occ's settings again; its own copy is kept as a dated backup. */
+/** Factory default: the box uses Agent Code's settings again; its own copy is kept as a dated backup. */
 export function resetBox() {
   if (!boxDir) return
   flushConfig()
@@ -69,7 +69,7 @@ export function resetBox() {
 
 /**
  * Claude Code ignores a folder's .claude/settings.json permissions until the folder is trusted. The box is
- * the user's own, so occ marks it trusted before every Claude Code start (Claude Code itself may rewrite
+ * the user's own, so Agent Code marks it trusted before every Claude Code start (Claude Code itself may rewrite
  * ~/.claude.json and drop the flag, and a moved box has a new path).
  */
 export function ensureBoxTrusted(cwd        ) {
@@ -81,7 +81,7 @@ export function ensureBoxTrusted(cwd        ) {
     const project = (projects[path.resolve(boxDir)] ??= {})
     if (project.hasTrustDialogAccepted === true) return
     project.hasTrustDialogAccepted = true
-    const temp = `${file}.occ-box.${process.pid}`
+    const temp = `${file}.agentcode-box.${process.pid}`
     writeFileSync(temp, JSON.stringify(data, null, 2))
     chmodSync(temp, statSync(file).mode & 0o777)
     renameSync(temp, file)
@@ -91,7 +91,7 @@ export function ensureBoxTrusted(cwd        ) {
   }
 }
 
-/** Restart occ inside the box (the launcher starts it again with the new settings). */
+/** Restart Agent Code inside the box (the launcher starts it again with the new settings). */
 export function restartBox() {
   exit(BOX_RESTART)
 }

@@ -466,7 +466,7 @@ function kokoroLang(voiceId        ) {
 
 /** Render `text` with the active engine; returns the wav path. */
 export async function synthesize(text        , style         )                  {
-  if (!SCRIPT) throw new Error("voice/occ_voice.py is missing from the occ install")
+  if (!SCRIPT) throw new Error("voice/occ_voice.py is missing from the Agent Code install")
   const engine = vc().engine ?? "kokoro"
   if (engine === "openutau") {
     const singer = singers().find((item) => item.dir === vc().utauSinger) ?? singers()[0]
@@ -585,7 +585,7 @@ async function haiku(prompt        , system        ) {
         persistSession: false,
         abortController: abort,
         systemPrompt: system,
-        env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "open-claude-code" },
+        env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-code" },
       }       ,
     })
     let text = ""
@@ -613,7 +613,7 @@ const SPEECH_RULES = `Rules for speech: at most 3 short sentences, plain spoken 
 export async function talk(userText        , context        ) {
   setVoice("thinking", true)
   try {
-    const system = `You are the voice of occ, a terminal UI for Claude Code. You chat with the user out loud while the main Claude session works. You can't run tools; if the user asks for real work, tell them to say "send to the tab" or type it in the prompt. Speak ${spokenLanguage()}.${stylesPrompt()}\n${SPEECH_RULES}`
+    const system = `You are the voice of Agent Code, a terminal UI for Claude Code. You chat with the user out loud while the main Claude session works. You can't run tools; if the user asks for real work, tell them to say "send to the tab" or type it in the prompt. Speak ${spokenLanguage()}.${stylesPrompt()}\n${SPEECH_RULES}`
     const transcript = history.map((item) => `${item.role === "user" ? "User" : "You"}: ${item.text}`).join("\n")
     const prompt = `${context ? `What the main session is doing:\n${context.slice(0, 2500)}\n\n` : ""}${transcript ? `Conversation so far:\n${transcript}\n\n` : ""}User says: ${userText}`
     const reply = parseReply(await haiku(prompt, system))
@@ -646,7 +646,7 @@ export function setupPrompt() {
   const engine = vc().engine ?? "kokoro"
   const missing = components().filter((item) => item.needed && !item.ok)
   const lines = components().map((item) => `- ${item.ok ? "OK " : "MISSING"} ${item.title}: ${item.detail}${item.needed ? "" : " (not needed for this engine)"}`)
-  return `Set up occ's voice feature on this machine. Talk me through it step by step and ask before every download or install.
+  return `Set up Agent Code's voice feature on this machine. Talk me through it step by step and ask before every download or install.
 
 Machine: ${m.platform}; CPU ${m.cpu} (${m.cores} threads); RAM ${m.ramGB} GB; GPU ${m.gpu ? `${m.gpu} with ${m.vramGB} GB VRAM` : "none detected (CPU only)"}.
 Chosen engine: ${ENGINES.find((item) => item.id === engine)?.title}. Spoken language: ${vc().language ?? "en"}.
@@ -660,6 +660,6 @@ Rules:
 3. Fit the machine: with an NVIDIA GPU (≥4 GB VRAM) install CUDA builds; without one use CPU builds, recommend whisper "small"/"base" int8, and say plainly that RVC on CPU is slow (several seconds per sentence). If something does not fit (too little RAM/VRAM, unsupported OS), explain why and show the alternatives within these components (smaller whisper model, plain Kokoro instead of RVC, OpenUtau without RVC) — let me choose.
 4. Voice models: Kokoro voices download automatically. RVC models and UTAU voicebanks must come from their official/licensed sources — show me where to download, check the licence/terms with me, then place them in the folders above. Never download from unofficial mirrors.
 5. Verify each part by running the worker: \`<python> ${SCRIPT ?? "voice/occ_voice.py"} probe\`.
-6. Finally write the paths you used into ~/.config/open-claude-code/config.json under "voice"."paths" (keys: kokoroPython, whisperPython, applio, applioPython, singers[]) and tell me to reopen /voice.
+6. Finally write the paths you used into ~/.config/agent-code/config.json under "voice"."paths" (keys: kokoroPython, whisperPython, applio, applioPython, singers[]) and tell me to reopen /voice.
 ${missing.length ? `\nMissing for the chosen engine: ${missing.map((item) => item.title).join(", ")}.` : "\nEverything for the chosen engine is installed; just verify it."}`
 }

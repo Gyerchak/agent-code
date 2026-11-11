@@ -8,7 +8,7 @@ import { providerKind, providers, splitModel } from "./providers"
 // Variants (reasoning levels) of non-Claude models, like opencode: every model has its own set.
 // Claude models keep the levels Claude Code reports. Provider models take theirs from models.dev's
 // `reasoning_options` (effort values, an on/off toggle, a thinking budget); local Ollama models from
-// their capabilities. Claude Code can't send these, so occ's proxy (proxy.ts) writes the chosen
+// their capabilities. Claude Code can't send these, so Agent Code's proxy (proxy.ts) writes the chosen
 // variant into each request in the provider's own format.
 // ---------------------------------------------------------------------------
 

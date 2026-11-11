@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# agentcode-box — create a fresh agentcode-box (a self-contained Claude Code workspace run through agentcode).
+#
+#   agentcode-box [name]            create ./<name> (default ./agentcode-box) from agentcode's box template
+#   agentcode-box --desktop [dir]   (re)write the box's clickable .desktop launcher (after moving/renaming it)
+#   agentcode-box --help
+#
+# Personal parts that are not shipped with agentcode are copied in when present:
+#   ~/.config/agent-code/agentcode-box/profile.md      → "Who you work with" in CLAUDE.md
+#   ~/.config/agent-code/agentcode-box/environment.md  → machine notes in CLAUDE.md
+#   ~/.config/agent-code/agentcode-box/TOOLS.md        → TOOLS.md
+#   ~/.config/agent-code/agentcode-box/settings.json   → box/settings.json (the box's default settings)
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+OCC_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+TEMPLATE="$OCC_DIR/box-template"
+PERSONAL="${XDG_CONFIG_HOME:-$HOME/.config}/agent-code/agentcode-box"
+
+usage() { sed -n '3,12p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+# The first terminal that exists ($TERMINAL first), as an Exec line running the box's launcher.
+# Alacritty goes through agentcode-window, so files dropped onto the box's window reach agentcode on Wayland too.
+terminal_exec() {
+  local script="$1" name="$2" t
+  for t in ${TERMINAL:-} alacritty konsole kitty foot wezterm gnome-terminal xfce4-terminal xterm; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    case "$t" in
+      alacritty)      echo "$(desktop_arg "$OCC_DIR/bin/agentcode-window") --title $name $script" ;;
+      konsole)        echo "konsole -e $script" ;;
+      kitty)          echo "kitty --title $name $script" ;;
+      foot)           echo "foot --title $name $script" ;;
+      wezterm)        echo "wezterm start -- $script" ;;
+      gnome-terminal) echo "gnome-terminal -- $script" ;;
+      xfce4-terminal) echo "xfce4-terminal --title $name -x $script" ;;
+      xterm)          echo "xterm -T $name -e $script" ;;
+      *)              echo "$t -e $script" ;;
+    esac
+    return 0
+  done
+  return 1
+}
+
+# A .desktop Exec argument: quoted, with $ ` escaped and % doubled.
+desktop_arg() {
+  local s="$1"
+  case "$s" in *'"'*|*'\'*) echo "agentcode-box: paths with \" or \\ can't go into a .desktop file: $s" >&2; return 1 ;; esac
+  s="${s//\$/\\\$}"; s="${s//\`/\\\`}"; s="${s//%/%%}"
+  printf '"%s"' "$s"
+}
+
+write_desktop() {
+  local box name script exec file
+  box="$(cd "$1" && pwd)"
+  [ -x "$box/box/scripts/agentcode-box.sh" ] || { echo "agentcode-box: $box is not an agentcode-box (no box/scripts/agentcode-box.sh)" >&2; return 1; }
+  name="$(basename "$box")"
+  script="$(desktop_arg "$box/box/scripts/agentcode-box.sh")"
+  exec="$(terminal_exec "$script" "$(desktop_arg "$name")")" || { echo "agentcode-box: no terminal emulator found" >&2; return 1; }
+  # Launchers from older boxes go; the box has one, named after the folder.
+  find "$box" -maxdepth 1 -name '*.desktop' ! -name "$name.desktop" -exec gio trash {} + 2>/dev/null || true
+  file="$box/$name.desktop"
+  cat > "$file" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=$name
+GenericName=agentcode-box
+Comment=Claude Code (agentcode) workspace: $box
+Exec=$exec
+Path=$box
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+DESKTOP
+  chmod +x "$file"
+  command -v gio >/dev/null 2>&1 && gio set "$file" metadata::trusted true 2>/dev/null || true
+  echo "$file"
+}
+
+fill() {  # fill {{BOX_NAME}} {{PROFILE}} {{ENVIRONMENT}} in a template file
+  python3 -I - "$1" "$2" "$PERSONAL" <<'PY'
+import os, sys
+path, name, personal = sys.argv[1:]
+def part(file):
+    try:
+        return open(os.path.join(personal, file)).read().strip()
+    except OSError:
+        return ""
+text = open(path).read().replace("{{BOX_NAME}}", name)
+for key, file in (("{{PROFILE}}", "profile.md"), ("{{ENVIRONMENT}}", "environment.md")):
+    value = part(file)
+    text = text.replace(key + "\n\n", value + "\n\n" if value else "").replace(key, value)
+open(path, "w").write(text)
+PY
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --desktop) write_desktop "${2:-.}"; exit $? ;;
+  -*) usage >&2; exit 2 ;;
+esac
+
+[ -d "$TEMPLATE" ] || { echo "agentcode-box: template missing at $TEMPLATE" >&2; exit 1; }
+name="${1:-agentcode-box}"
+case "$name" in */*|.|..) echo "agentcode-box: give a folder name, not a path: $name" >&2; exit 2 ;; esac
+box="$PWD/$name"
+if [ -e "$box" ]; then
+  echo "agentcode-box: $box already exists. Pick another name: agentcode-box <name>" >&2
+  exit 1
+fi
+
+cp -r "$TEMPLATE" "$box"
+find "$box" -name .keep -delete
+mkdir -p "$box/sessions/state" "$box/cfg/agent-code"
+fill "$box/CLAUDE.md" "$name"
+fill "$box/README.md" "$name"
+[ -f "$PERSONAL/TOOLS.md" ] && cp "$PERSONAL/TOOLS.md" "$box/TOOLS.md"
+# The box's default settings (used when "Box: own settings" is switched on): your personal ones if present.
+[ -f "$PERSONAL/settings.json" ] && cp "$PERSONAL/settings.json" "$box/box/settings.json"
+chmod +x "$box/box/scripts/agentcode-box.sh" "$box/.claude/hooks/boundary.sh" "$box/box/scripts/tools/"*.sh
+desktop="$(write_desktop "$box")"
+
+echo "Created agentcode-box: $box"
+echo "  open it:  double-click $(basename "$desktop")   (or: $box/box/scripts/agentcode-box.sh)"
+echo "  check it: $box/box/scripts/agentcode-box.sh doctor"

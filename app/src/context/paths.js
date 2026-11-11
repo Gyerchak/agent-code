@@ -1,12 +1,13 @@
-import { existsSync, mkdirSync, renameSync, symlinkSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, renameSync, symlinkSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-// Open Claude Code keeps its files under "open-claude-code" in the XDG config/state/cache dirs.
-// Installs from before the rename used "opencode-claude": move them over once and leave a link behind.
+// Agent Code keeps its files under "agent-code" in the XDG config/state/cache/data dirs. Installs from before a
+// rename used "open-claude-code" (and before that "opencode-claude"): the folder is moved over once and a link
+// is left behind, so anything still using the old name (a window that was already open, a script) keeps working.
 
-export const APP = "open-claude-code"
-const OLD = "opencode-claude"
+export const APP = "agent-code"
+const OLD = ["open-claude-code", "opencode-claude"]
 
 function base(env                    , fallback          ) {
   return env ?? path.join(os.homedir(), ...fallback)
@@ -14,11 +15,15 @@ function base(env                    , fallback          ) {
 
 function migrated(root        ) {
   const next = path.join(root, APP)
-  const old = path.join(root, OLD)
   try {
-    if (!existsSync(next) && existsSync(old)) {
-      renameSync(old, next)
-      symlinkSync(next, old)
+    if (!existsSync(next)) {
+      for (const name of OLD) {
+        const old = path.join(root, name)
+        if (!existsSync(old) || lstatSync(old).isSymbolicLink()) continue
+        renameSync(old, next)
+        symlinkSync(next, old)
+        break
+      }
     }
   } catch {}
   return next
@@ -27,7 +32,7 @@ function migrated(root        ) {
 export const configDir = migrated(base(process.env.XDG_CONFIG_HOME, [".config"]))
 export const stateDir = migrated(base(process.env.XDG_STATE_HOME, [".local", "state"]))
 export const cacheDir = migrated(base(process.env.XDG_CACHE_HOME, [".cache"]))
-/** Secrets (provider API keys): ~/.local/share/open-claude-code. */
+/** Secrets (provider API keys): ~/.local/share/agent-code. */
 export const dataDir = migrated(base(process.env.XDG_DATA_HOME, [".local", "share"]))
 
 export function ensureDir(dir        ) {

@@ -234,6 +234,17 @@ export function moveTab(session         , direction        ) {
   persistTabs()
 }
 
+/** Put a tab at `index` (dragging a tab along the strip). */
+export function moveTabTo(session, index) {
+  const list = [...tabs()]
+  const from = list.indexOf(session)
+  if (from < 0 || index < 0 || index >= list.length || from === index) return
+  list.splice(from, 1)
+  list.splice(index, 0, session)
+  setTabs(list)
+  persistTabs()
+}
+
 export async function refreshSessions() {
   try {
     const list = await listSessions({ dir: app.cwd })
@@ -248,7 +259,7 @@ export function disposeAll() {
 }
 
 // ---------------------------------------------------------------------------
-// Persistence: open tabs per directory come back on the next plain `occ`.
+// Persistence: open tabs per directory come back on the next plain `agentcode`.
 // ---------------------------------------------------------------------------
 
 let persistTimer
@@ -280,7 +291,7 @@ function writeTabs() {
 
 /**
  * Restore saved tabs as dormant (history only); only the focused one boots.
- * With `keepActive`, the current tab stays focused (e.g. `occ -c`) and the saved ones come back beside it.
+ * With `keepActive`, the current tab stays focused (e.g. `agentcode -c`) and the saved ones come back beside it.
  * Returns false when nothing was saved.
  */
 export async function restoreTabs(options                                           = {}) {
@@ -362,7 +373,7 @@ export async function pickModel(prompt        )                                 
         persistSession: false,
         abortController: abort,
         systemPrompt: "You are a request router. Output only the JSON object.",
-        env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "open-claude-code" },
+        env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-code" },
       }       ,
     })
     let text = ""

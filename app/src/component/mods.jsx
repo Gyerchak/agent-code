@@ -10,7 +10,7 @@ import { syntax, theme } from "../context/theme"
 import { DiffView, filetype } from "../routes/tools"
 import { SplitBorder } from "../ui/border"
 
-// Claude Code mods, drawn by occ: the engine runs each mod's `ui.render` hooks for the `desktop`
+// Claude Code mods, drawn by Agent Code: the engine runs each mod's `ui.render` hooks for the `desktop`
 // surface and answers a plain tree (Box, Text, Button, Input, Select, Link, Code, Markdown, Svg, …),
 // which this file draws with OpenTUI. Presses, edits and picks go back as ui_press / ui_input / ui_select.
 
@@ -277,7 +277,7 @@ function ModNode(props                                                       )  
         <text fg={theme.textMuted}>▣ {String(p().alt ?? "image")}</text>
       </Match>
       <Match when={n().type === "Client"}>
-        <text fg={theme.textMuted}>(an interactive region of this mod that occ can't run)</text>
+        <text fg={theme.textMuted}>(an interactive region of this mod that Agent Code can't run)</text>
       </Match>
     </Switch>
   )

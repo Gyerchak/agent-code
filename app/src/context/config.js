@@ -111,7 +111,7 @@ function load()         {
       try {
         copyFileSync(file, `${file}.broken-${Date.now()}`)
       } catch {}
-      process.stderr.write(`occ: ${file} could not be read (${error instanceof Error ? error.message : error}); a copy was kept beside it.\n`)
+      process.stderr.write(`Agent Code: ${file} could not be read (${error instanceof Error ? error.message : error}); a copy was kept beside it.\n`)
     }
     return {}
   }
@@ -126,7 +126,7 @@ delete (config       ).sidebar
 if ((config       ).subagentProviders === true && !config.subagentTiers) config.subagentTiers = { local: true, free: true, go: true, zen: true, paid: true }
 delete (config       ).subagentProviders
 
-/** Read config.json again (after an edit outside occ): what this process had pending is written first. */
+/** Read config.json again (after an edit outside Agent Code): what this process had pending is written first. */
 export function reloadConfig() {
   flushConfig()
   const fresh = load()
@@ -136,7 +136,7 @@ export function reloadConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Saved settings: named copies of the settings, and a reset to the defaults. What occ keeps for itself (open
+// Saved settings: named copies of the settings, and a reset to the defaults. What Agent Code keeps for itself (open
 // tabs, prompt history, session models, connected providers, one-time markers) is not a setting: a reset or a
 // restore leaves it as it is. Keys live in auth.json and are never touched here.
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ function merge(before                     , mine                     , disk     
 }
 
 /**
- * Several occ windows share config.json: each writes only what it changed onto the file as it is now
+ * Several Agent Code windows share config.json: each writes only what it changed onto the file as it is now
  * (and takes the others' changes), so one window no longer reverts another's settings or saved tabs.
  */
 function writeConfig() {

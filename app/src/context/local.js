@@ -6,7 +6,7 @@ import { log } from "./log"
 // ---------------------------------------------------------------------------
 // Local Ollama models: Ollama loads models with a small default context (often 4096 tokens), far less
 // than Claude Code's own instructions (~20K), so the start of every prompt was silently cut off.
-// occ creates a variant with a context sized to the GPU ("<model>-occ<N>k", same weights, no extra
+// Agent Code creates a variant with a context sized to the GPU ("<model>-occ<N>k", same weights, no extra
 // disk) and watches the loaded model for the two things that degrade a local session: the context
 // running past what is loaded (Ollama drops the oldest tokens → quality) and the model spilling from
 // VRAM into system RAM (→ speed).

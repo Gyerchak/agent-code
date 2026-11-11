@@ -1,13 +1,13 @@
-# occ plugin API reference
+# Agent Code plugin API reference
 
 The shape of the `api` object a plugin receives in `tui(api, options, meta)`, the slot names and their
-props, as type declarations (documentation only — occ itself is plain JavaScript).
+props, as type declarations (documentation only — Agent Code itself is plain JavaScript).
 
 ```ts
-// occ plugin API — shaped after opencode's TuiPluginApi (packages/plugin/src/tui.ts) but backed by Claude Code.
+// Agent Code plugin API — shaped after opencode's TuiPluginApi (packages/plugin/src/tui.ts) but backed by Claude Code.
 //
 // A plugin module exports `{ id?, tui(api, options, meta) }` (default export or named). JSX must be compiled
-// for `@opentui/solid` with `solid-js` and `@opentui/*` kept external; occ maps those imports to its own copies
+// for `@opentui/solid` with `solid-js` and `@opentui/*` kept external; Agent Code maps those imports to its own copies
 // so plugins share the renderer and Solid runtime. Local `.tsx`/`.ts` files are compiled on load.
 import type { CliRenderer, KeyEvent, SlotMode } from "@opentui/core"
 import type { JSX } from "solid-js"

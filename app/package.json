@@ -1,7 +1,7 @@
 {
-  "name": "open-claude-code",
-  "version": "4.19.0",
-  "description": "Open Claude Code (occ): Claude Code with an opencode-style terminal UI",
+  "name": "agent-code",
+  "version": "5.0.0",
+  "description": "Agent Code: one terminal for Claude Code, opencode, DeepSeek Harness and Codex",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs --watch"
@@ -28,7 +28,7 @@
     "esbuild": "^0.28.2"
   },
   "bin": {
-    "occ": "bin/occ"
+    "agentcode": "bin/agentcode"
   },
   "license": "MIT",
   "author": "Gyerchak",
@@ -37,6 +37,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Gyerchak/occ.git"
+    "url": "https://github.com/Gyerchak/agent-code.git"
   }
 }

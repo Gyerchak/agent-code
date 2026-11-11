@@ -133,7 +133,7 @@ export function PermissionPrompt(props                                ) {
         { key: "reject", label: "No, keep planning" },
       ]
     const list = [{ key: "once", label: "Allow once" }]
-    // Offer "Always allow" for every tool; without Claude Code suggestions occ builds a session rule itself.
+    // Offer "Always allow" for every tool; without Claude Code suggestions Agent Code builds a session rule itself.
     if (!props.request.suppressAlways) list.push({ key: "always", label: "Always allow" })
     list.push({ key: "reject", label: "Reject" })
     return list

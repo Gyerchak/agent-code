@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# boundary.sh — PreToolUse hook: an occ-box may write ONLY inside itself and its scratch folder
-# (/tmp/occ-box/<escaped box path>, also in $OCC_BOX_SCRATCH). Runs before occ's auto-allow, so it
+# boundary.sh — PreToolUse hook: an agentcode-box may write ONLY inside itself and its scratch folder
+# (/tmp/agentcode-box/<escaped box path>, also in $OCC_BOX_SCRATCH). Runs before agentcode's auto-allow, so it
 # holds even when "Allow everything" is on. Reads anywhere stay allowed.
 input="$(cat)"
 box="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 box="$(realpath -m -- "$box")"
-scratch="/tmp/occ-box/$(printf '%s' "$box" | sed 's/[^a-zA-Z0-9]/-/g')"
+scratch="/tmp/agentcode-box/$(printf '%s' "$box" | sed 's/[^a-zA-Z0-9]/-/g')"
 path="$(printf '%s' "$input" | python3 -I -c '
 import json, sys
 i = json.load(sys.stdin).get("tool_input", {})
@@ -16,5 +16,5 @@ real="$(realpath -m -- "$path")"
 case "$real" in
   "$box"|"$box"/*|"$scratch"|"$scratch"/*) exit 0 ;;
 esac
-echo "occ-box boundary: writes are allowed only inside $box and $scratch (blocked: $real)" >&2
+echo "agentcode-box boundary: writes are allowed only inside $box and $scratch (blocked: $real)" >&2
 exit 2

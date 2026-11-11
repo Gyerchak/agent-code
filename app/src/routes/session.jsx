@@ -9,6 +9,7 @@ import {
   agentIndex,
   isSubagentTool,
   prettyModel,
+  agentName,
 } from "../context/session"
 import { agentColor, alpha, mutedSyntax, syntax, theme } from "../context/theme"
 import { Prompt } from "../component/prompt"
@@ -143,7 +144,7 @@ export function cycleChild(direction        ) {
 const MOD_PANE_WIDTH = 46
 /**
  * Messages drawn at once. Every drawn message stays a live renderable that the renderer re-styles on each
- * frame (syntax highlighting), so a day-long transcript made occ crawl. Older ones load when scrolled to.
+ * frame (syntax highlighting), so a day-long transcript made Agent Code crawl. Older ones load when scrolled to.
  */
 const TRANSCRIPT_WINDOW = 60
 
@@ -648,7 +649,7 @@ function AssistantView(props                               ) {
 function AssistantFooter(props                               ) {
   const dimensions = useTerminalDimensions()
   const elapsed = createMemo(() => (props.message.end && props.message.start ? props.message.end - props.message.start : 0))
-  const name = () => (props.message.agent === "plan" ? "Plan" : "Build")
+  const name = () => agentName(props.message.agent)
   // tok/s over the time tokens were actually streaming (tools and waiting excluded), like opencode's Zen meter.
   const speed = createMemo(() => {
     const tokens = props.message.outputTokens ?? 0
@@ -669,6 +670,9 @@ function AssistantFooter(props                               ) {
           <span style={{ fg: props.message.error ? theme.textMuted : agentColor(agentIndex(props.message.agent)) }}>{name()}</span>
           <Show when={dimensions().width >= 28 && props.message.model}>
             <span style={{ fg: theme.textMuted }}> · {prettyModel(props.message.model)}</span>
+            <Show when={props.message.effort}>
+              <span style={{ fg: theme.textMuted }}> · {props.message.effort}</span>
+            </Show>
           </Show>
           <Show when={elapsed() > 0 && (dimensions().width < 28 || dimensions().width >= 36)}>
             <span style={{ fg: theme.textMuted }}> · {duration(elapsed())}</span>
@@ -735,12 +739,12 @@ function ReasoningView(props                         ) {
         <Show
       when={done()}
       fallback={
-        <box flexDirection="row">
+        <box flexDirection="row" overflow="hidden">
           <Spinner color={fg()}>{content() ? "Thinking: " + reasoningTitle(content()) : "Thinking"}</Spinner>
         </box>
       }
     >
-      <text fg={fg()} wrapMode="none">
+      <text fg={fg()} wrapMode="none" truncate>
         <span>{expanded() ? "- " : "+ "}</span>
         <span>Thought</span>
         <Show when={!expanded() && content()}>
@@ -756,7 +760,7 @@ function ReasoningView(props                         ) {
     </Show>
   )
   return (
-    <box paddingLeft={3} flexDirection="column" flexShrink={0}>
+    <box paddingLeft={3} paddingRight={1} flexDirection="column" flexShrink={0} overflow="hidden">
       <Show
         when={expanded()}
         fallback={<box onMouseUp={() => setExpanded(true)}>{header()}</box>}
@@ -811,16 +815,27 @@ function NoticeView(props                            ) {
         </box>
       </Match>
       <Match when={true}>
-        <box paddingLeft={3}>
-          <text
-            fg={props.message.variant === "error" ? theme.error : props.message.variant === "warning" ? theme.warning : theme.textMuted}
-          >
-            {props.message.variant === "error" ? "Error: " : ""}
-            {props.message.text}
-          </text>
-        </box>
+        <ClampedNotice message={props.message} />
       </Match>
     </Switch>
+  )
+}
+
+/** A notice longer than three lines shows its first three; a click shows the rest (and folds it again). */
+function ClampedNotice(props) {
+  const [open, setOpen] = createSignal(false)
+  const lines = createMemo(() => String(props.message.text ?? "").split("\n"))
+  const long = () => lines().length > 3
+  return (
+    <box paddingLeft={3} paddingRight={1} onMouseUp={() => long() && setOpen((value) => !value)}>
+      <text fg={props.message.variant === "error" ? theme.error : props.message.variant === "warning" ? theme.warning : theme.textMuted}>
+        {props.message.variant === "error" ? "Error: " : ""}
+        {long() && !open() ? lines().slice(0, 3).join("\n") : props.message.text}
+      </text>
+      <Show when={long()}>
+        <text fg={theme.textMuted}>{open() ? "▲ click to fold" : `▼ ${lines().length - 3} more lines · click to expand`}</text>
+      </Show>
+    </box>
   )
 }
 

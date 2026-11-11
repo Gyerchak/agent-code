@@ -4,7 +4,7 @@ import { log } from "./log"
 import { findBinary, spawnOptions } from "./platform"
 
 // ---------------------------------------------------------------------------
-// opencode as an engine. OpenCode Zen serves its free models only to opencode itself, so occ runs
+// opencode as an engine. OpenCode Zen serves its free models only to opencode itself, so Agent Code runs
 // those tabs through the real opencode: `opencode acp` (Agent Client Protocol, JSON-RPC over stdio)
 // for the conversation, `opencode api` (its local server's HTTP API) for revert/fork.
 // ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ export function opencodeApi(cwd        , method        , route        , body    
 }
 
 // ---------------------------------------------------------------------------
-// opencode tools → the Claude Code tool shapes occ's tool views render
+// opencode tools → the Claude Code tool shapes Agent Code's tool views render
 // ---------------------------------------------------------------------------
 
 const TOOL_NAMES                         = {

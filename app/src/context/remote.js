@@ -16,11 +16,11 @@ import { newSession, tabs } from "./tabs"
 import { onSessionEvent } from "./session"
 
 // ---------------------------------------------------------------------------
-// occ on a phone. occ runs a small web server (on this machine, the local network or a public address, as set
+// Agent Code on a phone. Agent Code runs a small web server (on this machine, the local network or a public address, as set
 // in /phone): it serves the phone app (phone/, a web app you add to the home screen on Android and iOS) and an
 // API to it. The work stays on this computer; the phone shows the tabs and the chat live, sends prompts and files,
 // interrupts, pauses and answers permission prompts, and downloads the files a chat made (when allowed).
-// Every API call carries the pairing token from the link (or QR code) occ shows; a new token unpairs every phone.
+// Every API call carries the pairing token from the link (or QR code) Agent Code shows; a new token unpairs every phone.
 // ---------------------------------------------------------------------------
 
 const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "phone")
@@ -100,7 +100,7 @@ function selfSigned() {
     if (!openssl) throw new Error("openssl is needed for a self-signed certificate")
     mkdirSync(stateDir, { recursive: true })
     const host = phoneSettings().address || lanAddress()
-    execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650", "-subj", "/CN=occ", "-addext", `subjectAltName=IP:${/^[\d.]+$/.test(host) ? host : "127.0.0.1"}`, "-keyout", key, "-out", cert], { stdio: "ignore" })
+    execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650", "-subj", "/CN=Agent Code", "-addext", `subjectAltName=IP:${/^[\d.]+$/.test(host) ? host : "127.0.0.1"}`, "-keyout", key, "-out", cert], { stdio: "ignore" })
   }
   return { cert: readFileSync(cert), key: readFileSync(key) }
 }
@@ -285,7 +285,7 @@ async function handleApi(request, response, url) {
     return json(response, 200, { key: session.key })
   }
   if (request.method === "GET" && parts[1] === "file") {
-    if (!phoneSettings().files) return json(response, 403, { error: "file downloads are off in occ (/phone)" })
+    if (!phoneSettings().files) return json(response, 403, { error: "file downloads are off in Agent Code (/phone)" })
     const session = findSession(url.searchParams.get("tab") ?? "")
     const file = path.resolve(url.searchParams.get("path") ?? "")
     if (!session || !allowedFiles(session).has(file) || !existsSync(file) || !statSync(file).isFile()) return json(response, 404, { error: "not a file of this chat" })
@@ -398,7 +398,7 @@ export function stopPhoneServer() {
   server = undefined
 }
 
-/** On occ's start: run the server when it is switched on. */
+/** On Agent Code's start: run the server when it is switched on. */
 export function autostartPhoneServer() {
   if (!phoneSettings().enabled) return
   startPhoneServer().catch((error) => log("phone server not started", String(error?.message ?? error)))

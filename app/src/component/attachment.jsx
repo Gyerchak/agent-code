@@ -2,7 +2,9 @@ import { FrameBufferRenderable, RGBA } from "@opentui/core"
 import { extend, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createResource, createSignal, on, onCleanup, Show } from "solid-js"
 import { addThumb, sizeText, displayPath } from "../context/attachments"
+import { spawn } from "node:child_process"
 import { config } from "../context/config"
+import { openCommand } from "../context/platform"
 import { canDecode, canPlaySound, durationText, mediaSource, playFrames, playSound, probe, stillFrame } from "../context/media"
 import { filetype } from "../routes/tools"
 import { syntax, theme } from "../context/theme"
@@ -115,7 +117,7 @@ function Pixels(props) {
 
 /**
  * A frame that can be drawn: whole positive pixel sizes and enough bytes. Anything else (a thumbnail saved by
- * an older occ in another shape, a cut-off decode) is skipped: a frame buffer of NaN width throws while the
+ * an older Agent Code in another shape, a cut-off decode) is skipped: a frame buffer of NaN width throws while the
  * transcript is drawn, which used to stop the saved tabs from coming back.
  */
 function drawable(frame) {
@@ -233,11 +235,28 @@ function MediaPreview(props) {
     >
       <Show when={picture()} fallback={<text fg={theme.textMuted}>{audio() ? "♪ " : ""}{label()}</text>}>
         <Frame frame={picture()} background={props.background} />
-        <text fg={theme.textMuted}>
-          {audio() ? "♪ " : ""}
-          {label()}
-          {!canPlaySound() && sound() ? " (no sound: install mpv)" : ""}
-        </text>
+        <box flexDirection="row" gap={2}>
+          <text fg={theme.textMuted}>
+            {audio() ? "♪ " : ""}
+            {label()}
+            {!canPlaySound() && sound() ? " (no sound: install mpv)" : ""}
+          </text>
+          {/* A terminal draws a picture in character cells; the file itself opens in the desktop's own viewer. */}
+          <Show when={source()}>
+            <text
+              fg={theme.accent}
+              onMouseUp={(event) => {
+                event.stopPropagation()
+                const [command, args] = openCommand(source())
+                try {
+                  spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true }).unref()
+                } catch {}
+              }}
+            >
+              ⤢ open original
+            </text>
+          </Show>
+        </box>
       </Show>
     </box>
   )

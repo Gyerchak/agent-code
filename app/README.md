@@ -1,3 +1,3 @@
-# occ — source
+# Agent Code — source
 
-The code of occ. See the [README](../README.md) one folder up for installing and using it.
+The code of Agent Code. See the [README](../README.md) one folder up for installing and using it.

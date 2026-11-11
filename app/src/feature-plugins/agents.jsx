@@ -1,7 +1,7 @@
 // occ-agents: a layered "working profile" for Claude, after OpenCodeBox's AgentMixer.
-// Pick options per layer (who you are, Claude's role, character, how to think, how to work, …); occ composes
+// Pick options per layer (who you are, Claude's role, character, how to think, how to work, …); Agent Code composes
 // them into one organised section of Claude's system prompt. Only prompt layers are kept: everything here
-// genuinely reaches the model. Library: <occ>/agents/<layer>/<NN-name>.md; your own: ~/.config/open-claude-code/agents.
+// genuinely reaches the model. Library: <Agent Code>/agents/<layer>/<NN-name>.md; your own: ~/.config/agent-code/agents.
 import { TextAttributes } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
@@ -50,7 +50,7 @@ function parse(file        )         {
   return { slug, title: meta.title || slug.replace(/-/g, " "), summary: summary.length > 64 ? summary.slice(0, 63).trimEnd() + "…" : summary, body }
 }
 
-/** Options of a layer; files in ~/.config/open-claude-code/agents override the bundled ones by name. */
+/** Options of a layer; files in ~/.config/agent-code/agents override the bundled ones by name. */
 function options(layer       )           {
   const byName = new Map                ()
   for (const root of ROOTS) {
@@ -198,19 +198,19 @@ export function compose(mix = scopeMix()) {
   if (!sections.length) return undefined
   return [
     "# Working profile",
-    "The user chose this profile in occ's Agents panel. Treat it as their standing preferences for how you work; anything they ask in the conversation takes precedence.",
+    "The user chose this profile in Agent Code's Agents panel. Treat it as their standing preferences for how you work; anything they ask in the conversation takes precedence.",
     ...sections,
   ].join("\n\n")
 }
 
 // ---------------------------------------------------------------------------
 // Where the mix goes. The two .md files are read differently:
-//  - System prompt: appended to Claude Code's system prompt in occ's Claude Code tabs (only there).
+//  - System prompt: appended to Claude Code's system prompt in Agent Code's Claude Code tabs (only there).
 //  - CLAUDE.md: a marked block in ~/.claude/CLAUDE.md. Claude Code loads it as user memory in every
-//    project (also outside occ), as a context message rather than the system prompt. opencode reads that
+//    project (also outside Agent Code), as a context message rather than the system prompt. opencode reads that
 //    file only when it has no global AGENTS.md.
 //  - AGENTS.md: a marked block in opencode's global AGENTS.md (~/.config/opencode/AGENTS.md), which
-//    opencode (and occ's opencode tabs) load. Claude Code has no global AGENTS.md, so ~/.claude/CLAUDE.md
+//    opencode (and Agent Code's opencode tabs) load. Claude Code has no global AGENTS.md, so ~/.claude/CLAUDE.md
 //    gets an `@` import of that file instead (the whole file, your own text in it included).
 // ---------------------------------------------------------------------------
 
@@ -220,14 +220,14 @@ const CLAUDE_MD = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(home, ".c
 const AGENTS_MD = path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "opencode", "AGENTS.md")
 const tilde = (file        ) => (file.startsWith(home + path.sep) ? "~" + file.slice(home.length) : file)
 const TARGETS                                                = [
-  { id: "prompt", title: "System prompt", hint: "occ's Claude Code tabs only" },
+  { id: "prompt", title: "System prompt", hint: "Agent Code's Claude Code tabs only" },
   { id: "claude", title: "CLAUDE.md", hint: `${tilde(CLAUDE_MD)} · Claude Code everywhere` },
   { id: "agents", title: "AGENTS.md", hint: `${tilde(AGENTS_MD)} · opencode, imported by CLAUDE.md` },
 ]
 const target = ()         => (version(), config.agentMixFile ?? "prompt")
 
 const BLOCK = /\n*<!-- occ-agents:start[^>]*-->[\s\S]*?<!-- occ-agents:end -->\n*/
-/** Put `text` in occ's marked block at the end of `file` (or take the block out); the rest is left alone. */
+/** Put `text` in Agent Code's marked block at the end of `file` (or take the block out); the rest is left alone. */
 function writeBlock(file        , text                    ) {
   let current = ""
   try {
@@ -235,7 +235,7 @@ function writeBlock(file        , text                    ) {
   } catch {}
   const rest = current.replace(BLOCK, "\n").trim()
   const next = text
-    ? `${rest ? rest + "\n\n" : ""}<!-- occ-agents:start · written by Open Claude Code (/mix); edit it there -->\n${text}\n<!-- occ-agents:end -->\n`
+    ? `${rest ? rest + "\n\n" : ""}<!-- occ-agents:start · written by Agent Code (/mix); edit it there -->\n${text}\n<!-- occ-agents:end -->\n`
     : rest
       ? rest + "\n"
       : ""

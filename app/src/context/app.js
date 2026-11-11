@@ -84,7 +84,7 @@ let exitHandler
 export function setExitHandler(fn                         ) {
   exitHandler = fn
 }
-/** Quit occ (`code` 75 inside an occ-box: the launcher starts it again). */
+/** Quit Agent Code (`code` 75 inside an agentcode-box: the launcher starts it again). */
 export function exit(code         ) {
   exitHandler?.(code)
 }

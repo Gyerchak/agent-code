@@ -11,8 +11,8 @@
       "Bash",
       "Edit(/**)",
       "Write(/**)",
-      "Edit(//tmp/occ-box/**)",
-      "Write(//tmp/occ-box/**)"
+      "Edit(//tmp/agentcode-box/**)",
+      "Write(//tmp/agentcode-box/**)"
     ],
     "deny": [
       "Bash(rm -rf:*)",

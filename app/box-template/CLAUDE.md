@@ -1,7 +1,7 @@
-# {{BOX_NAME}} — occ-box
+# {{BOX_NAME}} — agentcode-box
 
-You are **Claude Code**, running inside an **occ-box** through **occ** (the opencode-style TUI over the
-Claude Agent SDK, `~/open-claude-code`). The box is a closed workspace: learn from the material in
+You are **Claude Code**, running inside an **agentcode-box** through **Agent Code** (the opencode-style TUI over the
+Claude Agent SDK, `~/agent-code`). The box is a closed workspace: learn from the material in
 `knowladge/`, build lasting work in `Projekt/`, do one-off tasks in `work/`, and remember what was
 learned in `memory/`.
 
@@ -13,7 +13,7 @@ learned in `memory/`.
 
 - **Reads:** anywhere on the PC.
 - **Writes:** ONLY inside this box folder and its scratch folder `$OCC_BOX_SCRATCH`
-  (`/tmp/occ-box/<box path>`). Enforced by the PreToolUse hook `.claude/hooks/boundary.sh` for
+  (`/tmp/agentcode-box/<box path>`). Enforced by the PreToolUse hook `.claude/hooks/boundary.sh` for
   Edit/Write; for Bash, keep the same rule yourself (no `>`/`cp`/`mv` targets outside).
 - **Deletion:** never `rm` — move things to the trash (`gio trash <path>`).
 - **Secrets:** never print or commit API keys or passwords.
@@ -39,13 +39,13 @@ If `TOOLS.md` exists, it is the inventory of what this machine can run. Read it 
   work/                     one-off tasks: work/YYYYMMDD-HHMM-<slug>/
   sessions/
     claude → ~/.claude/projects/<box>   the box's Claude Code sessions (link)
-    state/                  occ state (tabs, log)
-  cfg/open-claude-code/     the box's own occ settings (only with "Box: own settings" on)
+    state/                  Agent Code state (tabs, log)
+  cfg/agent-code/     the box's own Agent Code settings (only with "Box: own settings" on)
   .claude/
     settings.json           permissions + boundary hook (Claude's auto-memory off: memory/ only)
     hooks/boundary.sh       write-boundary guard
   box/
-    scripts/occ-box.sh      launcher (run | doctor)
+    scripts/agentcode-box.sh      launcher (run | doctor)
     scripts/tools/index-knowledge.sh
 ```
 

@@ -168,7 +168,7 @@ export function Prompt(props                                         ) {
       const command = allCommands().find(
         (item) => (item.slash === name || item.slashAliases?.includes(name)) && (!item.enabled || item.enabled()),
       )
-      // An occ command that has nothing to act on right now (/undo with no prompt, /timeline with no messages…)
+      // An Agent Code command that has nothing to act on right now (/undo with no prompt, /timeline with no messages…)
       // must not go to the model as text.
       const idle = command
         ? undefined
@@ -1006,13 +1006,13 @@ export function Prompt(props                                         ) {
                   </text>
                 </Show>
                 <Show when={fit().agents}>
-                  <text fg={theme.text} flexShrink={0}>
+                  <text fg={theme.text} flexShrink={0} onMouseUp={() => runCommand("agent.list")}>
                     {shortcut("agent.cycle").replace("shift+tab", "tab")}{" "}
                     <span style={{ fg: theme.textMuted }}>agents</span>
                   </text>
                 </Show>
                 <Show when={fit().commands}>
-                  <text fg={theme.text} wrapMode="none" flexShrink={0}>
+                  <text fg={theme.text} wrapMode="none" flexShrink={0} onMouseUp={() => runCommand("command.palette.show")}>
                     {shortcut("command.palette.show")} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
                 </Show>

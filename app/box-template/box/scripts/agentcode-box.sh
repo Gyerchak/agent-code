@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# occ-box.sh — runs this occ-box: Claude Code through occ (~/open-claude-code), inside this folder.
+# agentcode-box.sh — runs this agentcode-box: Claude Code through agentcode (~/agent-code), inside this folder.
 #
-#   occ-box.sh [run]        start occ here, in this terminal (what the .desktop launcher runs)
-#   occ-box.sh run continue  take over from a running instance of this box
-#   occ-box.sh run [continue] -- <occ args>   pass arguments to occ (e.g. -- -r <session> -p "prompt")
-#   occ-box.sh doctor       check the setup
+#   agentcode-box.sh [run]        start agentcode here, in this terminal (what the .desktop launcher runs)
+#   agentcode-box.sh run continue  take over from a running instance of this box
+#   agentcode-box.sh run [continue] -- <agentcode args>   pass arguments to agentcode (e.g. -- -r <session> -p "prompt")
+#   agentcode-box.sh doctor       check the setup
 #
 # Everything the box needs lives in this folder; every path is recomputed on start, so the folder can
-# be moved or renamed. Created by `occ-box` (see ~/open-claude-code/bin/occ-box).
+# be moved or renamed. Created by `agentcode-box` (see ~/agent-code/bin/agentcode-box).
 
 BOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BOX_NAME="$(basename "$BOX_DIR")"
 ESCAPED="$(printf '%s' "$BOX_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
-SESSIONS_DIR="$BOX_DIR/sessions"      # occ state + link to the box's Claude Code sessions
-CFG_DIR="$BOX_DIR/cfg"                # the box's own occ settings, used only when cfg/own-settings exists
-OWN_MARKER="$CFG_DIR/own-settings"    # created/removed by occ: Settings → "Box: own settings"
-SCRATCH_DIR="/tmp/occ-box/$ESCAPED"   # the box's scratch space (writes allowed here too)
-LOCKFILE="${TMPDIR:-/tmp}/occ-box$ESCAPED.lock"
+SESSIONS_DIR="$BOX_DIR/sessions"      # agentcode state + link to the box's Claude Code sessions
+CFG_DIR="$BOX_DIR/cfg"                # the box's own agentcode settings, used only when cfg/own-settings exists
+OWN_MARKER="$CFG_DIR/own-settings"    # created/removed by agentcode: Settings → "Box: own settings"
+SCRATCH_DIR="/tmp/agentcode-box/$ESCAPED"   # the box's scratch space (writes allowed here too)
+LOCKFILE="${TMPDIR:-/tmp}/agentcode-box$ESCAPED.lock"
 # Claude Code keeps sessions per directory in ~/.claude/projects/<escaped path>
 CLAUDE_PROJECT_STORE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$ESCAPED"
 ORIG_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
-OCC_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/open-claude-code/config.json"   # occ's own settings
+# Folders from before the rename to Agent Code ("open-claude-code") move over once; a link keeps the old name working.
+moved_over() {
+  [ -e "$1/agent-code" ] && return 0
+  [ -d "$1/open-claude-code" ] && [ ! -L "$1/open-claude-code" ] || return 0
+  mv "$1/open-claude-code" "$1/agent-code" && ln -s "$1/agent-code" "$1/open-claude-code"
+}
+moved_over "${XDG_CONFIG_HOME:-$HOME/.config}"
+moved_over "${XDG_STATE_HOME:-$HOME/.local/state}"
+moved_over "$CFG_DIR"
+OCC_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/agent-code/config.json"   # agentcode's own settings
 LAUNCH_LOG="$SESSIONS_DIR/state/launcher.log"
 
 log() { mkdir -p "$(dirname "$LAUNCH_LOG")"; printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LAUNCH_LOG" 2>/dev/null || true; }
@@ -33,7 +42,7 @@ on_exit() {
   log "exit $status"
   if [ "$status" -ne 0 ] && { : </dev/tty; } 2>/dev/null; then
     echo
-    echo "occ-box stopped (exit $status). Details: $LAUNCH_LOG"
+    echo "agentcode-box stopped (exit $status). Details: $LAUNCH_LOG"
     read -r -p "Press Enter to close…" _ </dev/tty || true
   fi
 }
@@ -41,7 +50,7 @@ trap on_exit EXIT
 trap 'log "error at line $LINENO: $BASH_COMMAND"' ERR
 
 OCC_BIN=""
-for c in "$BOX_DIR/box/bin/occ" "$(command -v occ 2>/dev/null || true)" "$HOME/.local/bin/occ" "$HOME/open-claude-code/bin/occ"; do
+for c in "$BOX_DIR/box/bin/agentcode" "$(command -v agentcode 2>/dev/null || true)" "$HOME/.local/bin/agentcode" "$HOME/agent-code/bin/agentcode"; do
   [ -n "$c" ] && [ -x "$c" ] && { OCC_BIN="$c"; break; }
 done
 
@@ -60,7 +69,7 @@ project = data.setdefault("projects", {}).setdefault(box, {})
 if project.get("hasTrustDialogAccepted") is True:
     sys.exit(0)
 project["hasTrustDialogAccepted"] = True
-temp = f"{path}.occ-box.{os.getpid()}"
+temp = f"{path}.agentcode-box.{os.getpid()}"
 with open(temp, "w") as out:
     json.dump(data, out, indent=2)
 os.chmod(temp, os.stat(path).st_mode & 0o777)
@@ -71,9 +80,9 @@ PY
 }
 
 doctor() {
-  echo "occ-box — $BOX_DIR"
-  [ -n "$OCC_BIN" ] && echo "  ✓ occ: $OCC_BIN" || { echo "  ✗ occ not found (~/open-claude-code/bin/occ)"; exit 1; }
-  command -v node >/dev/null 2>&1 && echo "  ✓ node $(node --version)" || echo "  ✗ node missing (occ needs Node ≥ 26)"
+  echo "agentcode-box — $BOX_DIR"
+  [ -n "$OCC_BIN" ] && echo "  ✓ agentcode: $OCC_BIN" || { echo "  ✗ agentcode not found (~/agent-code/bin/agentcode)"; exit 1; }
+  command -v node >/dev/null 2>&1 && echo "  ✓ node $(node --version)" || echo "  ✗ node missing (agentcode needs Node ≥ 26)"
   for f in CLAUDE.md memory/MEMORY.md .claude/settings.json .claude/hooks/boundary.sh; do
     [ -f "$BOX_DIR/$f" ] && echo "  ✓ $f" || echo "  ✗ $f missing"
   done
@@ -81,14 +90,14 @@ doctor() {
     [ -d "$BOX_DIR/$d" ] && echo "  ✓ $d/ ($(find "$BOX_DIR/$d" -type f 2>/dev/null | wc -l) files)" || echo "  ✗ $d/ missing"
   done
   echo "  · claude sessions: $CLAUDE_PROJECT_STORE"
-  if [ -f "$OWN_MARKER" ]; then echo "  · settings:        own ($CFG_DIR/open-claude-code/config.json)"; else echo "  · settings:        occ's ($OCC_CONFIG)"; fi
+  if [ -f "$OWN_MARKER" ]; then echo "  · settings:        own ($CFG_DIR/agent-code/config.json)"; else echo "  · settings:        agentcode's ($OCC_CONFIG)"; fi
   echo "  · scratch:         $SCRATCH_DIR"
   echo "Health check done."
 }
 
 MODE="${1:-run}"
 ARG2="${2:-}"
-# Everything after "--" goes to occ.
+# Everything after "--" goes to agentcode.
 OCC_ARGS=()
 for ((i = 1; i <= $#; i++)); do
   if [ "${!i}" = "--" ]; then OCC_ARGS=("${@:i+1}"); break; fi
@@ -98,11 +107,11 @@ done
 case "$MODE" in
   doctor) doctor; exit 0 ;;
   run|launch) ;;
-  *) echo "usage: occ-box.sh [run [continue] | doctor]" >&2; exit 2 ;;
+  *) echo "usage: agentcode-box.sh [run [continue] | doctor]" >&2; exit 2 ;;
 esac
 
 if [ -z "$OCC_BIN" ]; then
-  echo "occ not found — expected ~/open-claude-code/bin/occ (or box/bin/occ)." >&2
+  echo "agentcode not found — expected ~/agent-code/bin/agentcode (or box/bin/agentcode)." >&2
   exit 1
 fi
 
@@ -111,8 +120,8 @@ if [ -f "$LOCKFILE" ]; then
   LOCK_PID="$(cat "$LOCKFILE" 2>/dev/null || true)"
   if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null && [ "$LOCK_PID" != "$$" ]; then
     if [ "$ARG2" != "continue" ]; then
-      echo "$BOX_NAME is already open (PID $LOCK_PID). Use that window, or: occ-box.sh run continue"
-      command -v notify-send >/dev/null 2>&1 && notify-send -a occ-box "$BOX_NAME is already open" "Use the existing window." || true
+      echo "$BOX_NAME is already open (PID $LOCK_PID). Use that window, or: agentcode-box.sh run continue"
+      command -v notify-send >/dev/null 2>&1 && notify-send -a agentcode-box "$BOX_NAME is already open" "Use the existing window." || true
       sleep 3
       exit 0
     fi
@@ -123,16 +132,16 @@ if [ -f "$LOCKFILE" ]; then
 fi
 echo $$ > "$LOCKFILE"
 LOCK_TAKEN=1
-log "start (occ: $OCC_BIN)"
+log "start (agentcode: $OCC_BIN)"
 
 prepare_env
 
-# Settings: occ's own by default; the box's copy when "Box: own settings" is on (checked on every start).
+# Settings: agentcode's own by default; the box's copy when "Box: own settings" is on (checked on every start).
 use_settings() {
   if [ -f "$OWN_MARKER" ]; then
-    mkdir -p "$CFG_DIR/open-claude-code"
-    local cfg="$CFG_DIR/open-claude-code/config.json"
-    # First time: the box's defaults (box/settings.json) plus occ's providers.
+    mkdir -p "$CFG_DIR/agent-code"
+    local cfg="$CFG_DIR/agent-code/config.json"
+    # First time: the box's defaults (box/settings.json) plus agentcode's providers.
     [ -f "$cfg" ] || python3 -I - "$BOX_DIR/box/settings.json" "$OCC_CONFIG" "$cfg" <<'PY' || log "could not create own settings"
 import json, sys
 defaults_file, main_file, out = sys.argv[1:]
@@ -152,12 +161,12 @@ PY
     log "settings: own ($cfg)"
   else
     if [ -n "$ORIG_XDG_CONFIG_HOME" ]; then export XDG_CONFIG_HOME="$ORIG_XDG_CONFIG_HOME"; else unset XDG_CONFIG_HOME; fi
-    log "settings: occ ($OCC_CONFIG)"
+    log "settings: agentcode ($OCC_CONFIG)"
   fi
 }
 
-# Plan usage is shared with every other occ window (one poller; the endpoint rate-limits).
-export OCC_SHARED_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/open-claude-code"
+# Plan usage is shared with every other agentcode window (one poller; the endpoint rate-limits).
+export OCC_SHARED_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agent-code"
 export XDG_STATE_HOME="$SESSIONS_DIR/state"
 export OCC_BOX_DIR="$BOX_DIR"
 export OCC_BOX_SCRATCH="$SCRATCH_DIR"
@@ -166,12 +175,12 @@ export OCC_MAIN_CONFIG="$OCC_CONFIG"
 cd "$BOX_DIR"
 printf '\033]0;%s\007\033]2;%s\007' "$BOX_NAME" "$BOX_NAME"
 
-# plain occ reopens the box's last tabs (else the most recent session); exit code 75 = restart
-# (occ asks for it after switching the box's settings).
+# plain agentcode reopens the box's last tabs (else the most recent session); exit code 75 = restart
+# (agentcode asks for it after switching the box's settings).
 while :; do
   use_settings
   set +e
-  trap - ERR   # occ's own exit codes are not launcher errors
+  trap - ERR   # agentcode's own exit codes are not launcher errors
   if { : </dev/tty; } 2>/dev/null; then
     "$OCC_BIN" "${OCC_ARGS[@]}" "$BOX_DIR" </dev/tty
   else

@@ -19,6 +19,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { forgetPlan, planRate } from "./context/usage"
+import { APP_NAME, appVersion } from "./context/version"
 import { config, listSavedSettings, reloadConfig, resetSettings, restoreSettings, saveConfig, saveSettings } from "./context/config"
 import {
   actions,
@@ -35,7 +36,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, claudeModelList, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, claudeModelList, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -145,7 +146,7 @@ async function openEditor(renderer                                , initial     
     toast.show({ variant: "warning", message: "Set $EDITOR to use the external editor" })
     return undefined
   }
-  const dir = mkdtempSync(path.join(os.tmpdir(), "open-claude-code-"))
+  const dir = mkdtempSync(path.join(os.tmpdir(), "agent-code-"))
   const file = path.join(dir, `prompt${ext}`)
   writeFileSync(file, initial)
   await renderer.suspend()
@@ -158,15 +159,15 @@ async function openEditor(renderer                                , initial     
 }
 
 /**
- * Run a harness's own interactive command (its login, exactly as the harness does it) in this terminal: occ steps
- * aside, the command takes the screen, and occ comes back after Enter.
+ * Run a harness's own interactive command (its login, exactly as the harness does it) in this terminal: Agent Code steps
+ * aside, the command takes the screen, and Agent Code comes back after Enter.
  */
 async function runInTerminal(renderer, file, args, title) {
   await renderer.suspend()
   try {
     process.stdout.write(`\n\x1b[1m${title}\x1b[0m  (${[file, ...args].join(" ")})\n\n`)
     const result = spawnSync(file, args, { stdio: "inherit", ...spawnOptions(file) })
-    process.stdout.write(`\n${result.status === 0 ? "Done." : `It ended with code ${result.status ?? "?"}.`} Press Enter to go back to occ… `)
+    process.stdout.write(`\n${result.status === 0 ? "Done." : `It ended with code ${result.status ?? "?"}.`} Press Enter to go back to Agent Code… `)
     if (isWindows) spawnSync("cmd", ["/c", "pause >nul"], { stdio: "inherit" })
     else spawnSync("sh", ["-c", "read _"], { stdio: "inherit" })
     return result.status === 0
@@ -221,6 +222,68 @@ function forgetRecent(value        ) {
   saveConfig()
   setRecentTick((n) => n + 1)
   return true
+}
+
+/**
+ * What a model costs: its API price ($ per million input/output tokens) and, for a model paid by a plan, the
+ * estimated price on that plan (Claude: from the plan's measured worth, see planRate; OpenCode Go: its listed price).
+ */
+function priceFacts(value, resolved, providerLabel, names = []) {
+  const meta = modelMeta(value, resolved)
+  const facts = []
+  let footer = billingLabel(meta, providerLabel)
+  if (meta.price && (meta.billing === "plan" || meta.billing === "api")) facts.push(`API ${priceText(meta.price)}`)
+  if (meta.kind === "anthropic" && meta.billing === "plan" && meta.price) {
+    const scoped = (limits.scoped ?? []).find((w) => [value, resolved, ...names].some((v) => String(v ?? "").toLowerCase().includes(w.name.toLowerCase())))
+    if (scoped?.allowance) facts.push(`≤${scoped.allowance}% of weekly`)
+    const rate = planRate(catalog.planLabel ?? catalog.plan, config.planPrice)
+    if (rate?.factor) footer = `${footer} ≈${priceText({ input: meta.price.input * rate.factor, output: meta.price.output * rate.factor })}`
+  }
+  return { meta, facts, footer }
+}
+
+/** Favourite rows for chosen variants carry the variant in their value. */
+const FAV_VARIANT = "::variant::"
+
+function moveFavorite(value, to) {
+  const list = [...favorites()]
+  const from = list.indexOf(value)
+  const index = typeof to === "number" ? from + to : list.indexOf(to)
+  if (from < 0 || index < 0 || index >= list.length || from === index) return false
+  list.splice(from, 1)
+  list.splice(index, 0, value)
+  setFavorites(list)
+  config.favoriteModels = list
+  saveConfig()
+  return true
+}
+
+/** Which variants of a favourite model get their own row under Favorites (none: just the model). */
+function DialogFavoriteVariants(props) {
+  const [tick, setTick] = createSignal(0)
+  const chosen = () => (tick(), config.favoriteVariants?.[props.model] ?? [])
+  return (
+    <DialogSelect
+      title={`Variants to show for ${props.title}`}
+      options={[
+        ...variantsOf(props.model).map((level) => ({
+          title: level,
+          value: level,
+          description: EFFORT_HINTS[level],
+          gutter: <text fg={chosen().includes(level) ? theme.success : theme.textMuted}>{chosen().includes(level) ? "[x]" : "[ ]"}</text>,
+        })),
+        { title: "Done", value: "", description: chosen().length ? `${chosen().length} variant row${chosen().length === 1 ? "" : "s"} under Favorites` : "one row: the model with its last variant" },
+      ]}
+      onSelect={(option) => {
+        if (!option.value) return dialog.replace(() => <DialogModels />, undefined, "large")
+        const order = variantsOf(props.model)
+        const next = chosen().includes(option.value) ? chosen().filter((item) => item !== option.value) : [...chosen(), option.value]
+        config.favoriteVariants = { ...(config.favoriteVariants ?? {}), [props.model]: order.filter((item) => next.includes(item)) }
+        saveConfig()
+        setTick((n) => n + 1)
+      }}
+    />
+  )
 }
 
 function cycleFavorite(direction        ) {
@@ -396,8 +459,8 @@ function DialogExtraUsage() {
       {
         title: e.enabled ? "Turn off on claude.ai" : "Turn on on claude.ai",
         value: "open",
-        // Anthropic exposes no public endpoint for switching it; occ re-reads the state when you come back.
-        description: e.canToggle ? "opens the usage settings; occ picks up the change" : "your account can't switch it here; opens the usage settings",
+        // Anthropic exposes no public endpoint for switching it; Agent Code re-reads the state when you come back.
+        description: e.canToggle ? "opens the usage settings; Agent Code picks up the change" : "your account can't switch it here; opens the usage settings",
       },
       { title: "Refresh", value: "refresh", description: "read the current state from Anthropic" },
     ]
@@ -415,7 +478,7 @@ function DialogExtraUsage() {
 }
 
 function DialogConnect() {
-  // The usual ones plus every provider in occ's own list (e.g. several Ollama Cloud accounts).
+  // The usual ones plus every provider in Agent Code's own list (e.g. several Ollama Cloud accounts).
   const own = Object.entries(config.providers ?? {})
     .filter(([id]) => !CONNECTABLE.some((item) => item.id === id))
     .map(([id, entry]) => ({ id, name: entry.name ?? id, hint: entry.baseURL ?? "" }))
@@ -431,7 +494,7 @@ function DialogConnect() {
           category: "Providers",
         })),
         { title: "Edit keys file", value: ":keys", description: authFile.replace(os.homedir(), "~"), category: "Keys" },
-        { title: "Import from opencode", value: ":import", description: "copy providers, keys and MCP servers occ doesn't have yet", category: "Keys" },
+        { title: "Import from opencode", value: ":import", description: "copy providers, keys and MCP servers Agent Code doesn't have yet", category: "Keys" },
       ]}
       onSelect={(option) => {
         if (option.value === ":keys") {
@@ -452,7 +515,7 @@ function DialogConnect() {
               const entry = { ...(config.providers?.[option.value] ?? {}) }
               if (option.value === "ollama") entry.baseURL = value.trim() || undefined
               else {
-                // Keys live in occ's own key store, never in config.json.
+                // Keys live in Agent Code's own key store, never in config.json.
                 saveKey(option.value, value.trim() || undefined)
                 delete entry.apiKey
               }
@@ -483,33 +546,16 @@ function DialogModels() {
     recentTick()
     const recent = config.recentModels ?? []
     const favs = favorites()
-    // Description: intelligence + context; footer: who pays and how much ($ per million input/output tokens).
-    // Claude on a plan: the API price ($ per million input/output tokens), how fast the model uses the plan next to
-    // Sonnet, and (once occ has measured the plan's worth, see planRate) what its tokens cost on the plan.
-    const rate = catalog.plan ? planRate(catalog.planLabel ?? catalog.plan, config.planPrice) : undefined
-    const sonnet = modelMeta("sonnet").price?.input
-    const claudeFacts = (model, meta) => {
-      if (meta.kind !== "anthropic" || !meta.price) return { facts: [], footer: undefined }
-      const facts = [`API ${priceText(meta.price)}`]
-      if (meta.billing !== "plan") return { facts, footer: undefined }
-      if (sonnet && meta.price.input !== sonnet) facts.push(`${Math.round((meta.price.input / sonnet) * 10) / 10}× Sonnet usage`)
-      const scoped = (limits.scoped ?? []).find((w) => [model.value, model.displayName, model.resolvedModel].some((v) => String(v ?? "").toLowerCase().includes(w.name.toLowerCase())))
-      if (scoped?.allowance) facts.push(`≤${scoped.allowance}% of weekly`)
-      if (!rate?.factor) return { facts, footer: undefined }
-      const plan = { input: meta.price.input * rate.factor, output: meta.price.output * rate.factor }
-      facts.push(`plan ≈${Math.max(1, Math.round(1 / rate.factor))}× cheaper`)
-      return { facts, footer: `${billingLabel(meta, model.provider)} ≈${priceText(plan)}` }
-    }
+    // Description: context and the API price; footer: who pays and, on a plan, the estimated price there.
     const option = (model                                                                          , category        ) => {
-      const meta = modelMeta(model.value, (model       ).resolvedModel)
-      const claude = claudeFacts(model, meta)
-      const facts = [meta.context ? `${contextText(meta.context)} ctx` : "", ...claude.facts].filter(Boolean).join(" · ")
+      const price = priceFacts(model.value, model.resolvedModel, model.provider, [model.displayName])
+      const facts = [price.meta.context ? `${contextText(price.meta.context)} ctx` : "", ...(price.meta.kind === "anthropic" ? price.facts : [])].filter(Boolean).join(" · ")
       return {
         title: model.displayName,
         value: model.value,
         description: facts + (favs.includes(model.value) && category !== "Favorites" ? (facts ? " · " : "") + "favourite" : ""),
         category,
-        footer: claude.footer ?? billingLabel(meta, model.provider),
+        footer: price.footer,
       }
     }
     // Provider models look like Anthropic ones to the picker: "<provider>/<model>".
@@ -528,7 +574,16 @@ function DialogModels() {
     // Earlier Claude versions last, in their own group.
     models.push(...claudeModels().filter((model) => model.older).map((model) => ({ ...model, provider: "Anthropic · older" })))
     const byValue = (value        ) => models.find((model) => model.value === value)
-    const favorite = favs.map(byValue).filter(Boolean).map((model) => option(model       , "Favorites"))
+    // A favourite with chosen variants gets one row for each of them.
+    const favorite = favs
+      .map(byValue)
+      .filter(Boolean)
+      .flatMap((model) => {
+        const row = option(model, "Favorites")
+        const levels = (config.favoriteVariants?.[model.value] ?? []).filter((level) => variantsOf(model.value).includes(level))
+        if (!levels.length) return [row]
+        return levels.map((level) => ({ ...row, title: `${row.title} · ${level}`, value: `${model.value}${FAV_VARIANT}${level}` }))
+      })
     // A favourite or recent model shows in each list it belongs to, its provider's included.
     const recents = recent
       .map(byValue)
@@ -557,6 +612,12 @@ function DialogModels() {
           toast.show({ variant: "warning", message: "OpenCode Zen's free models run through opencode itself: install opencode (https://opencode.ai) first.", duration: 6000 })
           return
         }
+        if (option.value.includes(FAV_VARIANT)) {
+          const [model, level] = option.value.split(FAV_VARIANT)
+          void Promise.resolve(setModel(model)).then(() => setEffort(level))
+          dialog.clear()
+          return
+        }
         void setModel(option.value)
         // Like opencode: a model with variants continues to the variant picker.
         // A model with variants asks for one the first time; afterwards its stored level comes back.
@@ -566,8 +627,28 @@ function DialogModels() {
         }
         dialog.clear()
       }}
+      onReorder={(from, to) => {
+        // Only favourites move, and only among themselves.
+        const a = from.split(FAV_VARIANT)[0]
+        const b = to.split(FAV_VARIANT)[0]
+        return favorites().includes(a) && favorites().includes(b) && a !== b ? moveFavorite(a, b) : false
+      }}
       actions={[
-        { keybind: "model.dialog.favorite", label: "favorite", run: (option) => toggleFavorite(option.value) },
+        {
+          keybind: "model.dialog.favorite",
+          label: "favorite",
+          run: (option) => {
+            const value = option.value.split(FAV_VARIANT)[0]
+            if (value.startsWith("install:")) return
+            const adding = !favorites().includes(value)
+            toggleFavorite(value)
+            // A new favourite with variants: pick which of them get a row.
+            if (adding && variantsOf(value).length) dialog.replace(() => <DialogFavoriteVariants model={value} title={option.title} />)
+          },
+        },
+        { keybind: "ctrl+v", label: "variants shown", run: (option) => { const value = option.value.split(FAV_VARIANT)[0]; if (favorites().includes(value) && variantsOf(value).length) dialog.replace(() => <DialogFavoriteVariants model={value} title={option.title.split(" · ")[0]} />) } },
+        { keybind: "ctrl+up", label: "move up", run: (option) => void moveFavorite(option.value.split(FAV_VARIANT)[0], -1) },
+        { keybind: "ctrl+down", label: "move down", run: (option) => void moveFavorite(option.value.split(FAV_VARIANT)[0], 1) },
         {
           keybind: "model.dialog.forget",
           label: "remove from recent",
@@ -582,12 +663,18 @@ function DialogModels() {
 
 function DialogEffort() {
   const levels = createMemo(() => variantsOf(store.model))
+  // Every variant costs the same per token: the model's API price and its estimated price on the plan.
+  const price = createMemo(() => {
+    const facts = priceFacts(store.model, store.modelId, providerName(store.model), [modelLabel()])
+    const api = facts.facts.find((item) => item.startsWith("API "))
+    return [api && !facts.footer.includes(api.slice(4)) ? api : "", facts.footer].filter(Boolean).join(" · ")
+  })
   return (
     <DialogSelect
-      title="Select variant"
+      title={`Select variant · ${modelLabel()}`}
       options={[
-        { title: "default", value: "default", description: "model default" },
-        ...levels().map((level) => ({ title: level, value: level, description: EFFORT_HINTS[level] })),
+        { title: "default", value: "default", description: "model default", footer: price() },
+        ...levels().map((level) => ({ title: level, value: level, description: EFFORT_HINTS[level], footer: price() })),
       ]}
       current={store.effort ?? "default"}
       onSelect={(option) => {
@@ -598,18 +685,71 @@ function DialogEffort() {
   )
 }
 
+const PERMISSION_MODES = [
+  { value: "default", title: "Default", description: "ask before edits and commands" },
+  { value: "acceptEdits", title: "Accept edits", description: "auto-approve file edits" },
+  { value: "plan", title: "Plan", description: "read-only planning" },
+  { value: "auto", title: "Auto", description: "classifier approves safe actions" },
+  { value: "dontAsk", title: "Don't ask", description: "deny anything not pre-approved" },
+  { value: "bypassPermissions", title: "Bypass permissions", description: "skip all permission checks" },
+]
+
+/** A new mode in three steps: its name, how it asks for permission, what the model is told while it is on. */
+function addAgentMode() {
+  dialog.replace(() => (
+    <DialogPrompt
+      title="New mode: name"
+      placeholder="e.g. Review, Docs, Careful"
+      onConfirm={(name) => {
+        name = name.trim()
+        if (!name) return dialog.replace(() => <DialogAgents />)
+        dialog.replace(() => (
+          <DialogSelect
+            title={`${name}: permissions`}
+            options={PERMISSION_MODES}
+            onSelect={(mode) =>
+              dialog.replace(() => (
+                <DialogPrompt
+                  title={`${name}: instruction for the model (empty: none)`}
+                  placeholder="e.g. Only review and comment; change nothing unless asked"
+                  onConfirm={(prompt) => {
+                    const id = `mode-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now().toString(36)}`
+                    config.agentModes = [...(config.agentModes ?? []), { id, name, mode: mode.value, prompt: prompt.trim() }]
+                    saveConfig()
+                    active().setAgent(id)
+                    dialog.clear()
+                    toast.show({ variant: "success", message: `Mode "${name}" added; this session is on it now` })
+                  }}
+                />
+              ))
+            }
+          />
+        ))
+      }}
+    />
+  ))
+}
+
+/** Modes: Build, Plan and your own (click "agents" in the footer, or ctrl+tab). The chosen one is kept per session. */
 function DialogAgents() {
+  const [tick, setTick] = createSignal(0)
   return (
     <DialogSelect
-      title="Select agent"
+      title="Modes"
       options={[
-        ...AGENTS.map((agent, index) => ({
+        ...(tick(), agentList()).map((agent, index) => ({
           title: agent.name,
           value: agent.id,
-          description: agent.id === "build" ? "Default agent, executes tools per your permissions" : "Plan mode, read-only exploration",
-          category: "Primary",
+          description:
+            agent.id === "build"
+              ? "Default agent, executes tools per your permissions"
+              : agent.id === "plan"
+                ? "Plan mode, read-only exploration"
+                : `${PERMISSION_MODES.find((item) => item.value === agent.mode)?.title ?? agent.mode}${agent.prompt ? ` · ${agent.prompt.slice(0, 60)}` : ""}`,
+          category: index < AGENTS.length ? "Primary" : "Your modes (kept per session)",
           gutter: <text fg={agentColor(index)}>●</text>,
         })),
+        { title: "Add a mode…", value: "mode:add", description: "a name, its permissions and an instruction for the model", category: "Your modes (kept per session)" },
         ...store.agents.map((agent) => ({
           title: agent.name,
           value: `subagent:${agent.name}`,
@@ -624,23 +764,29 @@ function DialogAgents() {
           dialog.clear()
           return
         }
-        const agent = AGENTS.find((item) => item.id === option.value)
-        if (agent) void setMode(agent.mode)
+        if (option.value === "mode:add") return addAgentMode()
+        active().setAgent(option.value)
         dialog.clear()
       }}
+      actions={[
+        {
+          keybind: "ctrl+d",
+          label: "delete your mode",
+          run: (option) => {
+            if (!(config.agentModes ?? []).some((mode) => mode.id === option.value)) return
+            if (currentAgent().id === option.value) active().setAgent("build")
+            config.agentModes = config.agentModes.filter((mode) => mode.id !== option.value)
+            saveConfig()
+            setTick((n) => n + 1)
+          },
+        },
+      ]}
     />
   )
 }
 
 function DialogPermissionMode() {
-  const modes                                                                  = [
-    { value: "default", title: "Default", description: "ask before edits and commands" },
-    { value: "acceptEdits", title: "Accept edits", description: "auto-approve file edits" },
-    { value: "plan", title: "Plan", description: "read-only planning" },
-    { value: "auto", title: "Auto", description: "classifier approves safe actions" },
-    { value: "dontAsk", title: "Don't ask", description: "deny anything not pre-approved" },
-    { value: "bypassPermissions", title: "Bypass permissions", description: "skip all permission checks" },
-  ]
+  const modes = PERMISSION_MODES
   return (
     <DialogSelect
       title="Permission mode"
@@ -776,7 +922,7 @@ function DialogMcp() {
           </text>
         ),
       }))}
-      emptyText="No MCP servers yet — ctrl+e opens occ's MCP file"
+      emptyText="No MCP servers yet — ctrl+e opens Agent Code's MCP file"
       onSelect={(option) => {
         const server = store.mcp.find((item) => item.name === option.value)
         if (!server) return
@@ -784,8 +930,8 @@ function DialogMcp() {
       }}
       actions={[
         { keybind: "ctrl+r", label: "reconnect", run: (option) => void reconnectMcp(option.value) },
-        // occ's own servers live in its secrets file, auth.json (restart the tab after editing it).
-        { keybind: "ctrl+e", label: "edit occ servers", run: () => (ensureMcpFile(), openURL(mcpFile)) },
+        // Agent Code's own servers live in its secrets file, auth.json (restart the tab after editing it).
+        { keybind: "ctrl+e", label: "edit Agent Code servers", run: () => (ensureMcpFile(), openURL(mcpFile)) },
       ]}
       footer={<text fg={theme.text}>enter <span style={{ fg: theme.textMuted }}>toggle</span></text>}
     />
@@ -805,7 +951,11 @@ function DialogStatus() {
       </box>
       <box>
         <text fg={theme.text}>
-          Claude Code <span style={{ fg: theme.textMuted }}>{store.version ?? "starting…"}</span>
+          {APP_NAME} <span style={{ fg: theme.textMuted }}>{appVersion()}</span>
+        </text>
+        <text fg={theme.text}>
+          {store.engine ? (harnessStatus().find((item) => item.id === store.engine)?.name ?? store.engine) : "Claude Code"}{" "}
+          <span style={{ fg: theme.textMuted }}>{store.engine ? (store.engineVersion ?? "") : (store.version ?? "starting…")}</span>
         </text>
         <text fg={theme.textMuted}>Account: {store.account?.email ?? "unknown"}</text>
         <Show when={store.account?.subscriptionType}>
@@ -947,7 +1097,7 @@ function DialogTasks() {
 
 
 
-/** Claude Code mods: which load, and what of them occ draws. */
+/** Claude Code mods: which load, and what of them Agent Code draws. */
 function DialogMods() {
   onMount(() => dialog.setSize("large"))
   const [tick, setTick] = createSignal(0)
@@ -981,7 +1131,7 @@ function DialogMods() {
         value: `mod:${mod.name}`,
         description: mod.description ?? mod.path,
         category: "Installed mods",
-        footer: `${mod.source === "occ" ? "occ" : mod.source === "env" ? "CLAUDE_CODE_PLUGIN_DIRS" : "Claude Code"}${mod.version ? ` · ${mod.version}` : ""}`,
+        footer: `${mod.source === "occ" ? "Agent Code" : mod.source === "env" ? "CLAUDE_CODE_PLUGIN_DIRS" : "Claude Code"}${mod.version ? ` · ${mod.version}` : ""}`,
         gutter: box(modsEnabled() && modEnabled(mod.name)),
       })),
       { title: "Reload", value: "reload", description: "look for new or changed mods and reload them", category: "Actions" },
@@ -1023,27 +1173,27 @@ function DialogMods() {
   )
 }
 
-/** `/update`: fast-forward occ's own repository; the launcher rebuilds it on the next start. */
+/** `/update`: fast-forward Agent Code's own repository; the launcher rebuilds it on the next start. */
 async function updateOcc() {
   const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
   const git = (...args) =>
     new Promise((resolve) =>
       execFile("git", ["-C", dir, ...args], { timeout: 60_000 }, (error, stdout, stderr) => resolve({ ok: !error, out: String(stdout).trim(), err: String(stderr || error?.message || "").trim() })),
     )
-  toast.show({ variant: "info", message: "Checking for occ updates…", duration: 2000 })
+  toast.show({ variant: "info", message: "Checking for Agent Code updates…", duration: 2000 })
   if (!(await git("rev-parse", "--git-dir")).ok) return toast.show({ variant: "warning", message: `${dir} is not a git checkout: update it by hand`, duration: 6000 })
   const fetched = await git("fetch", "--quiet", "--tags")
-  if (!fetched.ok) return toast.show({ variant: "error", message: `Could not reach the occ repository: ${fetched.err.split("\n").at(-1)}`, duration: 8000 })
+  if (!fetched.ok) return toast.show({ variant: "error", message: `Could not reach the Agent Code repository: ${fetched.err.split("\n").at(-1)}`, duration: 8000 })
   const behind = Number((await git("rev-list", "--count", "HEAD..@{u}")).out || 0)
-  if (!behind) return toast.show({ variant: "success", message: `occ is up to date (${(await git("describe", "--tags")).out})`, duration: 4000 })
+  if (!behind) return toast.show({ variant: "success", message: `agentcode is up to date (${(await git("describe", "--tags")).out})`, duration: 4000 })
   if ((await git("status", "--porcelain", "--untracked-files=no")).out)
-    return toast.show({ variant: "warning", message: "occ has local changes: commit them first, then /update", duration: 8000 })
+    return toast.show({ variant: "warning", message: "Agent Code has local changes: commit them first, then /update", duration: 8000 })
   const pulled = await git("pull", "--ff-only", "--quiet")
   if (!pulled.ok) return toast.show({ variant: "error", message: `Update failed: ${pulled.err.split("\n").at(-1)}`, duration: 8000 })
-  toast.show({ variant: "success", title: "occ updated", message: `${(await git("describe", "--tags")).out} (${behind} new commit${behind === 1 ? "" : "s"}). Restart occ to use it; it rebuilds on start.`, duration: 10000 })
+  toast.show({ variant: "success", title: "Agent Code updated", message: `${(await git("describe", "--tags")).out} (${behind} new commit${behind === 1 ? "" : "s"}). Restart Agent Code to use it; it rebuilds on start.`, duration: 10000 })
 }
 
-/** After the settings changed under occ (reload, restore, reset): apply what can change while running. */
+/** After the settings changed under Agent Code (reload, restore, reset): apply what can change while running. */
 function applyConfigChange() {
   setFavorites(config.favoriteModels ?? [])
   setRecentTick((n) => n + 1)
@@ -1076,7 +1226,7 @@ function DialogPhoneQr() {
   )
 }
 
-/** occ on a phone: the server, its address and how phones pair. */
+/** Agent Code on a phone: the server, its address and how phones pair. */
 function DialogPhone() {
   onMount(() => dialog.setSize("large"))
   const [tick, setTick] = createSignal(0)
@@ -1181,7 +1331,7 @@ function sessionMatches(query, who) {
   )
 }
 
-// Every session's text, read once per occ run (transcripts only change in open tabs, which are searched live).
+// Every session's text, read once per Agent Code run (transcripts only change in open tabs, which are searched live).
 const transcriptCache = new Map()
 async function transcriptOf(sessionId) {
   if (!transcriptCache.has(sessionId))
@@ -1236,7 +1386,7 @@ function DialogFind() {
       if (info.sessionId === store.sessionID) continue
       const items = await transcriptOf(info.sessionId)
       if (mine !== run) return
-      for (const item of items) {
+      for (const item of [...items].reverse()) {
         if (who() === "me" && item.role !== "user") continue
         if (who() === "ai" && item.role !== "assistant") continue
         if (!item.text.toLowerCase().includes(text.toLowerCase())) continue
@@ -1296,10 +1446,12 @@ function findAgain(direction) {
   const matches = sessionMatches(lastFind.query, lastFind.who)
   if (!matches.length) return toast.show({ variant: "info", message: `"${lastFind.query}" not found in this session`, duration: 2500 })
   const indexes = matches.map((message) => store.messages.indexOf(message))
-  const next = direction > 0 ? (indexes.find((index) => index > lastFind.at) ?? indexes[0]) : (indexes.findLast((index) => index < lastFind.at) ?? indexes.at(-1))
+  // Newest first, like the list: "next" is the match above (older), "previous" the one below (newer).
+  const at = lastFind.at ?? Infinity
+  const next = direction > 0 ? (indexes.findLast((index) => index < at) ?? indexes.at(-1)) : (indexes.find((index) => index > at) ?? indexes[0])
   lastFind.at = next
   jumpTo(store.messages[next].id)
-  toast.show({ variant: "info", message: `${indexes.indexOf(next) + 1} / ${indexes.length}: "${lastFind.query}"`, duration: 1500 })
+  toast.show({ variant: "info", message: `${indexes.length - indexes.indexOf(next)} / ${indexes.length} (newest first): "${lastFind.query}"`, duration: 1500 })
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,8 +1478,8 @@ async function claudeStatus() {
 }
 
 /**
- * Reset the 5-hour limit: an offer occ can see is used directly; otherwise Claude Code's own /limit-reset runs in
- * this terminal (Anthropic may offer it only there), and occ reads the usage again afterwards.
+ * Reset the 5-hour limit: an offer Agent Code can see is used directly; otherwise Claude Code's own /limit-reset runs in
+ * this terminal (Anthropic may offer it only there), and Agent Code reads the usage again afterwards.
  */
 let appRenderer
 export async function resetLimit() {
@@ -1410,11 +1562,11 @@ function DialogLogin() {
       {
         title: "DeepSeek Harness",
         value: "deepseek",
-        description: "uses the DeepSeek key from occ (DEEPSEEK_API_KEY)",
+        description: "uses the DeepSeek key from Agent Code (DEEPSEEK_API_KEY)",
         footer: "set key",
         category: "Harnesses",
       },
-      { title: "Provider keys…", value: "connect", description: "OpenAI, DeepSeek, OpenCode Zen/Go, Ollama keys for occ (/connect)", category: "occ" },
+      { title: "Provider keys…", value: "connect", description: "OpenAI, DeepSeek, OpenCode Zen/Go, Ollama keys for Agent Code (/connect)", category: "Agent Code" },
     ]
   })
   const run = async (file, args, title) => {
@@ -1542,17 +1694,17 @@ function DialogSettings() {
     saveConfig()
   }
   const settings            = [
-    // Only inside an occ-box: tied to occ's settings by default, or its own copy.
+    // Only inside an agentcode-box: tied to Agent Code's settings by default, or its own copy.
     ...(boxDir
       ? [
           {
             key: "box.own",
             title: "Box: own settings",
-            description: ownSettings() ? "this box keeps its own settings" : "uses occ's settings (shared)",
+            description: ownSettings() ? "this box keeps its own settings" : "uses Agent Code's settings (shared)",
             get: () => ownSettings(),
             set: (value         ) => setOwnSettings(value),
           },
-          { key: "box.reset", title: "Box: reset to factory default", description: "back to occ's settings (own copy kept as a backup)", get: () => !ownSettings(), set: () => {} },
+          { key: "box.reset", title: "Box: reset to factory default", description: "back to Agent Code's settings (own copy kept as a backup)", get: () => !ownSettings(), set: () => {} },
         ]
       : []),
     { key: "autoAllow", title: "Allow everything", description: "approve every tool without asking", get: flag("autoAllow", false), set: write("autoAllow") },
@@ -1603,7 +1755,7 @@ function DialogSettings() {
       key: "dropFiles",
       title: "Attach dropped files",
       description: dropsBlocked()
-        ? "this Alacritty window can't receive drops on Wayland: open occ with occ-window"
+        ? "this Alacritty window can't receive drops on Wayland: open Agent Code with agentcode-window"
         : "files dragged or pasted into the prompt are attached",
       get: flag("dropFiles", true),
       set: write("dropFiles"),
@@ -1612,7 +1764,7 @@ function DialogSettings() {
     { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
-    { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what occ draws", get: () => modsEnabled(), set: () => {} },
+    { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what Agent Code draws", get: () => modsEnabled(), set: () => {} },
     { key: "settings.save", title: "Save settings…", description: "keep these settings under a name, to bring back later", get: () => false, set: () => {} },
     { key: "settings.restore", title: "Restore saved settings…", description: "put a saved set of settings back", get: () => false, set: () => {} },
     { key: "settings.reset", title: "Reset to defaults", description: "every setting back to default (saved first; tabs, history and keys stay)", get: () => false, set: () => {} },
@@ -1684,7 +1836,7 @@ function DialogSettings() {
         }
         if (option.value === "box.own") {
           setOwnSettings(!ownSettings())
-          toast.show({ variant: "info", message: ownSettings() ? "Box: own settings, restarting…" : "Box: occ's settings, restarting…", duration: 2000 })
+          toast.show({ variant: "info", message: ownSettings() ? "Box: own settings, restarting…" : "Box: Agent Code's settings, restarting…", duration: 2000 })
           setTimeout(() => restartBox(), 600)
           return
         }
@@ -1692,7 +1844,7 @@ function DialogSettings() {
           dialog.replace(() => (
             <DialogConfirm
               title="Reset this box"
-              message="The box goes back to occ's settings. Its own settings are kept as a dated backup in cfg/open-claude-code. occ restarts."
+              message="The box goes back to Agent Code's settings. Its own settings are kept as a dated backup in cfg/agent-code. Agent Code restarts."
               onConfirm={() => {
                 resetBox()
                 dialog.clear()
@@ -1836,7 +1988,7 @@ export function App() {
         toast.show({
           variant: "info",
           title: "Dropping files",
-          message: "Alacritty on Wayland can't receive dropped files. Start occ with `occ-window` (or the Open Claude Code launcher) to drag files straight in.",
+          message: "Alacritty on Wayland can't receive dropped files. Start Agent Code with `agentcode-window` (or the Agent Code launcher) to drag files straight in.",
           duration: 15000,
         }),
       1500,
@@ -1876,7 +2028,8 @@ export function App() {
   createEffect(
     on(
       () => store.title,
-      (title) => renderer.setTerminalTitle(title ? `${title} · claude` : "claude code"),
+      // The window is named after the harness, nothing else.
+      () => renderer.setTerminalTitle(APP_NAME),
     ),
   )
 
@@ -2199,7 +2352,7 @@ export function App() {
         )),
     },
     { id: "phone.show", title: "Phone", category: "System", slash: "phone", run: () => dialog.replace(() => <DialogPhone />, undefined, "large") },
-    { id: "app.update", title: "Update occ", category: "System", slash: "update", run: () => void updateOcc() },
+    { id: "app.update", title: "Update Agent Code", category: "System", slash: "update", run: () => void updateOcc() },
     { id: "mods.list", title: "Mods", category: "System", slash: "mods", run: () => dialog.replace(() => <DialogMods />, undefined, "large") },
     { id: "settings.show", title: "Settings", category: "System", slash: "settings", slashAliases: ["config", "options"], run: () => dialog.replace(() => <DialogSettings />, undefined, "large") },
     { id: "tab.next", title: "Next tab", category: "Tabs", enabled: () => tabs().length > 1, run: () => nextTab(1) },

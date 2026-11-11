@@ -2,7 +2,7 @@ import { TextAttributes } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Show } from "solid-js"
 import { runCommand, shortcut } from "../context/keymap"
-import { active, closeTab, focusTab, tabs,              } from "../context/tabs"
+import { active, closeTab, focusTab, moveTabTo, tabs } from "../context/tabs"
 import { theme } from "../context/theme"
 import { Spinner } from "./spinner"
 
@@ -21,6 +21,26 @@ export function TabBar() {
   const [hover, setHover] = createSignal        ()
   let events = 0
   let lastOver = 0
+  // Dragging a tab along the strip reorders it, like browser tabs: the tab follows the pointer over its neighbours.
+  const boxes = new Map()
+  const [dragging, setDragging] = createSignal()
+  let dragged = false
+  const dragOver = (session, event) => {
+    if (dragging() !== session) return
+    for (const [other, box] of boxes) {
+      if (other === session || box.isDestroyed) continue
+      // Past the middle of a neighbour: take its place.
+      const middle = box.x + box.width / 2
+      const from = tabs().indexOf(session)
+      const to = tabs().indexOf(other)
+      if (to < 0 || event.y !== box.y) continue
+      if ((to > from && event.x >= middle && event.x < box.x + box.width) || (to < from && event.x < middle && event.x >= box.x)) {
+        dragged = true
+        moveTabTo(session, to)
+        return
+      }
+    }
+  }
   // Keep a window of tabs around the focused one when they don't all fit.
   const visible = createMemo(() => {
     const list = tabs()
@@ -52,14 +72,24 @@ export function TabBar() {
               paddingLeft={1}
               paddingRight={1}
               gap={1}
-              backgroundColor={focused() ? theme.backgroundElement : undefined}
+              backgroundColor={dragging() === session ? theme.backgroundElement : focused() ? theme.backgroundElement : undefined}
+              ref={(r) => boxes.set(session, r)}
+              onMouseDown={() => {
+                dragged = false
+                setDragging(session)
+              }}
+              onMouseDrag={(event) => dragOver(session, event)}
+              onMouseDragEnd={() => setDragging(undefined)}
               onMouseOver={over}
               onMouseOut={() => {
                 // Out of the box then over one of its children arrives as out → over: wait a tick before collapsing.
                 const seq = ++events
                 setTimeout(() => lastOver < seq && hover() === session.key && setHover(undefined), 40)
               }}
-              onMouseUp={() => focusTab(session)}
+              onMouseUp={() => {
+                setDragging(undefined)
+                focusTab(session)
+              }}
             >
               <text fg={theme.textMuted}>{index() <= 9 ? index() : "·"}</text>
               <Show

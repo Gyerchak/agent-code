@@ -6,7 +6,7 @@ import { configDir } from "./paths"
 
 // ---------------------------------------------------------------------------
 // Claude Code mods: plugins whose hooks/hooks.json names a hooks module (the plugin-authoring skill
-// writes them). occ loads the enabled ones into each Claude Code process (the SDK's `plugins`), so their
+// writes them). Agent Code loads the enabled ones into each Claude Code process (the SDK's `plugins`), so their
 // hooks, tools, commands and agents run in the engine as in Claude Code, and attaches to the engine as a
 // remote surface (`ui_attach`, like Claude Code Desktop) to draw what they show: the band above the
 // prompt, panes, toasts, status lines and log lines (see session.ts and component/mods.tsx).
@@ -22,12 +22,12 @@ import { configDir } from "./paths"
 
 
 
-/** occ's own mods folder: put a mod folder here to have occ load it. */
+/** Agent Code's own mods folder: put a mod folder here to have Agent Code load it. */
 export const modsDir = path.join(configDir, "mods")
 
 /**
  * Off unless switched on: mods that skin Claude Code's own terminal and would draw a second copy of
- * what occ already shows (opencode-skin's logo above the prompt).
+ * what Agent Code already shows (opencode-skin's logo above the prompt).
  */
 const DEFAULT_OFF = new Set(["opencode-skin"])
 
@@ -59,7 +59,7 @@ const subdirs = (dir        ) => {
   }
 }
 
-/** The plugin folders CLAUDE_CODE_PLUGIN_DIRS names (occ passes them itself, so they can be switched off). */
+/** The plugin folders CLAUDE_CODE_PLUGIN_DIRS names (Agent Code passes them itself, so they can be switched off). */
 export function envPluginDirs() {
   return (process.env.CLAUDE_CODE_PLUGIN_DIRS ?? "")
     .split(path.delimiter)
@@ -70,7 +70,7 @@ export function envPluginDirs() {
 
 let cached
 
-/** Every mod on this machine, one per name: occ's folder first, then the environment, then the newest copy. */
+/** Every mod on this machine, one per name: Agent Code's folder first, then the environment, then the newest copy. */
 export function discoverMods(force = false)            {
   if (!force && cached && Date.now() - cached.time < 5000) return cached.list
   const found            = []
@@ -118,7 +118,7 @@ export function setModEnabled(name        , value         ) {
   saveConfig()
 }
 
-/** What occ draws of the mods (each default on). */
+/** What Agent Code draws of the mods (each default on). */
 
 export function modsShows(part          ) {
   return modsEnabled() && settings()[part] !== false

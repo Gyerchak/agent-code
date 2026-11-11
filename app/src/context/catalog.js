@@ -56,7 +56,7 @@ const price = (cost     )                    =>
   cost && typeof cost.input === "number" ? { input: cost.input, output: cost.output ?? 0, cacheRead: cost.cache_read } : undefined
 
 async function fetchDev()                        {
-  const response = await fetch("https://models.dev/api.json", { headers: { "user-agent": "open-claude-code" }, signal: AbortSignal.timeout(10_000) })
+  const response = await fetch("https://models.dev/api.json", { headers: { "user-agent": "agent-code" }, signal: AbortSignal.timeout(10_000) })
   const all      = await response.json()
   const out                            = {}
   for (const id of DEV_PROVIDERS) {
@@ -82,7 +82,7 @@ async function fetchGo()                                      {
   const key = config.providers?.["opencode-go"]?.apiKey ?? providers.list.find((item) => item.id === "opencode-go")?.apiKey
   if (!key) return undefined
   const response = await fetch("https://opencode.ai/zen/go/v1/usage", {
-    headers: { authorization: `Bearer ${key}`, "user-agent": "open-claude-code" },
+    headers: { authorization: `Bearer ${key}`, "user-agent": "agent-code" },
     signal: AbortSignal.timeout(10_000),
   })
   if (response.status === 403) return null
@@ -134,7 +134,7 @@ const CLAUDE_IDS                         = { opus: "claude-opus-5-5", sonnet: "c
 
 
 
-               // OpenCode Zen free tier: served only to opencode, so occ runs these through opencode itself
+               // OpenCode Zen free tier: served only to opencode, so Agent Code runs these through opencode itself
 
 
 

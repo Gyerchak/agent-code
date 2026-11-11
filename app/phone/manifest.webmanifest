@@ -1,7 +1,7 @@
 {
-  "name": "occ",
-  "short_name": "occ",
-  "description": "Your occ coding sessions from the computer, on the phone",
+  "name": "Agent Code",
+  "short_name": "Agent Code",
+  "description": "Your Agent Code coding sessions from the computer, on the phone",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

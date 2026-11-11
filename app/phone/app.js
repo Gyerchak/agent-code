@@ -1,5 +1,5 @@
-// occ on a phone: shows the tabs and chats of occ running on a computer, sends prompts and files, stops, pauses
-// and answers permission prompts. The computer does the work; this page only talks to occ's phone server.
+// Agent Code on a phone: shows the tabs and chats of Agent Code running on a computer, sends prompts and files, stops, pauses
+// and answers permission prompts. The computer does the work; this page only talks to Agent Code's phone server.
 
 const $ = (id) => document.getElementById(id)
 const state = { token: "", tabs: [], current: localStorage.getItem("occ.tab") ?? "", detail: undefined, files: [], serverFiles: true }
@@ -67,7 +67,7 @@ function renderChat() {
   const chat = $("chat")
   const detail = state.detail
   if (!detail) {
-    chat.innerHTML = `<div class="empty muted">${state.tabs.length ? "Pick a tab" : "No tabs open in occ"}</div>`
+    chat.innerHTML = `<div class="empty muted">${state.tabs.length ? "Pick a tab" : "No tabs open in Agent Code"}</div>`
     return
   }
   const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120
@@ -89,7 +89,7 @@ function renderChat() {
     })
     .join("")
   if (nearBottom) chat.scrollTop = chat.scrollHeight
-  // Permission prompts: answered here as in occ.
+  // Permission prompts: answered here as in Agent Code.
   const box = $("permissions")
   box.hidden = !detail.permissions?.length
   box.innerHTML = (detail.permissions ?? [])
@@ -139,7 +139,7 @@ function showError(error) {
   $("status").textContent = String(error?.message ?? error)
 }
 
-// Live updates from occ (server-sent events); reconnects by itself.
+// Live updates from Agent Code (server-sent events); reconnects by itself.
 let events
 function connect() {
   events?.close()
@@ -153,7 +153,7 @@ function connect() {
   events.addEventListener("tab", (event) => {
     const { key, attention } = JSON.parse(event.data)
     if (key === state.current) void refreshTab().catch(showError)
-    if (attention && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("occ needs you", { body: "A tab is asking for permission" })
+    if (attention && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("Agent Code needs you", { body: "A tab is asking for permission" })
   })
 }
 
@@ -245,7 +245,7 @@ $("unpair").onclick = () => {
 }
 
 if (!state.token) {
-  $("chat").innerHTML = `<div class="empty muted">Not paired. In occ on your computer run <b>/phone</b> and scan the QR code (or open its link here).</div>`
+  $("chat").innerHTML = `<div class="empty muted">Not paired. In Agent Code on your computer run <b>/phone</b> and scan the QR code (or open its link here).</div>`
 } else connect()
 
 if ("serviceWorker" in navigator && window.isSecureContext) void navigator.serviceWorker.register("sw.js").catch(() => {})

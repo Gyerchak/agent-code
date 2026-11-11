@@ -8,11 +8,11 @@ import { findBinary } from "./platform"
 
 // ---------------------------------------------------------------------------
 // Other agent harnesses, run as engines next to Claude Code. Each speaks the Agent Client Protocol (ACP,
-// JSON-RPC over stdio); occ starts it, sends the prompts and draws its replies, tools and permission asks
+// JSON-RPC over stdio); Agent Code starts it, sends the prompts and draws its replies, tools and permission asks
 // in the same transcript, as it does for Claude Code. A model from one is stored as "<harness>/<model>".
 // ---------------------------------------------------------------------------
 
-/** Keys for the env variables a harness reads, by the occ provider whose key they take (/connect). */
+/** Keys for the env variables a harness reads, by the Agent Code provider whose key they take (/connect). */
 export const HARNESSES = [
   {
     id: "opencode",

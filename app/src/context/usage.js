@@ -22,7 +22,7 @@ import { stateDir } from "./paths"
  * The claude.ai plan of the logged-in account, from Anthropic itself (GET /api/oauth/profile: organization type
  * and rate-limit tier), so a plan change shows at once. Claude Code's credentials file keeps the plan it saw at
  * login (it said "pro" long after an upgrade to Max) and is only the fallback. Cached 30 minutes, shared by
- * every occ window. Undefined for API-key logins.
+ * every Agent Code window. Undefined for API-key logins.
  */
 export async function planDetails() {
   const shared = readProfileCache()
@@ -134,12 +134,12 @@ function window(raw     )                         {
  * Fetch the live 5-hour and weekly windows. Returns undefined when no OAuth token is readable
  * (macOS Keychain, API key login, expired token) so callers can fall back to the SDK.
  */
-// Every occ window polls; share one result (and one backoff) through a file so they don't trip the 429 limit together.
-// One file for every occ process on the machine. An occ-box has its own state folder (XDG_STATE_HOME), so it
+// Every Agent Code window polls; share one result (and one backoff) through a file so they don't trip the 429 limit together.
+// One file for every Agent Code process on the machine. An agentcode-box has its own state folder (XDG_STATE_HOME), so it
 // gets the main one from its launcher (OCC_SHARED_STATE); otherwise each box polled alone and got rate limited.
 const sharedDir =
   process.env.OCC_SHARED_STATE ||
-  (process.env.OCC_BOX_DIR ? path.join(process.env.OCC_MAIN_STATE || path.join(os.homedir(), ".local", "state"), "open-claude-code") : stateDir)
+  (process.env.OCC_BOX_DIR ? path.join(process.env.OCC_MAIN_STATE || path.join(os.homedir(), ".local", "state"), "agent-code") : stateDir)
 const sharedFile = path.join(sharedDir, "plan-usage.json")
 
 function readShared()         {
@@ -166,7 +166,7 @@ export function publishPlanUsage(usage           ) {
 }
 
 /**
- * Call `fn` whenever another occ window writes new numbers to the shared file (checked every 2 s), so every
+ * Call `fn` whenever another Agent Code window writes new numbers to the shared file (checked every 2 s), so every
  * window shows the same usage within seconds instead of at its own next 2-minute poll.
  */
 export function onSharedPlanUsage(fn                            ) {
@@ -185,9 +185,10 @@ function passedReset(shared) {
   return windows.some((w) => w?.resetsAt && w.resetsAt <= Date.now() && w.resetsAt > (shared.fetched ?? 0))
 }
 
-export async function fetchPlanUsage(force = false)                                 {
+/** `maxAge`: how old a shared reading may be (shorter while work is running, so the meters move as it is used). */
+export async function fetchPlanUsage(force = false, maxAge = 100_000)                                 {
   const shared = readShared()
-  const fresh = !force && shared.usage && shared.fetched && Date.now() - shared.fetched < 100_000 && !passedReset(shared)
+  const fresh = !force && shared.usage && shared.fetched && Date.now() - shared.fetched < maxAge && !passedReset(shared)
   if (fresh) return shared.usage
   if (Date.now() < Math.max(pausedUntil, shared.pausedUntil ?? 0)) {
     // Backing off: a result up to 15 minutes old is still better than the partial stream events.
@@ -249,8 +250,8 @@ export async function fetchPlanUsage(force = false)                             
 // ---------------------------------------------------------------------------
 // What the plan is worth. Claude Code prices every turn at API rates (total_cost_usd); set against how far the
 // weekly meter moved meanwhile, that gives "API dollars per 1 % of the weekly limit" for this account, and from
-// the plan's price the share of the API price a plan token really costs. Shared by every occ window; work done
-// outside occ (claude.ai, another Claude Code) also moves the meter, so the estimate errs on the expensive side.
+// the plan's price the share of the API price a plan token really costs. Shared by every Agent Code window; work done
+// outside Agent Code (claude.ai, another Claude Code) also moves the meter, so the estimate errs on the expensive side.
 // ---------------------------------------------------------------------------
 
 const rateFile = () => path.join(sharedDir, "plan-rate.json")
@@ -308,7 +309,7 @@ export function planRate(label, price) {
 // ---------------------------------------------------------------------------
 // Limit resets Anthropic sometimes offers at the 5-hour wall ("Reset your 5-hour limit now · uses weekly limit ·
 // 1/week", or reset grants from an event). Read from the usage endpoint's at-the-wall view, claimed with the same
-// request Claude Code's /limit-reset makes. occ only shows what Anthropic says is available to it.
+// request Claude Code's /limit-reset makes. Agent Code only shows what Anthropic says is available to it.
 // ---------------------------------------------------------------------------
 
 let offerLast = 0
@@ -350,7 +351,7 @@ export async function claimResetOffer(offer) {
   const token = await accessToken()
   let org = (await planDetails())?.org
   if (!org) {
-    forgetPlan() // a cached plan from before occ kept the organization
+    forgetPlan() // a cached plan from before Agent Code kept the organization
     org = (await planDetails())?.org
   }
   if (!token || !org) return "auth_error"

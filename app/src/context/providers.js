@@ -14,16 +14,16 @@ import { applyPersonalSeed } from "./personal"
 
 // ---------------------------------------------------------------------------
 // Non-Anthropic providers. Claude Code talks to them through ANTHROPIC_BASE_URL: directly when the
-// model answers the Anthropic Messages API, otherwise through occ's translating proxy (proxy.ts).
+// model answers the Anthropic Messages API, otherwise through Agent Code's translating proxy (proxy.ts).
 // A model from one is stored as "<provider>/<model>".
-// occ keeps its own providers (config.json → providers) and keys (auth.ts: <data>/open-claude-code/auth.json, 0600).
+// Agent Code keeps its own providers (config.json → providers) and keys (auth.ts: <data>/agent-code/auth.json, 0600).
 // On first start it imports what opencode has once (its config's providers, its auth.json keys); after that
-// opencode's files are never read again and /connect writes only occ's own file.
+// opencode's files are never read again and /connect writes only Agent Code's own file.
 // ---------------------------------------------------------------------------
 
 
 
-/** appOnly: served only to the provider's own app (OpenCode Zen's free tier); occ runs these through opencode. */
+/** appOnly: served only to the provider's own app (OpenCode Zen's free tier); Agent Code runs these through opencode. */
 
 
 
@@ -43,7 +43,7 @@ const BUILTIN                                                                   
   "opencode-go": { name: "OpenCode Go", baseURL: "https://opencode.ai/zen/go", kind: "opencode", order: 3 },
   ollama: { name: "Ollama (local)", baseURL: "http://127.0.0.1:11434", kind: "ollama", order: 6 },
   "ollama-cloud": { name: "Ollama Cloud", baseURL: "https://ollama.com", kind: "ollama", order: 4 },
-  // Listed once a key is saved (/connect); their models also run inside Claude Code through occ's proxy.
+  // Listed once a key is saved (/connect); their models also run inside Claude Code through Agent Code's proxy.
   deepseek: { name: "DeepSeek", baseURL: "https://api.deepseek.com", kind: "openai", order: 7 },
   openai: { name: "OpenAI", baseURL: "https://api.openai.com", kind: "openai", order: 8 },
 }
@@ -81,19 +81,19 @@ function saveCache() {
 }
 
 // ---------------------------------------------------------------------------
-// occ's key store
+// Agent Code's key store
 // ---------------------------------------------------------------------------
 
 export { authFile }
 
-/** Provider keys from occ's secrets file (auth.ts). */
+/** Provider keys from Agent Code's secrets file (auth.ts). */
 function readAuth()                         {
   const out                         = {}
   for (const [id, value] of Object.entries     (readAuthFile())) if (value?.type === "api" && typeof value.key === "string" && value.key) out[id] = value.key
   return out
 }
 
-/** A provider's saved API key (occ's auth.json), for harnesses that read it from their environment. */
+/** A provider's saved API key (Agent Code's auth.json), for harnesses that read it from their environment. */
 export function apiKeyFor(id        ) {
   return readAuth()[id]
 }
@@ -106,7 +106,7 @@ function writeAuth(keys                        ) {
   resolved = undefined
 }
 
-/** Save (or with no key, remove) a provider's API key in occ's own store. */
+/** Save (or with no key, remove) a provider's API key in Agent Code's own store. */
 export function saveKey(id        , key                    ) {
   const keys = readAuth()
   if (key) keys[id] = key
@@ -161,8 +161,8 @@ function opencodeKey(auth                        , id        , baseURL        , 
 }
 
 /**
- * Copy opencode's providers and keys into occ's own config and key store, once (or again on request,
- * filling in only what occ doesn't have yet). Keys that were in occ's config.json move to the key store.
+ * Copy opencode's providers and keys into Agent Code's own config and key store, once (or again on request,
+ * filling in only what Agent Code doesn't have yet). Keys that were in Agent Code's config.json move to the key store.
  */
 export function importFromOpencode(force = false) {
   if (config.providersImported && !force) return { providers: 0, keys: 0 }
@@ -245,7 +245,7 @@ function readAll()             {
     const order = own?.order ?? builtin?.order ?? 50
     list.push({ id, name, baseURL, apiKey, kind, configModels: own?.models ?? [], order, sessionHeader: kind === "opencode" })
   }
-  // Built-in entries only when occ's own providers don't already point at the same endpoint.
+  // Built-in entries only when Agent Code's own providers don't already point at the same endpoint.
   const configured = (item          ) => !!config.providers?.[item.id]
   return list
     .filter((item) => !BUILTIN[item.id] || configured(item) || !list.some((other) => other !== item && configured(other) && other.baseURL === item.baseURL))
@@ -258,7 +258,7 @@ function resolve(id        ) {
 
 async function getJSON(url        , apiKey         , timeout = 4000)               {
   const response = await fetch(url, {
-    headers: { "user-agent": "open-claude-code/1.0", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+    headers: { "user-agent": "agent-code/1.0", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
     signal: AbortSignal.timeout(timeout),
   })
   if (!response.ok) throw new Error(`${response.status} ${url}`)
@@ -293,7 +293,7 @@ async function modelsDev()                               {
   }
 }
 
-/** The main occ's provider cache, for a box (its launcher names the main state folder). */
+/** The main Agent Code's provider cache, for a box (its launcher names the main state folder). */
 function sharedModels(key        )                       {
   const dir = process.env.OCC_SHARED_STATE
   if (!dir) return undefined
@@ -342,7 +342,7 @@ async function listModels(provider          )                           {
 }
 
 /**
- * OpenCode Zen's free models answer only the opencode app ("FreeTierError" elsewhere): occ runs them
+ * OpenCode Zen's free models answer only the opencode app ("FreeTierError" elsewhere): Agent Code runs them
  * through opencode itself. Returns opencode's own id ("opencode/<model>") for such models.
  */
 export function opencodeModel(value                    )                     {
@@ -442,7 +442,7 @@ async function protocolOf(provider          , model        )                    
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "user-agent": "open-claude-code/1.0",
+        "user-agent": "agent-code/1.0",
         "anthropic-version": "2023-06-01",
         "x-api-key": provider.apiKey ?? "",
         "x-opencode-session": `occ-probe-${process.pid}`,
@@ -472,7 +472,7 @@ export async function providerEnv(value                    , sessionId          
   }
   const protocol = await protocolOf(provider, split.model)
   const session = provider.sessionHeader && sessionId ? { "x-opencode-session": sessionId } : undefined
-  // Always through occ's proxy: it translates protocols and writes the model's variant into each request.
+  // Always through Agent Code's proxy: it translates protocols and writes the model's variant into each request.
   const baseURL = await proxyURL({ baseURL: provider.baseURL, apiKey: provider.apiKey, protocol, headers: session, model: value })
   // Local Ollama: a variant whose context fits the GPU (the default 4K would cut Claude Code's prompt).
   const model = providerKind(value) === "local" ? await localModel(provider.baseURL, split.model) : split.model
@@ -495,7 +495,7 @@ export async function providerEnv(value                    , sessionId          
 }
 
 /**
- * Mixed providers in one Claude Code process: Claude Code keeps its Claude login and talks to occ's router,
+ * Mixed providers in one Claude Code process: Claude Code keeps its Claude login and talks to Agent Code's router,
  * which sends "<provider>/<model>" requests to that provider and everything else to Anthropic.
  */
 export async function routerEnv(sessionId                    , main         )                                  {

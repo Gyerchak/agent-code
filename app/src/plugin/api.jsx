@@ -120,7 +120,7 @@ export const client               = {
   },
 }
 
-/** Subscribe to occ session events translated to opencode-style `{ type, properties }`. */
+/** Subscribe to Agent Code session events translated to opencode-style `{ type, properties }`. */
 function onPluginEvent(handler                              ) {
   const offSession = onSessionEvent((event) => {
     const base = { sessionID: event.session.store.sessionID, tab: event.session.key }

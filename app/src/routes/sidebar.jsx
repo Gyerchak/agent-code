@@ -9,6 +9,9 @@ import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
 import { config, configRevision } from "../context/config"
+import { appVersion } from "../context/version"
+import { phoneServerState } from "../context/remote"
+import { harnessById } from "../context/harnesses"
 import { actions, clock } from "../context/app"
 import { dialog } from "../ui/dialog"
 import { Spinner } from "../component/spinner"
@@ -372,7 +375,7 @@ export function PluginsSection() {
           {(plugin) => (
             <text fg={theme.text} wrapMode="none" truncate onMouseUp={() => runCommand("plugins.list")}>
               <span style={{ fg: plugin.active ? theme.success : plugin.enabled ? theme.error : theme.textMuted }}>•</span> {plugin.id}
-              <span style={{ fg: theme.textMuted }}> occ</span>
+              <span style={{ fg: theme.textMuted }}> Agent Code</span>
             </text>
           )}
         </For>
@@ -446,6 +449,36 @@ export function AutoPauseToggle() {
   )
 }
 
+/** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
+export function PhoneRow() {
+  const [hover, setHover] = createSignal(false)
+  const state = () => (clock(), configRevision(), phoneServerState())
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => runCommand("phone.show")}
+    >
+      <text fg={state().running ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: state().running ? theme.success : theme.textMuted }}>{state().running ? "◉" : "○"}</span>
+        {state().running ? `  Phone on · ${state().clients} connected` : "  Phone app off"}
+        <Show when={hover()}>
+          <span style={{ fg: theme.textMuted }}>{state().running ? " (pair, settings)" : " (click to set up)"}</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
+/** The harness the tab's model runs in, with its version when it is known. */
+function engineLabel() {
+  if (!store.engine) return `Claude Code ${store.version ?? ""}`.trim()
+  return `${harnessById(store.engine)?.name ?? store.engine} ${store.engineVersion ?? ""}`.trim()
+}
+
 export function SidebarFooter() {
   const dimensions = useTerminalDimensions()
   const location = createMemo(() => {
@@ -458,18 +491,25 @@ export function SidebarFooter() {
       <box flexShrink={0}>
         <PauseBar />
         <AutoPauseToggle />
+        <PhoneRow />
       </box>
       <text fg={theme.textMuted} wrapMode="none" truncate>
         {location()}
       </text>
       <Show when={dimensions().height >= 20}>
-        <text fg={theme.textMuted}>
-          <span style={{ fg: theme.success }}>•</span> <b>Claude</b>
-          <span style={{ fg: theme.text }}>
-            <b>Code</b>
-          </span>{" "}
-          <span>{store.version ?? ""}</span>
-        </text>
+        {/* This harness and its version; to the right, the harness the tab's model runs in. */}
+        <box flexDirection="row" justifyContent="space-between" gap={1}>
+          <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
+            <span style={{ fg: theme.success }}>•</span> <b>Agent</b>
+            <span style={{ fg: theme.text }}>
+              <b>Code</b>
+            </span>{" "}
+            <span>{appVersion()}</span>
+          </text>
+          <text fg={theme.textMuted} wrapMode="none" truncate flexShrink={1}>
+            {engineLabel()}
+          </text>
+        </box>
       </Show>
     </>
   )

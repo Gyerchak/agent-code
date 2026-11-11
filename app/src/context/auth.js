@@ -3,7 +3,7 @@ import path from "node:path"
 import { dataDir } from "./paths"
 
 // ---------------------------------------------------------------------------
-// occ's one secrets file: <data>/open-claude-code/auth.json (0600).
+// Agent Code's one secrets file: <data>/agent-code/auth.json (0600).
 //   "<provider id>": { "type": "api", "key": "…" }                     provider API keys (providers.ts)
 //   "mcp:<server>":  { "type": "mcp", "server": { command, args, env } } MCP servers, `"disabled": true` keeps one off (mcp.ts)
 // Each module reads and writes only its own entries; the rest of the file is kept as it is.

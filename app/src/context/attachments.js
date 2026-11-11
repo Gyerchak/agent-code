@@ -158,7 +158,7 @@ export async function readAttachment(file        )                      {
       return attachment
     }
   }
-  // Video and sound: shown and played in occ; the model gets the path (it can use ffmpeg on it).
+  // Video and sound: shown and played in Agent Code; the model gets the path (it can use ffmpeg on it).
   if (VIDEO[ext] || AUDIO[ext]) {
     const info = await probe(file)
     const kind = VIDEO[ext] && info?.hasVideo !== false ? "video" : "audio"
@@ -329,7 +329,7 @@ export function selectionWithPaths(selected        , messages              ) {
 
 /**
  * Whether this window can't receive dropped files: Alacritty on Wayland (winit 0.30 has no Wayland
- * drag-and-drop). occ-window starts it through XWayland instead (and sets OCC_WAYLAND_DISPLAY).
+ * drag-and-drop). agentcode-window starts it through XWayland instead (and sets OCC_WAYLAND_DISPLAY).
  */
 export function dropsBlocked() {
   return !!process.env.ALACRITTY_WINDOW_ID && !!process.env.WAYLAND_DISPLAY && !process.env.OCC_WAYLAND_DISPLAY

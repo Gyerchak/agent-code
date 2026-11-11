@@ -1,4 +1,4 @@
-# occ for Windows (PowerShell): the same steps as bin/occ — find Node.js 26+, build when needed, run.
+# agentcode for Windows (PowerShell): the same steps as bin/agentcode — find Node.js 26+, build when needed, run.
 $ErrorActionPreference = "Stop"
 $Dir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
@@ -18,7 +18,7 @@ foreach ($c in $candidates) {
   if ($c -and (Test-Path $c) -and ((Get-NodeMajor $c) -ge 26)) { $Node = $c; break }
 }
 if (-not $Node) {
-  Write-Host "occ needs Node.js 26 or newer. Install it from https://nodejs.org (or: winget install OpenJS.NodeJS) and run occ again." -ForegroundColor Red
+  Write-Host "agentcode needs Node.js 26 or newer. Install it from https://nodejs.org (or: winget install OpenJS.NodeJS) and run agentcode again." -ForegroundColor Red
   exit 1
 }
 
@@ -30,14 +30,14 @@ if (-not $stale) {
   $stale = [bool](Get-ChildItem (Join-Path $Dir "src") -Recurse -File | Where-Object { $_.LastWriteTime -gt $built } | Select-Object -First 1)
 }
 if ($stale) {
-  Write-Host "occ: building..."
+  Write-Host "agentcode: building..."
   Push-Location $Dir
   try {
     $env:Path = (Split-Path -Parent $Node) + ";" + $env:Path
     if (-not (Test-Path "node_modules")) { npm ci | Out-Host }
     npm run build | Out-Host
   } finally { Pop-Location }
-  if (-not (Test-Path $dist)) { Write-Host "occ: the build failed (run npm ci; npm run build in $Dir)." -ForegroundColor Red; exit 1 }
+  if (-not (Test-Path $dist)) { Write-Host "agentcode: the build failed (run npm ci; npm run build in $Dir)." -ForegroundColor Red; exit 1 }
 }
 
 & $Node --experimental-ffi --no-warnings $dist @args

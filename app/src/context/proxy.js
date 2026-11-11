@@ -6,7 +6,7 @@ import { applyVariant } from "./variants"
 
 // ---------------------------------------------------------------------------
 // Claude Code only speaks the Anthropic Messages API. Many provider models (GLM, Kimi K2, MiMo,
-// GPT, Grok, …) only answer OpenAI Chat Completions or Responses, so occ runs a small local
+// GPT, Grok, …) only answer OpenAI Chat Completions or Responses, so Agent Code runs a small local
 // server that takes Claude Code's /v1/messages requests and translates them both ways.
 // ---------------------------------------------------------------------------
 
@@ -92,7 +92,7 @@ async function handle(req                      , res                     ) {
     sendError(res, 500, error instanceof Error ? error.message : String(error))
   })
   const upstream = routes.get(token)
-  if (!upstream) return sendError(res, 404, "unknown occ proxy route")
+  if (!upstream) return sendError(res, 404, "unknown Agent Code proxy route")
   try {
     const text = req.method === "POST" ? await readBody(req) : ""
     if (upstream.protocol === "anthropic") {
@@ -112,7 +112,7 @@ async function handle(req                      , res                     ) {
       res.writeHead(200, { "content-type": "application/json" })
       return res.end(JSON.stringify({ input_tokens: Math.ceil(text.length / 4) }))
     }
-    if (route !== "/v1/messages") return sendError(res, 404, `occ proxy does not handle ${route}`)
+    if (route !== "/v1/messages") return sendError(res, 404, `agentcode proxy does not handle ${route}`)
     const body = JSON.parse(text)
     // Claude Code's session header and the like go through; auth and protocol headers don't.
     const forwarded                         = { ...upstream.headers }
@@ -165,7 +165,7 @@ async function routed(router        , route        , query                    , 
     res.writeHead(200, { "content-type": "application/json" })
     return res.end(JSON.stringify({ input_tokens: Math.ceil((raw?.length ?? 0) / 4) }))
   }
-  if (route !== "/v1/messages") return sendError(res, 404, `occ router does not handle ${route} for ${target.model}`)
+  if (route !== "/v1/messages") return sendError(res, 404, `agentcode router does not handle ${route} for ${target.model}`)
   const { upstream } = target
   if (target.protocol === "anthropic") {
     // Same protocol, other account: swap the Claude login for the provider key and drop Anthropic-only betas.
@@ -184,7 +184,7 @@ function anthropicFetch(upstream          , path        , method        , body  
     method,
     signal,
     headers: {
-      "user-agent": "open-claude-code/1.0",
+      "user-agent": "agent-code/1.0",
       "anthropic-version": "2023-06-01",
       ...headers,
       ...(upstream.apiKey ? { "x-api-key": upstream.apiKey, authorization: `Bearer ${upstream.apiKey}` } : {}),
@@ -200,7 +200,7 @@ async function post(upstream          , path        , payload         , headers 
     signal,
     headers: {
       "content-type": "application/json",
-      "user-agent": "open-claude-code/1.0",
+      "user-agent": "agent-code/1.0",
       ...(upstream.apiKey ? { authorization: `Bearer ${upstream.apiKey}` } : {}),
       ...headers,
     },

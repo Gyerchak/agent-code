@@ -9,10 +9,10 @@ import { dataDir } from "./paths"
 import { applyPersonalSeed } from "./personal"
 
 // ---------------------------------------------------------------------------
-// occ's own MCP servers live in its secrets file (auth.ts, auth.json; server env often holds tokens):
+// Agent Code's own MCP servers live in its secrets file (auth.ts, auth.json; server env often holds tokens):
 //   "mcp:<name>": { "type": "mcp", "server": { command, args, env } | { type, url, headers }, "disabled": true? }
-// The server part has Claude Code's `mcpServers` shape; `"disabled": true` keeps one without starting it. occ hands them to every Claude Code process;
-// an occ server overrides a same-named one from ~/.claude.json. Project `.mcp.json`, plugin and claude.ai
+// The server part has Claude Code's `mcpServers` shape; `"disabled": true` keeps one without starting it. Agent Code hands them to every Claude Code process;
+// an Agent Code server overrides a same-named one from ~/.claude.json. Project `.mcp.json`, plugin and claude.ai
 // servers still load as Claude Code decides (and approves) them.
 // On first start the servers in Claude Code's user config and opencode's config are copied here once.
 // ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ function opencodeServers()                        {
   return {}
 }
 
-/** Copy Claude Code's and opencode's MCP servers into occ's file once (or on request: only missing ones). */
+/** Copy Claude Code's and opencode's MCP servers into Agent Code's file once (or on request: only missing ones). */
 export function importMcp(force = false) {
   if (config.mcpImported && !force) return 0
   const servers = read()
