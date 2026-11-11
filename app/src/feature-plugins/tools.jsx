@@ -1,4 +1,4 @@
-// occ-tools: two behaviour skills toggled in /settings.
+// acode-tools: two behaviour skills toggled in /settings.
 //   Prefer tools  (on by default)  — use the tools already on the machine instead of spending tokens on the same work.
 //   Install tools (off by default) — allowed to download and set up new tools when that clearly pays off.
 import { config } from "../context/config"
@@ -24,6 +24,6 @@ export const INSTALL_TOOLS_OFF = `# Tool installation is off
 Do not install, download or upgrade software. If a missing tool would make the task much easier, name it and how to install it, and continue with what is available.`
 
 export const toolsPlugin         = (api) => {
-  api.lifecycle.onDispose(registerPromptPart("occ-tools-prefer", () => (config.preferTools === false ? undefined : PREFER_TOOLS)))
-  api.lifecycle.onDispose(registerPromptPart("occ-tools-install", () => (config.installTools === true ? INSTALL_TOOLS_ON : INSTALL_TOOLS_OFF)))
+  api.lifecycle.onDispose(registerPromptPart("acode-tools-prefer", () => (config.preferTools === false ? undefined : PREFER_TOOLS)))
+  api.lifecycle.onDispose(registerPromptPart("acode-tools-install", () => (config.installTools === true ? INSTALL_TOOLS_ON : INSTALL_TOOLS_OFF)))
 }

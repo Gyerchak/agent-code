@@ -1,4 +1,4 @@
-# agentcode for Windows (PowerShell): the same steps as bin/agentcode — find Node.js 26+, build when needed, run.
+# acode for Windows (PowerShell): the same steps as bin/acode — find Node.js 26+, build when needed, run.
 $ErrorActionPreference = "Stop"
 $Dir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
@@ -7,7 +7,7 @@ function Get-NodeMajor($node) {
 }
 
 $candidates = @()
-if ($env:OCC_NODE) { $candidates += $env:OCC_NODE }
+if ($env:ACODE_NODE) { $candidates += $env:ACODE_NODE }
 $onPath = Get-Command node -ErrorAction SilentlyContinue
 if ($onPath) { $candidates += $onPath.Source }
 $candidates += Get-ChildItem "$env:APPDATA\nvm\v*\node.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName }
@@ -18,7 +18,7 @@ foreach ($c in $candidates) {
   if ($c -and (Test-Path $c) -and ((Get-NodeMajor $c) -ge 26)) { $Node = $c; break }
 }
 if (-not $Node) {
-  Write-Host "agentcode needs Node.js 26 or newer. Install it from https://nodejs.org (or: winget install OpenJS.NodeJS) and run agentcode again." -ForegroundColor Red
+  Write-Host "acode needs Node.js 26 or newer. Install it from https://nodejs.org (or: winget install OpenJS.NodeJS) and run acode again." -ForegroundColor Red
   exit 1
 }
 
@@ -30,14 +30,14 @@ if (-not $stale) {
   $stale = [bool](Get-ChildItem (Join-Path $Dir "src") -Recurse -File | Where-Object { $_.LastWriteTime -gt $built } | Select-Object -First 1)
 }
 if ($stale) {
-  Write-Host "agentcode: building..."
+  Write-Host "acode: building..."
   Push-Location $Dir
   try {
     $env:Path = (Split-Path -Parent $Node) + ";" + $env:Path
     if (-not (Test-Path "node_modules")) { npm ci | Out-Host }
     npm run build | Out-Host
   } finally { Pop-Location }
-  if (-not (Test-Path $dist)) { Write-Host "agentcode: the build failed (run npm ci; npm run build in $Dir)." -ForegroundColor Red; exit 1 }
+  if (-not (Test-Path $dist)) { Write-Host "acode: the build failed (run npm ci; npm run build in $Dir)." -ForegroundColor Red; exit 1 }
 }
 
 & $Node --experimental-ffi --no-warnings $dist @args

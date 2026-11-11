@@ -42,7 +42,7 @@ function publish() {
 }
 
 function isEnabled(entry       ) {
-  return entry.locked || config.plugin_enabled?.[entry.meta.id] !== false
+  return entry.locked || (config.plugin_enabled?.[entry.meta.id] ?? config.plugin_enabled?.[entry.meta.id.replace(/^acode-/, "occ-")]) !== false
 }
 
 function report(id        , error         , what = "failed") {

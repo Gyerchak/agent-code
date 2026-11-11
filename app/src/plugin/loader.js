@@ -10,9 +10,9 @@ import { cacheDir as appCache } from "../context/paths"
 export const cacheDir = path.join(appCache, "plugins")
 
 // Agent Code's install root (dist/ lives directly under it).
-const occRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const occRootUrl = pathToFileURL(occRoot + path.sep).href
-const HOST = Symbol.for("occ.host")
+const acodeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+const acodeRootUrl = pathToFileURL(acodeRoot + path.sep).href
+const HOST = Symbol.for("acode.host")
 
 /** Modules plugins must share with Agent Code (one Solid runtime, one renderer). */
 export function provideHostModules(modules                                         ) {
@@ -31,18 +31,18 @@ function installHooks() {
   hooks({
     resolve(specifier        , context     , next     ) {
       const parent                     = context.parentURL
-      const fromOcc = !!parent?.startsWith(occRootUrl)
-      if (SHARED.has(specifier) && !fromOcc) return { url: `occ-host:${specifier}`, shortCircuit: true }
+      const fromAcode = !!parent?.startsWith(acodeRootUrl)
+      if (SHARED.has(specifier) && !fromAcode) return { url: `acode-host:${specifier}`, shortCircuit: true }
       return next(specifier, context)
     },
     load(url        , context     , next     ) {
-      if (url.startsWith("occ-host:")) {
-        const spec = url.slice("occ-host:".length)
+      if (url.startsWith("acode-host:")) {
+        const spec = url.slice("acode-host:".length)
         const host = (globalThis       )[HOST]?.[spec]
-        if (!host) throw new Error(`agentcode does not provide ${spec}`)
+        if (!host) throw new Error(`acode does not provide ${spec}`)
         const names = Object.keys(host).filter((name) => name !== "default" && /^[A-Za-z_$][\w$]*$/.test(name))
         const source = [
-          `const m = globalThis[Symbol.for("occ.host")][${JSON.stringify(spec)}];`,
+          `const m = globalThis[Symbol.for("acode.host")][${JSON.stringify(spec)}];`,
           ...names.map((name) => `export const ${name} = m[${JSON.stringify(name)}];`),
           `export default m.default ?? m;`,
         ].join("\n")
@@ -68,7 +68,7 @@ function compile(file        ) {
   if (cached && cached.mtime === mtime) return cached.code
   if (!babel) {
     // Babel and the Solid preset are dependencies of @opentui/solid; resolve them from there.
-    const solidRequire = createRequire(path.join(occRoot, "node_modules", "@opentui", "solid", "index.js"))
+    const solidRequire = createRequire(path.join(acodeRoot, "node_modules", "@opentui", "solid", "index.js"))
     babel = {
       transformSync: solidRequire("@babel/core").transformSync,
       solid: solidRequire("babel-preset-solid"),
@@ -98,7 +98,7 @@ function exportTarget(value         )                     {
   return undefined
 }
 
-/** Resolve an npm plugin installed under Agent Code's plugin cache: exports["./tui"], then "occ", then the main entry. */
+/** Resolve an npm plugin installed under Agent Code's plugin cache: exports["./tui"], then "acode", then the main entry. */
 function resolveNpm(spec        ) {
   const name = spec.startsWith("@") ? spec.split("@").slice(0, 2).join("@") : spec.split("@")[0]
   const dir = path.join(cacheDir, "node_modules", name)
@@ -111,7 +111,7 @@ function resolveNpm(spec        ) {
     entry = exportTarget(exportsField["./tui"]) ?? exportTarget(exportsField["."])
     if (!entry && !Object.keys(exportsField).some((key) => key.startsWith("."))) entry = exportTarget(exportsField)
   } else entry = exportTarget(exportsField)
-  entry = (typeof pkg.occ === "string" ? pkg.occ : undefined) ?? entry ?? pkg.module ?? pkg.main ?? "index.js"
+  entry = (typeof pkg.acode === "string" ? pkg.acode : typeof pkg.occ === "string" ? pkg.occ : undefined) ?? entry ?? pkg.module ?? pkg.main ?? "index.js"
   return { file: path.resolve(dir, entry ), root: dir }
 }
 

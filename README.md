@@ -42,8 +42,8 @@ irm https://raw.githubusercontent.com/Gyerchak/agent-code/main/install.ps1 | iex
 ```
 
 Or download this repository and run `install.sh` (Linux/macOS) or double-click `install.cmd` (Windows).
-The installer copies Agent Code to `~/.local/share/agentcode` (Windows: `%LOCALAPPDATA%\agentcode`), builds it and adds the
-`agentcode` command to your PATH.
+The installer copies Agent Code to `~/.local/share/acode` (Windows: `%LOCALAPPDATA%\acode`), builds it and adds the
+`acode` command to your PATH.
 
 ### Optional harnesses
 
@@ -59,12 +59,12 @@ Installed harnesses appear in the model picker (`ctrl+x m`) by themselves.
 ## Use
 
 ```sh
-agentcode                 # new session in the current folder (or the tabs you left open)
-agentcode ~/project       # open a folder
-agentcode -c              # continue the last session here
-agentcode -r [id]         # resume a session (no id: the session list)
-agentcode -m sonnet       # start with a model
-agentcode "fix the tests" # start with a prompt
+acode                 # new session in the current folder (or the tabs you left open)
+acode ~/project       # open a folder
+acode -c              # continue the last session here
+acode -r [id]         # resume a session (no id: the session list)
+acode -m sonnet       # start with a model
+acode "fix the tests" # start with a prompt
 ```
 
 | Key | Action |
@@ -120,7 +120,7 @@ sees them), opencode's stay opencode's.
 cd app
 npm ci
 npm run build
-./bin/agentcode          # Windows: bin\agentcode.cmd
+./bin/acode          # Windows: bin\acode.cmd
 ```
 
 ## Licence and credits

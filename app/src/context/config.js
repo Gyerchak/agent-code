@@ -144,6 +144,8 @@ export function reloadConfig() {
 const STATE_KEYS = new Set([
   "tabs",
   "sessionModels",
+  "sessionEffort",
+  "sessionAgentMode",
   "promptHistory",
   "recentModels",
   "stash",

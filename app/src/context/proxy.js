@@ -112,7 +112,7 @@ async function handle(req                      , res                     ) {
       res.writeHead(200, { "content-type": "application/json" })
       return res.end(JSON.stringify({ input_tokens: Math.ceil(text.length / 4) }))
     }
-    if (route !== "/v1/messages") return sendError(res, 404, `agentcode proxy does not handle ${route}`)
+    if (route !== "/v1/messages") return sendError(res, 404, `acode proxy does not handle ${route}`)
     const body = JSON.parse(text)
     // Claude Code's session header and the like go through; auth and protocol headers don't.
     const forwarded                         = { ...upstream.headers }
@@ -165,7 +165,7 @@ async function routed(router        , route        , query                    , 
     res.writeHead(200, { "content-type": "application/json" })
     return res.end(JSON.stringify({ input_tokens: Math.ceil((raw?.length ?? 0) / 4) }))
   }
-  if (route !== "/v1/messages") return sendError(res, 404, `agentcode router does not handle ${route} for ${target.model}`)
+  if (route !== "/v1/messages") return sendError(res, 404, `acode router does not handle ${route} for ${target.model}`)
   const { upstream } = target
   if (target.protocol === "anthropic") {
     // Same protocol, other account: swap the Claude login for the provider key and drop Anthropic-only betas.

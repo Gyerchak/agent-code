@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Agent Code voice worker — one persistent process per role, JSON lines on stdin/stdout.
 
-    occ_voice.py kokoro    (run with a Python that has `kokoro`)            text -> wav
-    occ_voice.py rvc       (run with Applio's Python, --applio <dir>)       wav -> wav in an RVC voice
-    occ_voice.py whisper   (run with a Python that has `faster_whisper`)    wav -> text
-    occ_voice.py utau      (any Python 3 with numpy; needs rubberband)      text -> UTAU-sung/spoken wav
-    occ_voice.py probe     prints what this Python can do (JSON)
+    acode_voice.py kokoro    (run with a Python that has `kokoro`)            text -> wav
+    acode_voice.py rvc       (run with Applio's Python, --applio <dir>)       wav -> wav in an RVC voice
+    acode_voice.py whisper   (run with a Python that has `faster_whisper`)    wav -> text
+    acode_voice.py utau      (any Python 3 with numpy; needs rubberband)      text -> UTAU-sung/spoken wav
+    acode_voice.py probe     prints what this Python can do (JSON)
 
 Request:  {"id": 1, ...}            Response: {"id": 1, "ok": true, ...} or {"id": 1, "ok": false, "error": "..."}
 Everything the libraries print goes to stderr; stdout carries only responses.
@@ -298,7 +298,7 @@ def run_utau(styles_file):
         base = float(req.get("base", 63)) + style.get("pitch", 0)
         span = style.get("range", 2)
         note = style.get("note", 0.16) / max(0.25, style.get("tempo", 1.0))
-        tmp = tempfile.mkdtemp(prefix="occ-utau-")
+        tmp = tempfile.mkdtemp(prefix="acode-utau-")
         jobs = []  # (index, sample, semitones, seconds) or (index, None, 0, pause seconds)
         k = 0
         melody = style.get("melody") or [0]

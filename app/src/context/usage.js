@@ -135,11 +135,11 @@ function window(raw     )                         {
  * (macOS Keychain, API key login, expired token) so callers can fall back to the SDK.
  */
 // Every Agent Code window polls; share one result (and one backoff) through a file so they don't trip the 429 limit together.
-// One file for every Agent Code process on the machine. An agentcode-box has its own state folder (XDG_STATE_HOME), so it
-// gets the main one from its launcher (OCC_SHARED_STATE); otherwise each box polled alone and got rate limited.
+// One file for every Agent Code process on the machine. An acode-box has its own state folder (XDG_STATE_HOME), so it
+// gets the main one from its launcher (ACODE_SHARED_STATE); otherwise each box polled alone and got rate limited.
 const sharedDir =
-  process.env.OCC_SHARED_STATE ||
-  (process.env.OCC_BOX_DIR ? path.join(process.env.OCC_MAIN_STATE || path.join(os.homedir(), ".local", "state"), "agent-code") : stateDir)
+  process.env.ACODE_SHARED_STATE ||
+  (process.env.ACODE_BOX_DIR ? path.join(process.env.ACODE_MAIN_STATE || path.join(os.homedir(), ".local", "state"), "agent-code") : stateDir)
 const sharedFile = path.join(sharedDir, "plan-usage.json")
 
 function readShared()         {

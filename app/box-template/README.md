@@ -1,14 +1,14 @@
-# {{BOX_NAME}} (agentcode-box)
+# {{BOX_NAME}} (acode-box)
 
 A self-contained workspace for **Claude Code through Agent Code** (`~/agent-code`): its own
 instructions, memory, sessions and Agent Code settings, and a write boundary (it can read anywhere but writes
-only inside this folder and its scratch folder). Created by `agentcode-box`.
+only inside this folder and its scratch folder). Created by `acode-box`.
 
 ## Open it
 
 - **Double-click `{{BOX_NAME}}.desktop`** — opens a terminal running the box.
-- Or in a terminal: `box/scripts/agentcode-box.sh` (`run continue` takes over a running instance).
-- Health check: `box/scripts/agentcode-box.sh doctor`
+- Or in a terminal: `box/scripts/acode-box.sh` (`run continue` takes over a running instance).
+- Health check: `box/scripts/acode-box.sh doctor`
 
 ## What's inside
 
@@ -23,4 +23,4 @@ only inside this folder and its scratch folder). Created by `agentcode-box`.
 - `.claude/` — permissions and the write-boundary hook
 
 The folder can be moved or renamed; every path is recomputed on start (re-create the `.desktop` file
-with `agentcode-box --desktop` inside the box after moving it).
+with `acode-box --desktop` inside the box after moving it).

@@ -181,11 +181,23 @@ export const priceText = (price        ) => (price ? `$${money(price.input)}/$${
 
 const PLAN                         = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free" }
 
+/**
+ * How a plan is named on screen: "Max Plan [5x Pro]" (a Max plan with five times Pro's usage), "Pro Plan".
+ * `label` is the short name from Anthropic's profile ("Max 5×", "Pro").
+ */
+export function planTitle(label = catalog.planLabel ?? PLAN[catalog.plan ?? ""] ?? catalog.plan) {
+  if (!label) return ""
+  const match = String(label).match(/^(.*?)\s*(\d+)\s*[×x]$/i)
+  const name = (match ? match[1] : String(label)).trim()
+  const title = `${name.charAt(0).toUpperCase()}${name.slice(1)} Plan`
+  return match ? `${title} [${match[2]}x Pro]` : title
+}
+
 /** Short label for the model picker: who pays and how much (per million input/output tokens). */
 export function billingLabel(meta           , providerName         ) {
   switch (meta.billing) {
     case "plan":
-      return `${catalog.planLabel ?? PLAN[catalog.plan ?? ""] ?? "Claude"} plan`
+      return planTitle() || "Claude plan"
     case "local":
       return "Free · local"
     case "free":

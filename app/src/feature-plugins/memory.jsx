@@ -1,4 +1,4 @@
-// occ-memory: a view onto Claude Code's own auto-memory (~/.claude/projects/<project>/memory), after
+// acode-memory: a view onto Claude Code's own auto-memory (~/.claude/projects/<project>/memory), after
 // OpenCodeBox's memory layer. Browse, add, edit and forget memories; turn memory off per Agent Code; and have Claude
 // save a lesson whenever something fails (OpenCodeBox's learned.md habit, written as normal memories).
 import { TextAttributes } from "@opentui/core"
@@ -394,22 +394,22 @@ function linkOpenCodeBox() {
 
 export const memoryPlugin         = (api) => {
   api.lifecycle.onDispose(
-    registerSettingsPart("occ-memory", (model) => {
-      // An agentcode-box keeps its own memory/ folder (its CLAUDE.md protocol): Claude's auto-memory stays off there.
+    registerSettingsPart("acode-memory", (model) => {
+      // An acode-box keeps its own memory/ folder (its CLAUDE.md protocol): Claude's auto-memory stays off there.
       if (config.memoryUse === false || boxDir) return { autoMemoryEnabled: false }
       // Non-Claude models remember into their own folder unless given full access.
       return hasFullMemory(model) ? undefined : { autoMemoryDirectory: modelMemoryDir(model) }
     }),
   )
-  api.lifecycle.onDispose(registerPromptPart("occ-memory", () => (config.memoryUse !== false && config.memoryLearn !== false && !boxDir ? LEARN_PROMPT : undefined)))
+  api.lifecycle.onDispose(registerPromptPart("acode-memory", () => (config.memoryUse !== false && config.memoryLearn !== false && !boxDir ? LEARN_PROMPT : undefined)))
   // Claude may write its own memory folder without asking.
   api.lifecycle.onDispose(
-    registerAutoAllow("occ-memory", (tool, input) => {
+    registerAutoAllow("acode-memory", (tool, input) => {
       const file = typeof input.file_path === "string" ? input.file_path : undefined
       return (tool === "Write" || tool === "Edit" || tool === "Read") && !!file && (path.resolve(file).startsWith(memoryDir() + path.sep) || path.resolve(file).startsWith(path.join(path.dirname(memoryDir()), "memory-models") + path.sep))
     }),
   )
-  api.slots.register({ id: "occ-memory", order: 170, slots: { sidebar_content: () => <MemorySection /> } })
+  api.slots.register({ id: "acode-memory", order: 170, slots: { sidebar_content: () => <MemorySection /> } })
   api.keymap.registerLayer({
     commands: [{ name: "memory.list", title: "Memory", category: "Agent", slashName: "memories", run: () => openMemory() }],
   })

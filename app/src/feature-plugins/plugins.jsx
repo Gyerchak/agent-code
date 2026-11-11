@@ -24,7 +24,7 @@ export function DialogPlugins(props                    ) {
     dialog.replace(() => (
       <DialogPrompt
         title="Install plugin (npm spec or file path)"
-        placeholder="occ-plugin-example or ~/my-plugin.tsx"
+        placeholder="acode-plugin-example or ~/my-plugin.tsx"
         onConfirm={(spec) => {
           const value = spec.trim()
           dialog.replace(() => <DialogPlugins api={props.api} />, undefined, "large")

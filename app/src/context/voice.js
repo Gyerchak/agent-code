@@ -47,7 +47,7 @@ export const ENGINES                                                            
 export const STT_MODELS = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const SCRIPT = [path.join(HERE, "..", "voice", "occ_voice.py"), path.join(HERE, "..", "..", "voice", "occ_voice.py")].find(existsSync)
+const SCRIPT = [path.join(HERE, "..", "voice", "acode_voice.py"), path.join(HERE, "..", "..", "voice", "acode_voice.py")].find(existsSync)
 const STYLES_FILE = SCRIPT ? path.join(path.dirname(SCRIPT), "styles.json") : undefined
 const STATE = path.join(stateDir, "voice")
 const HOME = os.homedir()
@@ -104,21 +104,21 @@ function findPython(key                                  , module        , candi
 
 export const kokoroPython = () =>
   findPython("kokoroPython", "kokoro", [
-    path.join(HOME, ".local/share/occ-voice/kokoro/bin/python"),
+    path.join(HOME, ".local/share/acode-voice/kokoro/bin/python"),
     path.join(HOME, "ai-tools/kokoro/bin/python"),
     "python3",
   ])
 
 export const whisperPython = () =>
   findPython("whisperPython", "faster_whisper", [
-    path.join(HOME, ".local/share/occ-voice/whisper/bin/python"),
+    path.join(HOME, ".local/share/acode-voice/whisper/bin/python"),
     path.join(HOME, "ai-tools/faster-whisper/bin/python"),
     "python3",
   ])
 
 export function applio()                                              {
   return cached("applio", () => {
-    const dirs = [vc().paths?.applio, path.join(HOME, "Applio"), path.join(HOME, ".local/share/occ-voice/Applio")].filter(
+    const dirs = [vc().paths?.applio, path.join(HOME, "Applio"), path.join(HOME, ".local/share/acode-voice/Applio")].filter(
       (item)                 => !!item,
     )
     for (const dir of dirs) {
@@ -148,7 +148,7 @@ export function rvcModels()             {
           list.push({ name: params.name ?? `slot ${slot}`, pth, index: index && existsSync(index) ? index : undefined, source: "voice-changer" })
         } catch {}
       }
-    for (const root of [path.join(HOME, ".local/share/occ-voice/rvc"), applio() && path.join(applio() .dir, "logs")].filter(
+    for (const root of [path.join(HOME, ".local/share/acode-voice/rvc"), applio() && path.join(applio() .dir, "logs")].filter(
       (item)                 => !!item && existsSync(item),
     ))
       for (const name of readdirSync(root)) {
@@ -466,7 +466,7 @@ function kokoroLang(voiceId        ) {
 
 /** Render `text` with the active engine; returns the wav path. */
 export async function synthesize(text        , style         )                  {
-  if (!SCRIPT) throw new Error("voice/occ_voice.py is missing from the Agent Code install")
+  if (!SCRIPT) throw new Error("voice/acode_voice.py is missing from the Agent Code install")
   const engine = vc().engine ?? "kokoro"
   if (engine === "openutau") {
     const singer = singers().find((item) => item.dir === vc().utauSinger) ?? singers()[0]
@@ -656,10 +656,10 @@ ${lines.join("\n")}
 
 Rules:
 1. Use ONLY these components: Kokoro (TTS, pip package \`kokoro\` + \`misaki[en]\`, model hexgrad/Kokoro-82M), faster-whisper (speech-to-text), Applio for RVC conversion (only for "Kokoro + RVC"), OpenUtau + a UTAU voicebank (only for "OpenUtau"). Do not substitute other TTS/STT engines.
-2. Install into ~/.local/share/occ-voice/ (one venv per tool: kokoro/, whisper/; Applio in ~/.local/share/occ-voice/Applio; extra RVC models in ~/.local/share/occ-voice/rvc/<name>/ with the .pth and .index). Use the system package manager only for system tools (rubberband, pipewire tools, espeak-ng for Kokoro).
+2. Install into ~/.local/share/acode-voice/ (one venv per tool: kokoro/, whisper/; Applio in ~/.local/share/acode-voice/Applio; extra RVC models in ~/.local/share/acode-voice/rvc/<name>/ with the .pth and .index). Use the system package manager only for system tools (rubberband, pipewire tools, espeak-ng for Kokoro).
 3. Fit the machine: with an NVIDIA GPU (≥4 GB VRAM) install CUDA builds; without one use CPU builds, recommend whisper "small"/"base" int8, and say plainly that RVC on CPU is slow (several seconds per sentence). If something does not fit (too little RAM/VRAM, unsupported OS), explain why and show the alternatives within these components (smaller whisper model, plain Kokoro instead of RVC, OpenUtau without RVC) — let me choose.
 4. Voice models: Kokoro voices download automatically. RVC models and UTAU voicebanks must come from their official/licensed sources — show me where to download, check the licence/terms with me, then place them in the folders above. Never download from unofficial mirrors.
-5. Verify each part by running the worker: \`<python> ${SCRIPT ?? "voice/occ_voice.py"} probe\`.
+5. Verify each part by running the worker: \`<python> ${SCRIPT ?? "voice/acode_voice.py"} probe\`.
 6. Finally write the paths you used into ~/.config/agent-code/config.json under "voice"."paths" (keys: kokoroPython, whisperPython, applio, applioPython, singers[]) and tell me to reopen /voice.
 ${missing.length ? `\nMissing for the chosen engine: ${missing.map((item) => item.title).join(", ")}.` : "\nEverything for the chosen engine is installed; just verify it."}`
 }

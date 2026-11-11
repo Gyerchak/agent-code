@@ -53,7 +53,7 @@ export const canPlaySound = () => !!(tool("mpv") || tool("ffplay"))
 export function mediaSource(item) {
   if (item.path && existsSync(item.path)) return item.path
   if (!item.data) return undefined
-  const dir = path.join(os.tmpdir(), "occ-media")
+  const dir = path.join(os.tmpdir(), "acode-media")
   mkdirSync(dir, { recursive: true })
   const ext = (item.mime?.split("/")[1] ?? "bin").replace(/[^a-z0-9]/gi, "")
   const file = path.join(dir, `${createHash("sha1").update(item.data).digest("hex").slice(0, 16)}.${ext}`)

@@ -1131,7 +1131,7 @@ function DialogMods() {
         value: `mod:${mod.name}`,
         description: mod.description ?? mod.path,
         category: "Installed mods",
-        footer: `${mod.source === "occ" ? "Agent Code" : mod.source === "env" ? "CLAUDE_CODE_PLUGIN_DIRS" : "Claude Code"}${mod.version ? ` · ${mod.version}` : ""}`,
+        footer: `${mod.source === "acode" ? "Agent Code" : mod.source === "env" ? "CLAUDE_CODE_PLUGIN_DIRS" : "Claude Code"}${mod.version ? ` · ${mod.version}` : ""}`,
         gutter: box(modsEnabled() && modEnabled(mod.name)),
       })),
       { title: "Reload", value: "reload", description: "look for new or changed mods and reload them", category: "Actions" },
@@ -1174,7 +1174,7 @@ function DialogMods() {
 }
 
 /** `/update`: fast-forward Agent Code's own repository; the launcher rebuilds it on the next start. */
-async function updateOcc() {
+async function updateAcode() {
   const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
   const git = (...args) =>
     new Promise((resolve) =>
@@ -1185,7 +1185,7 @@ async function updateOcc() {
   const fetched = await git("fetch", "--quiet", "--tags")
   if (!fetched.ok) return toast.show({ variant: "error", message: `Could not reach the Agent Code repository: ${fetched.err.split("\n").at(-1)}`, duration: 8000 })
   const behind = Number((await git("rev-list", "--count", "HEAD..@{u}")).out || 0)
-  if (!behind) return toast.show({ variant: "success", message: `agentcode is up to date (${(await git("describe", "--tags")).out})`, duration: 4000 })
+  if (!behind) return toast.show({ variant: "success", message: `acode is up to date (${(await git("describe", "--tags")).out})`, duration: 4000 })
   if ((await git("status", "--porcelain", "--untracked-files=no")).out)
     return toast.show({ variant: "warning", message: "Agent Code has local changes: commit them first, then /update", duration: 8000 })
   const pulled = await git("pull", "--ff-only", "--quiet")
@@ -1694,7 +1694,7 @@ function DialogSettings() {
     saveConfig()
   }
   const settings            = [
-    // Only inside an agentcode-box: tied to Agent Code's settings by default, or its own copy.
+    // Only inside an acode-box: tied to Agent Code's settings by default, or its own copy.
     ...(boxDir
       ? [
           {
@@ -1755,7 +1755,7 @@ function DialogSettings() {
       key: "dropFiles",
       title: "Attach dropped files",
       description: dropsBlocked()
-        ? "this Alacritty window can't receive drops on Wayland: open Agent Code with agentcode-window"
+        ? "this Alacritty window can't receive drops on Wayland: open Agent Code with acode-window"
         : "files dragged or pasted into the prompt are attached",
       get: flag("dropFiles", true),
       set: write("dropFiles"),
@@ -1988,7 +1988,7 @@ export function App() {
         toast.show({
           variant: "info",
           title: "Dropping files",
-          message: "Alacritty on Wayland can't receive dropped files. Start Agent Code with `agentcode-window` (or the Agent Code launcher) to drag files straight in.",
+          message: "Alacritty on Wayland can't receive dropped files. Start Agent Code with `acode-window` (or the Agent Code launcher) to drag files straight in.",
           duration: 15000,
         }),
       1500,
@@ -2352,7 +2352,7 @@ export function App() {
         )),
     },
     { id: "phone.show", title: "Phone", category: "System", slash: "phone", run: () => dialog.replace(() => <DialogPhone />, undefined, "large") },
-    { id: "app.update", title: "Update Agent Code", category: "System", slash: "update", run: () => void updateOcc() },
+    { id: "app.update", title: "Update Agent Code", category: "System", slash: "update", run: () => void updateAcode() },
     { id: "mods.list", title: "Mods", category: "System", slash: "mods", run: () => dialog.replace(() => <DialogMods />, undefined, "large") },
     { id: "settings.show", title: "Settings", category: "System", slash: "settings", slashAliases: ["config", "options"], run: () => dialog.replace(() => <DialogSettings />, undefined, "large") },
     { id: "tab.next", title: "Next tab", category: "Tabs", enabled: () => tabs().length > 1, run: () => nextTab(1) },

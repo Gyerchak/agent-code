@@ -42,7 +42,7 @@ function parseArgs(argv          ) {
   if (rest.length) {
     const first = rest[0]
     try {
-      // `agentcode <dir>` opens a project directory, like `opencode <dir>`.
+      // `acode <dir>` opens a project directory, like `opencode <dir>`.
       const stat = statSync(first)
       if (stat.isDirectory()) {
         process.chdir(first)
@@ -59,7 +59,7 @@ const args = parseArgs(process.argv.slice(2))
 if (args.help) {
   console.log(`Agent Code — one terminal for every coding agent (Claude Code, opencode, DeepSeek Harness, Codex)
 
-Usage: agentcode [dir] [prompt] [options]
+Usage: acode [dir] [prompt] [options]
 
 Options:
   -c, --continue        Continue the most recent session in this directory
@@ -107,7 +107,7 @@ async function shutdown(code = 0) {
   // The terminal may already be gone (window closed): nothing left to restore or print to.
   try {
     renderer.destroy()
-    if (sessionID && hasMessages) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  agentcode -r ${sessionID}\n\n`)
+    if (sessionID && hasMessages) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  acode -r ${sessionID}\n\n`)
   } catch {}
 }
 setExitHandler((code) => void shutdown(code ?? 0))
@@ -160,7 +160,7 @@ createRoot(async () => {
     await startFresh()
     await restoreTabs({ keepActive: true })
   } else {
-    // Plain `agentcode` reopens the tabs left open last time, or else the most recent session.
+    // Plain `acode` reopens the tabs left open last time, or else the most recent session.
     const restored = await restoreTabs()
     if (!restored && args.resume !== true) await continueLast()
     else if (!restored) await startFresh()

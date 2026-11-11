@@ -23,7 +23,7 @@ import { VARIANT } from "./local"
 import { log } from "./log"
 import { stateDir } from "./paths"
 import { ensureBoxTrusted } from "./box"
-import { occMcpServers } from "./mcp"
+import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
 import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, publishPlanUsage, samplePlanRate } from "./usage"
@@ -53,6 +53,29 @@ function rememberClaudeModels(models             ) {
   } catch (error) {
     log("claude models write failed", error)
   }
+}
+
+/**
+ * Each conversation keeps its own reasoning level (variant). The level remembered per model is only the starting
+ * point for a new conversation: opening an older one used to take whatever that model was last set to elsewhere.
+ */
+function rememberSessionEffort(sessionID, effort) {
+  const value = effort ?? "default"
+  if (!sessionID || config.sessionEffort?.[sessionID] === value) return
+  const list = { ...config.sessionEffort }
+  delete list[sessionID]
+  list[sessionID] = value
+  const keys = Object.keys(list)
+  for (const key of keys.slice(0, Math.max(0, keys.length - 300))) delete list[key]
+  config.sessionEffort = list
+  saveConfig()
+}
+
+/** The level a conversation was on, else the one last chosen for its model. */
+function sessionEffort(sessionID, model) {
+  const own = sessionID ? config.sessionEffort?.[sessionID] : undefined
+  if (own !== undefined) return own === "default" ? undefined : own
+  return storedEffort(model)
 }
 
 /** Remember which model a conversation runs on (newest last, capped). */
@@ -492,8 +515,8 @@ export function errorMessage(error         ) {
 
 export function prettyModel(id        ) {
   const match = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?/)
-  // Agent Code's GPU-sized local variants ("qwen3:4b-occ88k") read as the model itself.
-  if (!match) return id.replace(/-occ\d+k$/, "")
+  // Agent Code's GPU-sized local variants ("qwen3:4b-acode88k") read as the model itself.
+  if (!match) return id.replace(/-(?:acode|occ)\d+k$/, "")
   const family = match[1][0].toUpperCase() + match[1].slice(1)
   return `Claude ${family} ${match[2]}${match[3] && match[3].length < 3 ? "." + match[3] : ""}`
 }
@@ -962,16 +985,16 @@ const NO_QUESTIONS_PROMPT =
   "The user has turned off clarifying questions. Do not ask the user questions; make reasonable assumptions, state them briefly, and proceed."
 
 const PLANNING_PROMPT =
-  "For any task with three or more steps, keep a checklist with the mcp__occ__todowrite tool: write the plan before starting, mark exactly one item in_progress while working on it, and mark items completed as soon as they are done. The user sees it as a checklist."
+  "For any task with three or more steps, keep a checklist with the mcp__acode__todowrite tool: write the plan before starting, mark exactly one item in_progress while working on it, and mark items completed as soon as they are done. The user sees it as a checklist."
 
-/** Agent Code's own checklist tool (this Claude Code build ships no TodoWrite); lives in the in-process "occ" MCP server. */
-export const OCC_MCP = "occ"
-export const TODO_TOOL = "mcp__occ__todowrite"
+/** Agent Code's own checklist tool (this Claude Code build ships no TodoWrite); lives in the in-process "acode" MCP server. */
+export const ACODE_MCP = "acode"
+export const TODO_TOOL = "mcp__acode__todowrite"
 export const isTodoTool = (name        ) => name === "TodoWrite" || name === TODO_TOOL
 
 function planningServer() {
   return createSdkMcpServer({
-    name: OCC_MCP,
+    name: ACODE_MCP,
     tools: [
       tool(
         "todowrite",
@@ -996,7 +1019,7 @@ function planningServer() {
   })
 }
 
-// Built-in plugins (occ-agents, occ-memory) add to Claude's system prompt and pre-approve their own tool calls.
+// Built-in plugins (acode-agents, acode-memory) add to Claude's system prompt and pre-approve their own tool calls.
 const promptParts = new Map                                  ()
 const autoAllows = new Map                                                                   ()
 
@@ -1028,7 +1051,7 @@ export function registerAutoAllow(id        , check                             
 }
 
 function contextEnv(value        , sent         )                         {
-  const local = Number(sent?.match(/-occ(\d+)k$/)?.[1]) * 1024
+  const local = Number(sent?.match(/-(?:acode|occ)(\d+)k$/)?.[1]) * 1024
   const context = local || modelMeta(value).context
   return context ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(context) } : {}
 }
@@ -1373,7 +1396,7 @@ export function createSession(seed             ) {
         settings: extraSettings(store.model)       ,
         hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) : []), pauseHook()] },
         // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
-        mcpServers: { ...occMcpServers(), ...(config.planning ? { [OCC_MCP]: planningServer() } : {}) },
+        mcpServers: { ...acodeMcpServers(), ...(config.planning ? { [ACODE_MCP]: planningServer() } : {}) },
         plugins: modPlugins(),
         allowedTools: config.planning ? [TODO_TOOL] : undefined,
         resume: options.resume,
@@ -2264,6 +2287,7 @@ export function createSession(seed             ) {
 
   async function setEffort(value                         ) {
     setStore("effort", value)
+    rememberSessionEffort(store.sessionID, value)
     if (oc) return acpSetEffort(value)
     // Provider models: Agent Code's proxy reads the stored variant on every request.
     if (splitModel(store.model)) return
@@ -2318,7 +2342,7 @@ export function createSession(seed             ) {
     try {
       const list = await current?.q.mcpServerStatus()
       // Agent Code's own in-process server is an implementation detail, not a user MCP.
-      if (list) setStore("mcp", reconcile(list.filter((server) => server.name !== OCC_MCP)))
+      if (list) setStore("mcp", reconcile(list.filter((server) => server.name !== ACODE_MCP)))
       // Servers connect asynchronously; keep polling while any is still pending.
       clearTimeout(mcpPoll)
       if (!disposed && list?.some((server) => server.status === "pending")) mcpPoll = setTimeout(() => void refreshMcp(), 1500)
@@ -2365,7 +2389,7 @@ export function createSession(seed             ) {
   // Mods: Agent Code is a remote surface of the engine (as Claude Code Desktop is)
   // -------------------------------------------------------------------------
 
-  const SURFACE = { surface: "desktop", client_id: "occ" }
+  const SURFACE = { surface: "desktop", client_id: "acode" }
   const viewport = () => ({ columns: process.stdout.columns || 100, rows: process.stdout.rows || 40, isFullscreen: true })
 
   async function modRequest(request                         )               {
@@ -2463,7 +2487,7 @@ export function createSession(seed             ) {
         setStore("engine", engine)
         if (used) setStore("model", used)
         if (harnessModel(store.model)?.harness.id !== engine) setStore("model", "opencode-zen/big-pickle")
-        setStore("effort", storedEffort(store.model))
+        setStore("effort", sessionEffort(id, store.model))
       })
       // A tab restored in the background starts its harness (and replays its history) when it is opened.
       if (!boot) {
@@ -2485,7 +2509,7 @@ export function createSession(seed             ) {
       setStore("messages", convertHistory(history))
       const used = savedModel(id, history         )
       if (used) setStore("model", used)
-      setStore("effort", storedEffort(store.model))
+      setStore("effort", sessionEffort(id, store.model))
       recomputeDerived()
       loadRevert()
     } catch (error) {
@@ -2851,6 +2875,8 @@ export function createSession(seed             ) {
   function ensureTurn()                   {
     const existing = lastTurn()
     if (existing && !existing.end) return existing
+    // The level this conversation runs on stays its own from here on.
+    rememberSessionEffort(store.sessionID, store.effort)
     const last = store.messages.findLast((m) => m.type === "user" || m.type === "assistant")
     const user = last?.type === "user" ? last : undefined
     const turn                   = {

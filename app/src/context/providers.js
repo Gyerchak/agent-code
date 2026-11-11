@@ -295,7 +295,7 @@ async function modelsDev()                               {
 
 /** The main Agent Code's provider cache, for a box (its launcher names the main state folder). */
 function sharedModels(key        )                       {
-  const dir = process.env.OCC_SHARED_STATE
+  const dir = process.env.ACODE_SHARED_STATE
   if (!dir) return undefined
   try {
     return JSON.parse(readFileSync(path.join(dir, "providers.json"), "utf8")).models?.[key]
@@ -445,7 +445,7 @@ async function protocolOf(provider          , model        )                    
         "user-agent": "agent-code/1.0",
         "anthropic-version": "2023-06-01",
         "x-api-key": provider.apiKey ?? "",
-        "x-opencode-session": `occ-probe-${process.pid}`,
+        "x-opencode-session": `acode-probe-${process.pid}`,
       },
       body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
       signal: AbortSignal.timeout(20000),

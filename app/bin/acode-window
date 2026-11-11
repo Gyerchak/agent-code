@@ -1,17 +1,17 @@
 #!/bin/sh
-# agentcode-window — open a terminal window running agentcode (or the given command) in which files dropped onto the
-# window reach agentcode.
+# acode-window — open a terminal window running acode (or the given command) in which files dropped onto the
+# window reach acode.
 #
-#   agentcode-window                         agentcode in a new window (in the current folder)
-#   agentcode-window --title NAME CMD [ARG…] CMD in a new window titled NAME
+#   acode-window                         acode in a new window (in the current folder)
+#   acode-window --title NAME CMD [ARG…] CMD in a new window titled NAME
 #
 # Alacritty cannot receive dropped files on Wayland (its windowing library, winit 0.30, has no Wayland
 # drag-and-drop), so it is started through XWayland, where drops arrive as a paste of the file's path. The
-# command inside gets WAYLAND_DISPLAY back (bin/agentcode restores it), so the clipboard keeps working.
+# command inside gets WAYLAND_DISPLAY back (bin/acode restores it), so the clipboard keeps working.
 DIR="$(dirname "$(readlink -f "$0")")"
-TITLE="agentcode"
+TITLE="acode"
 if [ "${1:-}" = "--title" ] && [ -n "${2:-}" ]; then TITLE="$2"; shift 2; fi
-[ $# -gt 0 ] || set -- "$DIR/agentcode"
+[ $# -gt 0 ] || set -- "$DIR/acode"
 
 TERM_APP="${TERMINAL:-}"
 if [ -z "$TERM_APP" ]; then
@@ -22,7 +22,7 @@ fi
 case "$(basename "${TERM_APP:-}")" in
   alacritty)
     if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then
-      exec env -u WAYLAND_DISPLAY OCC_WAYLAND_DISPLAY="$WAYLAND_DISPLAY" alacritty --title "$TITLE" -e "$@"
+      exec env -u WAYLAND_DISPLAY ACODE_WAYLAND_DISPLAY="$WAYLAND_DISPLAY" alacritty --title "$TITLE" -e "$@"
     fi
     exec alacritty --title "$TITLE" -e "$@" ;;
   konsole) exec konsole -e "$@" ;;
@@ -32,6 +32,6 @@ case "$(basename "${TERM_APP:-}")" in
   gnome-terminal) exec gnome-terminal -- "$@" ;;
   xfce4-terminal) exec xfce4-terminal --title "$TITLE" -x "$@" ;;
   xterm) exec xterm -T "$TITLE" -e "$@" ;;
-  "") echo "agentcode-window: no terminal emulator found" >&2; exit 1 ;;
+  "") echo "acode-window: no terminal emulator found" >&2; exit 1 ;;
   *) exec "$TERM_APP" -e "$@" ;;
 esac

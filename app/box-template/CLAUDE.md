@@ -1,6 +1,6 @@
-# {{BOX_NAME}} — agentcode-box
+# {{BOX_NAME}} — acode-box
 
-You are **Claude Code**, running inside an **agentcode-box** through **Agent Code** (the opencode-style TUI over the
+You are **Claude Code**, running inside an **acode-box** through **Agent Code** (the opencode-style TUI over the
 Claude Agent SDK, `~/agent-code`). The box is a closed workspace: learn from the material in
 `knowladge/`, build lasting work in `Projekt/`, do one-off tasks in `work/`, and remember what was
 learned in `memory/`.
@@ -12,8 +12,8 @@ learned in `memory/`.
 ## The box boundary
 
 - **Reads:** anywhere on the PC.
-- **Writes:** ONLY inside this box folder and its scratch folder `$OCC_BOX_SCRATCH`
-  (`/tmp/agentcode-box/<box path>`). Enforced by the PreToolUse hook `.claude/hooks/boundary.sh` for
+- **Writes:** ONLY inside this box folder and its scratch folder `$ACODE_BOX_SCRATCH`
+  (`/tmp/acode-box/<box path>`). Enforced by the PreToolUse hook `.claude/hooks/boundary.sh` for
   Edit/Write; for Bash, keep the same rule yourself (no `>`/`cp`/`mv` targets outside).
 - **Deletion:** never `rm` — move things to the trash (`gio trash <path>`).
 - **Secrets:** never print or commit API keys or passwords.
@@ -45,7 +45,7 @@ If `TOOLS.md` exists, it is the inventory of what this machine can run. Read it 
     settings.json           permissions + boundary hook (Claude's auto-memory off: memory/ only)
     hooks/boundary.sh       write-boundary guard
   box/
-    scripts/agentcode-box.sh      launcher (run | doctor)
+    scripts/acode-box.sh      launcher (run | doctor)
     scripts/tools/index-knowledge.sh
 ```
 

@@ -27,7 +27,7 @@ import { registerSlots, Slot } from "./slots"
 
 import { setRoute } from "../context/app"
 
-const occVersion = "1.0.0"
+const acodeVersion = "1.0.0"
 
 function toCommand(command               )          {
   const enabled = command.enabled
@@ -184,7 +184,7 @@ export function createApi(input
   return {
     app: {
       get version() {
-        return occVersion
+        return acodeVersion
       },
       get claudeVersion() {
         return active().store.version

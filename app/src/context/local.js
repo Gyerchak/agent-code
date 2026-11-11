@@ -6,13 +6,13 @@ import { log } from "./log"
 // ---------------------------------------------------------------------------
 // Local Ollama models: Ollama loads models with a small default context (often 4096 tokens), far less
 // than Claude Code's own instructions (~20K), so the start of every prompt was silently cut off.
-// Agent Code creates a variant with a context sized to the GPU ("<model>-occ<N>k", same weights, no extra
+// Agent Code creates a variant with a context sized to the GPU ("<model>-acode<N>k", same weights, no extra
 // disk) and watches the loaded model for the two things that degrade a local session: the context
 // running past what is loaded (Ollama drops the oldest tokens → quality) and the model spilling from
 // VRAM into system RAM (→ speed).
 // ---------------------------------------------------------------------------
 
-export const VARIANT = /-occ\d+k$/
+export const VARIANT = /-(?:acode|occ)\d+k$/ // "occ": variants made before the rename
 
 
 
@@ -91,7 +91,7 @@ export async function localModel(baseURL        , model        )                
   if (known) return known
   try {
     const context = await pickContext(baseURL, model)
-    const name = `${model.includes(":") ? model : model + ":latest"}-occ${Math.round(context / 1024)}k`
+    const name = `${model.includes(":") ? model : model + ":latest"}-acode${Math.round(context / 1024)}k`
     const exists = await fetch(`${baseURL}/api/show`, { method: "POST", body: JSON.stringify({ model: name }) }).then((response) => response.ok)
     if (!exists) await post(baseURL, "/api/create", { model: name, from: model, parameters: { num_ctx: context }, stream: false })
     variants.set(key, name)
@@ -109,7 +109,7 @@ export async function pollLocal(baseURL        , model        , key        ) {
     const ps = await fetch(`${baseURL}/api/ps`, { signal: AbortSignal.timeout(3000) }).then((response) => response.json()                )
     const name = variants.get(`${baseURL}|${model}`) ?? model
     const loaded = (ps.models ?? []).find((item     ) => item.name === name || item.model === name)
-    const fromName = Number(name.match(/-occ(\d+)k$/)?.[1]) * 1024 || undefined
+    const fromName = Number(name.match(/-(?:acode|occ)(\d+)k$/)?.[1]) * 1024 || undefined
     setLocal(key, {
       context: loaded?.context_length ?? fromName,
       vram: loaded?.size ? Math.min(1, (loaded.size_vram ?? 0) / loaded.size) : undefined,

@@ -6,19 +6,19 @@ import { flushConfig } from "./config"
 import { log } from "./log"
 
 // ---------------------------------------------------------------------------
-// agentcode-box: when Agent Code runs inside a box (launched by box/scripts/agentcode-box.sh, which sets OCC_BOX_DIR), the box
+// acode-box: when Agent Code runs inside a box (launched by box/scripts/acode-box.sh, which sets ACODE_BOX_DIR), the box
 // uses Agent Code's own settings by default. "Own settings" gives the box its own copy (cfg/agent-code,
 // switched on by the cfg/own-settings marker); "Reset to factory default" goes back to Agent Code's settings.
 // Changing either restarts Agent Code: exit code 75 tells the launcher to start it again.
 // ---------------------------------------------------------------------------
 
-export const boxDir = process.env.OCC_BOX_DIR || undefined
+export const boxDir = process.env.ACODE_BOX_DIR || undefined
 export const BOX_RESTART = 75
 
 const marker = () => path.join(boxDir , "cfg", "own-settings")
 const boxConfig = () => path.join(boxDir , "cfg", "agent-code", "config.json")
 const boxDefaults = () => path.join(boxDir , "box", "settings.json")
-const mainConfig = () => process.env.OCC_MAIN_CONFIG || path.join(os.homedir(), ".config", "agent-code", "config.json")
+const mainConfig = () => process.env.ACODE_MAIN_CONFIG || path.join(os.homedir(), ".config", "agent-code", "config.json")
 
 /** True when this box keeps its own settings (false: Agent Code's shared settings). */
 export function ownSettings() {
@@ -34,8 +34,8 @@ const read = (file        ) => {
 }
 
 /**
- * A box's own settings start from its defaults (box/settings.json, written by `agentcode-box` from
- * ~/.config/agent-code/agentcode-box/settings.json), plus Agent Code's providers so its models stay available.
+ * A box's own settings start from its defaults (box/settings.json, written by `acode-box` from
+ * ~/.config/agent-code/acode-box/settings.json), plus Agent Code's providers so its models stay available.
  */
 function initialOwnSettings() {
   const main = read(mainConfig()) ?? {}
@@ -81,7 +81,7 @@ export function ensureBoxTrusted(cwd        ) {
     const project = (projects[path.resolve(boxDir)] ??= {})
     if (project.hasTrustDialogAccepted === true) return
     project.hasTrustDialogAccepted = true
-    const temp = `${file}.agentcode-box.${process.pid}`
+    const temp = `${file}.acode-box.${process.pid}`
     writeFileSync(temp, JSON.stringify(data, null, 2))
     chmodSync(temp, statSync(file).mode & 0o777)
     renameSync(temp, file)

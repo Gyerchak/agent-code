@@ -329,9 +329,9 @@ export function selectionWithPaths(selected        , messages              ) {
 
 /**
  * Whether this window can't receive dropped files: Alacritty on Wayland (winit 0.30 has no Wayland
- * drag-and-drop). agentcode-window starts it through XWayland instead (and sets OCC_WAYLAND_DISPLAY).
+ * drag-and-drop). acode-window starts it through XWayland instead (and sets ACODE_WAYLAND_DISPLAY).
  */
 export function dropsBlocked() {
-  return !!process.env.ALACRITTY_WINDOW_ID && !!process.env.WAYLAND_DISPLAY && !process.env.OCC_WAYLAND_DISPLAY
+  return !!process.env.ALACRITTY_WINDOW_ID && !!process.env.WAYLAND_DISPLAY && !process.env.ACODE_WAYLAND_DISPLAY
 }
 

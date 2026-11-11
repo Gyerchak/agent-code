@@ -27,7 +27,7 @@ const appDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "ph
 const uploadDir = path.join(stateDir, "phone-uploads")
 const DEFAULT_PORT = 7787
 let version
-const occVersion = () => (version ??= (() => {
+const acodeVersion = () => (version ??= (() => {
   try {
     return JSON.parse(readFileSync(path.join(appDir, "..", "package.json"), "utf8")).version
   } catch {
@@ -246,7 +246,7 @@ async function saveUploads(list) {
 async function handleApi(request, response, url) {
   const parts = url.pathname.split("/").filter(Boolean) // api, …
   if (request.method === "GET" && parts[1] === "state")
-    return json(response, 200, { host: os.hostname(), version: occVersion(), files: phoneSettings().files, tabs: tabs().map(tabSummary) })
+    return json(response, 200, { host: os.hostname(), version: acodeVersion(), files: phoneSettings().files, tabs: tabs().map(tabSummary) })
   if (request.method === "GET" && parts[1] === "events") return events(request, response)
   if (parts[1] === "tabs" && parts[2]) {
     const session = findSession(parts[2])
@@ -342,7 +342,7 @@ function checkChanges() {
 }
 
 async function handle(request, response) {
-  const url = new URL(request.url ?? "/", "http://occ")
+  const url = new URL(request.url ?? "/", "http://acode")
   try {
     if (url.pathname.startsWith("/api/")) {
       const ip = request.socket.remoteAddress ?? ""

@@ -259,7 +259,7 @@ export function disposeAll() {
 }
 
 // ---------------------------------------------------------------------------
-// Persistence: open tabs per directory come back on the next plain `agentcode`.
+// Persistence: open tabs per directory come back on the next plain `acode`.
 // ---------------------------------------------------------------------------
 
 let persistTimer
@@ -291,7 +291,7 @@ function writeTabs() {
 
 /**
  * Restore saved tabs as dormant (history only); only the focused one boots.
- * With `keepActive`, the current tab stays focused (e.g. `agentcode -c`) and the saved ones come back beside it.
+ * With `keepActive`, the current tab stays focused (e.g. `acode -c`) and the saved ones come back beside it.
  * Returns false when nothing was saved.
  */
 export async function restoreTabs(options                                           = {}) {

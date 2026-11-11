@@ -2,7 +2,7 @@ import { TextAttributes } from "@opentui/core"
 import os from "node:os"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
-import { catalog } from "../context/catalog"
+import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
 import { limits,                                     } from "../context/session"
 import { active, store } from "../context/tabs"
@@ -108,7 +108,7 @@ export function UsageSection() {
   return (
     <Switch>
       <Match when={kind() === "anthropic" && limits.available && (limits.fiveHour || limits.week)}>
-        <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? `${catalog.planLabel ?? catalog.plan} plan` : ""}</text>}>
+        <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? planTitle() : ""}</text>}>
           <Show when={limits.rolling !== false}>
             <Meter label="5-hour " window={limits.fiveHour} />
           </Show>

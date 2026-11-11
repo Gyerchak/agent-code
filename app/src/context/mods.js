@@ -75,7 +75,7 @@ export function discoverMods(force = false)            {
   if (!force && cached && Date.now() - cached.time < 5000) return cached.list
   const found            = []
   for (const dir of subdirs(modsDir)) {
-    const mod = readMod(dir, "occ")
+    const mod = readMod(dir, "acode")
     if (mod) found.push(mod)
   }
   for (const dir of envPluginDirs()) {
@@ -89,7 +89,7 @@ export function discoverMods(force = false)            {
       const mod = readMod(dir, "claude")
       if (mod) found.push(mod)
     }
-  const rank = { occ: 0, env: 1, claude: 2 }
+  const rank = { acode: 0, env: 1, claude: 2 }
   const byName = new Map                 ()
   for (const mod of found.sort((a, b) => rank[a.source] - rank[b.source] || b.mtime - a.mtime)) if (!byName.has(mod.name)) byName.set(mod.name, mod)
   cached = { time: Date.now(), list: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)) }

@@ -2,19 +2,26 @@
 // and answers permission prompts. The computer does the work; this page only talks to Agent Code's phone server.
 
 const $ = (id) => document.getElementById(id)
-const state = { token: "", tabs: [], current: localStorage.getItem("occ.tab") ?? "", detail: undefined, files: [], serverFiles: true }
+
+// Phones paired before the rename kept their token under "occ.…": carry it over once, so they stay paired.
+for (const key of ["token", "tab", "showFiles", "showTools"]) {
+  const old = localStorage.getItem(`occ.${key}`)
+  if (old !== null && localStorage.getItem(`acode.${key}`) === null) localStorage.setItem(`acode.${key}`, old)
+  localStorage.removeItem(`occ.${key}`)
+}
+const state = { token: "", tabs: [], current: localStorage.getItem("acode.tab") ?? "", detail: undefined, files: [], serverFiles: true }
 const prefs = {
-  showFiles: localStorage.getItem("occ.showFiles") !== "0",
-  showTools: localStorage.getItem("occ.showTools") !== "0",
+  showFiles: localStorage.getItem("acode.showFiles") !== "0",
+  showTools: localStorage.getItem("acode.showTools") !== "0",
 }
 
 // The pairing token comes in the link's #t=…, is kept on the phone and removed from the address bar.
 const fromLink = new URLSearchParams(location.hash.slice(1)).get("t")
 if (fromLink) {
-  localStorage.setItem("occ.token", fromLink)
+  localStorage.setItem("acode.token", fromLink)
   history.replaceState(null, "", location.pathname)
 }
-state.token = localStorage.getItem("occ.token") ?? ""
+state.token = localStorage.getItem("acode.token") ?? ""
 
 async function api(path, body) {
   const response = await fetch(`api/${path}`, {
@@ -129,7 +136,7 @@ async function refreshTab() {
 
 function selectTab(key) {
   state.current = key
-  localStorage.setItem("occ.tab", key)
+  localStorage.setItem("acode.tab", key)
   state.detail = undefined
   renderTabs()
   void refreshTab().catch(showError)
@@ -230,17 +237,17 @@ $("settings-button").onclick = () => {
 }
 $("show-files").onchange = (event) => {
   prefs.showFiles = event.target.checked
-  localStorage.setItem("occ.showFiles", prefs.showFiles ? "1" : "0")
+  localStorage.setItem("acode.showFiles", prefs.showFiles ? "1" : "0")
   renderChat()
 }
 $("show-tools").onchange = (event) => {
   prefs.showTools = event.target.checked
-  localStorage.setItem("occ.showTools", prefs.showTools ? "1" : "0")
+  localStorage.setItem("acode.showTools", prefs.showTools ? "1" : "0")
   renderChat()
 }
 $("close-settings").onclick = () => $("settings").close()
 $("unpair").onclick = () => {
-  localStorage.removeItem("occ.token")
+  localStorage.removeItem("acode.token")
   location.reload()
 }
 

@@ -1,4 +1,4 @@
-// occ-agents: a layered "working profile" for Claude, after OpenCodeBox's AgentMixer.
+// acode-agents: a layered "working profile" for Claude, after OpenCodeBox's AgentMixer.
 // Pick options per layer (who you are, Claude's role, character, how to think, how to work, …); Agent Code composes
 // them into one organised section of Claude's system prompt. Only prompt layers are kept: everything here
 // genuinely reaches the model. Library: <Agent Code>/agents/<layer>/<NN-name>.md; your own: ~/.config/agent-code/agents.
@@ -226,7 +226,8 @@ const TARGETS                                                = [
 ]
 const target = ()         => (version(), config.agentMixFile ?? "prompt")
 
-const BLOCK = /\n*<!-- occ-agents:start[^>]*-->[\s\S]*?<!-- occ-agents:end -->\n*/
+// Blocks written before the rename (occ-agents) are recognised too, so they are replaced, not doubled.
+const BLOCK = /\n*<!-- (?:acode|occ)-agents:start[^>]*-->[\s\S]*?<!-- (?:acode|occ)-agents:end -->\n*/
 /** Put `text` in Agent Code's marked block at the end of `file` (or take the block out); the rest is left alone. */
 function writeBlock(file        , text                    ) {
   let current = ""
@@ -235,7 +236,7 @@ function writeBlock(file        , text                    ) {
   } catch {}
   const rest = current.replace(BLOCK, "\n").trim()
   const next = text
-    ? `${rest ? rest + "\n\n" : ""}<!-- occ-agents:start · written by Agent Code (/mix); edit it there -->\n${text}\n<!-- occ-agents:end -->\n`
+    ? `${rest ? rest + "\n\n" : ""}<!-- acode-agents:start · written by Agent Code (/mix); edit it there -->\n${text}\n<!-- acode-agents:end -->\n`
     : rest
       ? rest + "\n"
       : ""
@@ -546,9 +547,9 @@ function importOpenCodeBox() {
 
 export const agentsPlugin         = (api) => {
   // Each session's prompt gets that session's own mix (a copy of the default, made when it first starts).
-  api.lifecycle.onDispose(registerPromptPart("occ-agents", (context) => (target() === "prompt" ? compose(sessionMix(context?.sessionId)) : undefined)))
+  api.lifecycle.onDispose(registerPromptPart("acode-agents", (context) => (target() === "prompt" ? compose(sessionMix(context?.sessionId)) : undefined)))
   syncFiles()
-  api.slots.register({ id: "occ-agents", order: 160, slots: { sidebar_content: () => <AgentsSection /> } })
+  api.slots.register({ id: "acode-agents", order: 160, slots: { sidebar_content: () => <AgentsSection /> } })
   api.keymap.registerLayer({
     commands: [{ name: "agents.mix", title: "Agents (working profile)", category: "Agent", slashName: "mix", run: () => openAgents() }],
   })

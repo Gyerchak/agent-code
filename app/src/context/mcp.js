@@ -122,7 +122,7 @@ export function importMcp(force = false) {
 }
 
 /** The servers to start (without `disabled` ones), for Claude Code's `mcpServers` option. */
-export function occMcpServers()                                  {
+export function acodeMcpServers()                                  {
   applyPersonalSeed()
   importMcp()
   const out                                  = {}

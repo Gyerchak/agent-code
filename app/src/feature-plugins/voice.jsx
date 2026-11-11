@@ -1,4 +1,4 @@
-// occ-voice: talk to Claude and hear it, after OpenCodeBox's AgentMixer talking feature.
+// acode-voice: talk to Claude and hear it, after OpenCodeBox's AgentMixer talking feature.
 // Optional (off by default). One engine at a time — Kokoro, Kokoro + RVC, or OpenUtau —
 // each with its own pool of voices. A Haiku agent (low effort) does the speaking.
 import { createMemo, Show } from "solid-js"
@@ -362,7 +362,7 @@ export const voicePlugin         = (api) => {
     ],
     bindings: { "voice.talk": "<leader>v" },
   })
-  api.slots.register({ id: "occ-voice", order: 50, slots: { session_prompt_right: () => <VoiceBadge />, home_prompt_right: () => <VoiceBadge /> } })
+  api.slots.register({ id: "acode-voice", order: 50, slots: { session_prompt_right: () => <VoiceBadge />, home_prompt_right: () => <VoiceBadge /> } })
   // Read finished replies of the focused tab aloud.
   const off = onSessionEvent((event) => {
     if (event.type !== "idle" || event.error || !vc().enabled || !vc().readReplies || event.session !== active()) return

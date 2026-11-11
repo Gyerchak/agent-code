@@ -1,22 +1,22 @@
 #!/bin/sh
-# agentcode installer for Linux and macOS.
+# acode installer for Linux and macOS.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Gyerchak/agent-code/main/install.sh | sh
 #   ./install.sh            (from a downloaded copy of the repository)
 #
-# Environment: OCC_REPO (owner/name, default Gyerchak/agent-code), OCC_HOME (install folder, default
-# ~/.local/share/agentcode), OCC_BIN (folder for the command, default ~/.local/bin).
+# Environment: ACODE_REPO (owner/name, default Gyerchak/agent-code), ACODE_HOME (install folder, default
+# ~/.local/share/acode), ACODE_BIN (folder for the command, default ~/.local/bin).
 set -eu
 
-REPO="${OCC_REPO:-Gyerchak/agent-code}"
-HOME_DIR="${OCC_HOME:-$HOME/.local/share/agentcode}"
-BIN_DIR="${OCC_BIN:-$HOME/.local/bin}"
+REPO="${ACODE_REPO:-Gyerchak/agent-code}"
+HOME_DIR="${ACODE_HOME:-$HOME/.local/share/acode}"
+BIN_DIR="${ACODE_BIN:-$HOME/.local/bin}"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 fail() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-bold "agentcode installer"
+bold "acode installer"
 
 # 1. Node.js 26 or newer.
 NODE="$(command -v node || true)"
@@ -27,7 +27,7 @@ for candidate in "$NODE" $(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/v*/bin/n
   NODE=""
 done
 if [ -z "$NODE" ]; then
-  warn "agentcode needs Node.js 26 or newer."
+  warn "acode needs Node.js 26 or newer."
   if [ "$(uname)" = "Darwin" ]; then warn "Install it with: brew install node   (or nvm: nvm install 26)"
   else warn "Install it with nvm: curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash && nvm install 26"; fi
   fail "Then run this installer again."
@@ -40,11 +40,11 @@ bold "Node.js $("$NODE" --version) found."
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo)"
 mkdir -p "$HOME_DIR"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/app/package.json" ]; then
-  bold "Copying agentcode from $SCRIPT_DIR/app"
+  bold "Copying acode from $SCRIPT_DIR/app"
   rm -rf "$HOME_DIR/app.new"
   cp -R "$SCRIPT_DIR/app" "$HOME_DIR/app.new"
 else
-  bold "Downloading agentcode from github.com/$REPO"
+  bold "Downloading acode from github.com/$REPO"
   TMP="$(mktemp -d)"
   URL="https://codeload.github.com/$REPO/tar.gz/refs/heads/main"
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" -o "$TMP/agent-code.tar.gz"
@@ -65,13 +65,12 @@ bold "Installing dependencies and building (a minute)"
 
 # 4. The commands.
 mkdir -p "$BIN_DIR"
-ln -sf "$HOME_DIR/app/bin/agentcode" "$BIN_DIR/agentcode"
-ln -sf "$HOME_DIR/app/bin/agentcode" "$BIN_DIR/occ" # the earlier name keeps working
+ln -sf "$HOME_DIR/app/bin/acode" "$BIN_DIR/acode"
 if [ "$(uname)" = "Linux" ]; then
-  ln -sf "$HOME_DIR/app/bin/agentcode-window" "$BIN_DIR/agentcode-window"
-  ln -sf "$HOME_DIR/app/bin/agentcode-box" "$BIN_DIR/agentcode-box"
+  ln -sf "$HOME_DIR/app/bin/acode-window" "$BIN_DIR/acode-window"
+  ln -sf "$HOME_DIR/app/bin/acode-box" "$BIN_DIR/acode-box"
 fi
-bold "Installed: $BIN_DIR/agentcode"
+bold "Installed: $BIN_DIR/acode"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "Add $BIN_DIR to your PATH (e.g. in ~/.profile): export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 
 # 5. The engines.
@@ -80,4 +79,4 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 echo "Optional harnesses: opencode (npm i -g opencode-ai), DeepSeek Harness (npm i -g @deepseek-ai/dsh),"
 echo "Codex (npm i -g @openai/codex @agentclientprotocol/codex-acp)."
-bold "Done. Start with: agentcode"
+bold "Done. Start with: acode"
