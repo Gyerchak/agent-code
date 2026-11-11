@@ -200,10 +200,39 @@ export function gotoTab(index        ) {
   if (tab) focusTab(tab)
 }
 
+// Closed tabs, newest last, so the last one can be opened again (like a browser's ctrl+shift+t).
+const closedTabs = []
+
+/** Open the tab that was closed last again. False when there is none. */
+export async function reopenTab() {
+  const last = closedTabs.pop()
+  if (!last) return false
+  await openSession(last.id, last.title)
+  return true
+}
+
+/** Close every tab to the right of this one (running ones stay). Returns how many were closed. */
+export function closeTabsRight(session = active()) {
+  const list = tabs()
+  const index = list.indexOf(session)
+  const victims = list.slice(index + 1).filter((tab) => tab.store.status !== "running" && !tab.store.permissions.length && !tab.store.questions.length)
+  for (const tab of victims) closeTab(tab)
+  return victims.length
+}
+
+/** Keep a tab's dot until it is next visited (or clear it). */
+export function toggleUnread(session = active()) {
+  session.setStore("unseen", session.store.unseen ? undefined : "done")
+}
+
 export function closeTab(session = active()) {
   const list = tabs()
   const index = list.indexOf(session)
   if (index < 0) return
+  if (session.store.sessionID && session.store.messages.length) {
+    closedTabs.push({ id: session.store.sessionID, title: session.store.title })
+    if (closedTabs.length > 20) closedTabs.shift()
+  }
   session.dispose()
   const rest = list.filter((tab) => tab !== session)
   if (!rest.length) {

@@ -3095,6 +3095,13 @@ export function createSession(seed             ) {
         if (message.compact_result === "failed")
           pushNotice(`Compaction failed${message.compact_error ? `: ${message.compact_error}` : ""}`, "error")
         return
+      case "session_writes_lost":
+        // Claude Code could not save (the disk or its quota is full): say so, the chat on screen is all there is.
+        pushNotice(
+          `Claude Code could not save ${(message.lost ?? []).map((item) => (item === "transcript" ? "this conversation" : "its settings")).join(" and ") || "to disk"}: the disk ${message.error_code === "EDQUOT" ? "quota" : ""} is full. Free some space; what is on screen is not lost until you close the tab.`,
+          "error",
+        )
+        return
       case "compact_boundary": {
         const meta = message.compact_metadata ?? {}
         pushNotice(

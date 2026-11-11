@@ -42,6 +42,9 @@ import {
   app,
   backgroundTasks,
   closeTab,
+  closeTabsRight,
+  reopenTab,
+  toggleUnread,
   currentAgent,
   cycleAgent,
   findTab,
@@ -2367,6 +2370,30 @@ export function App() {
         void newSession()
         dialog.clear()
       },
+    },
+    {
+      id: "tab.reopen",
+      title: "Reopen closed tab",
+      category: "Tabs",
+      run: async () => {
+        if (!(await reopenTab())) toast.show({ variant: "info", message: "No closed tab to reopen", duration: 2000 })
+      },
+    },
+    {
+      id: "tab.close.right",
+      title: "Close tabs to the right",
+      category: "Tabs",
+      enabled: () => tabs().indexOf(active()) < tabs().length - 1,
+      run: () => {
+        const count = closeTabsRight()
+        toast.show({ variant: "info", message: count ? `Closed ${count} tab${count === 1 ? "" : "s"} (ctrl+shift+t reopens the last)` : "Nothing closed: those tabs are working", duration: 3000 })
+      },
+    },
+    {
+      id: "tab.unread",
+      title: store.unseen ? "Mark as read" : "Mark as unread",
+      category: "Tabs",
+      run: () => toggleUnread(),
     },
     {
       id: "tab.close",
