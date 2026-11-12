@@ -796,7 +796,8 @@ const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved 
 const allSessions = new Set()
 
 export const FABLE_FAMILIES = ["opus", "sonnet", "haiku"]
-const UPGRADE_DEFAULTS = { opus: { on: true, step: 1 }, sonnet: { on: true, step: 2 }, haiku: { on: true, step: 3 } }
+// Only Opus tabs go back to Fable unless Sonnet or Haiku are switched on in its settings.
+const UPGRADE_DEFAULTS = { opus: { on: true, step: 1 }, sonnet: { on: false, step: 2 }, haiku: { on: false, step: 3 } }
 
 export function fableFallback() {
   const own = config.fableFallback ?? {}

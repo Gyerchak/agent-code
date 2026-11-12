@@ -525,7 +525,9 @@ export function Prompt(props                                         ) {
             return true
           }
           if (!input.plainText) return false
-          input.moveCursorUp()
+          // On the first line, up goes to the very start of the text (as down on the last line goes to its end).
+          if (input.editorView.getVisualSOL().offset === 0) input.gotoBufferHome()
+          else input.moveCursorUp()
           return true
         }
         if (atEnd && store_.historyIndex >= 0) {
@@ -536,9 +538,8 @@ export function Prompt(props                                         ) {
           return true
         }
         if (!input.plainText) return false
-        // From the last line, down goes back to the first one.
-        const view = input.editorView
-        if (lastRow && view.getVisualEOL().logicalCol === view.getEOL().logicalCol) input.gotoBufferHome()
+        // On the last line, down goes to the very end of the text (it used to jump back to the start).
+        if (input.editorView.getVisualEOL().offset >= input.plainText.length) input.gotoBufferEnd()
         else input.moveCursorDown()
         return true
       }

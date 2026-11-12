@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { FABLE_FAMILIES, fableFallback, fableUpgrade, limits,                                     } from "../context/session"
+import { fableFallback, fableUpgrade, limits,                                     } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -473,7 +473,6 @@ function SwitchRow(props) {
   )
 }
 
-const FAMILY_NAME = { opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" }
 
 /** Fable fallback: a Fable tab at the Fable limit goes on with another model, its level raised. */
 export function FableFallbackToggle() {
@@ -481,7 +480,7 @@ export function FableFallbackToggle() {
   return (
     <SwitchRow
       on={rule().enabled}
-      label={rule().enabled ? `Fable fallback → ${FAMILY_NAME[rule().model]} +${rule().step}` : "Fable fallback off"}
+      label={rule().enabled ? "Fable fallback on" : "Fable fallback off"}
       toggle="fable.fallback.toggle"
       settings="fable.fallback.settings"
     />
@@ -491,14 +490,10 @@ export function FableFallbackToggle() {
 /** Back to Fable: after a used-up Fable limit resets, Opus/Sonnet/Haiku tabs return to Fable, their level lowered. */
 export function FableReturnToggle() {
   const rule = () => (configRevision(), fableUpgrade())
-  const which = () =>
-    FABLE_FAMILIES.filter((family) => rule().models[family].on)
-      .map((family) => `${FAMILY_NAME[family][0]}-${rule().models[family].step}`)
-      .join(" ")
   return (
     <SwitchRow
       on={rule().enabled}
-      label={rule().enabled ? `Back to Fable ${which() || "(no models)"}` : "Back to Fable off"}
+      label={rule().enabled ? "Back to Fable on" : "Back to Fable off"}
       toggle="fable.upgrade.toggle"
       settings="fable.upgrade.settings"
     />
