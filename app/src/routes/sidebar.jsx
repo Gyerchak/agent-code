@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { limits,                                     } from "../context/session"
+import { FABLE_FAMILIES, fableFallback, fableUpgrade, limits,                                     } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -450,6 +450,61 @@ export function AutoPauseToggle() {
   )
 }
 
+/** One switch row of the sidebar's footer: a click runs `toggle`, a right click `settings`. */
+function SwitchRow(props) {
+  const [hover, setHover] = createSignal(false)
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={(event) => runCommand(event?.button === 2 ? props.settings : props.toggle)}
+    >
+      <text fg={props.on ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: props.on ? theme.success : theme.textMuted }}>{props.on ? "◉" : "○"}</span>
+        {"  " + props.label}
+        <Show when={hover()}>
+          <span style={{ fg: theme.textMuted }}> (right click: settings)</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
+const FAMILY_NAME = { opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" }
+
+/** Fable fallback: a Fable tab at the Fable limit goes on with another model, its level raised. */
+export function FableFallbackToggle() {
+  const rule = () => (configRevision(), fableFallback())
+  return (
+    <SwitchRow
+      on={rule().enabled}
+      label={rule().enabled ? `Fable fallback → ${FAMILY_NAME[rule().model]} +${rule().step}` : "Fable fallback off"}
+      toggle="fable.fallback.toggle"
+      settings="fable.fallback.settings"
+    />
+  )
+}
+
+/** Back to Fable: after a used-up Fable limit resets, Opus/Sonnet/Haiku tabs return to Fable, their level lowered. */
+export function FableReturnToggle() {
+  const rule = () => (configRevision(), fableUpgrade())
+  const which = () =>
+    FABLE_FAMILIES.filter((family) => rule().models[family].on)
+      .map((family) => `${FAMILY_NAME[family][0]}-${rule().models[family].step}`)
+      .join(" ")
+  return (
+    <SwitchRow
+      on={rule().enabled}
+      label={rule().enabled ? `Back to Fable ${which() || "(no models)"}` : "Back to Fable off"}
+      toggle="fable.upgrade.toggle"
+      settings="fable.upgrade.settings"
+    />
+  )
+}
+
 /** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
 export function PhoneRow() {
   const [hover, setHover] = createSignal(false)
@@ -492,6 +547,8 @@ export function SidebarFooter() {
       <box flexShrink={0}>
         <PauseBar />
         <AutoPauseToggle />
+        <FableFallbackToggle />
+        <FableReturnToggle />
         <PhoneRow />
       </box>
       <text fg={theme.textMuted} wrapMode="none" truncate>

@@ -1,7 +1,7 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
-import { billingLabel, catalog, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
+import { billingLabel, catalog, CLAUDE_IDS, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
 import { lanAddress, phoneLink, phoneQr, phoneServerState, phoneSettings, phoneToken, setPhoneSetting, startPhoneServer, stopPhoneServer } from "./context/remote"
@@ -19,8 +19,9 @@ import os from "node:os"
 import path from "node:path"
 
 import { forgetPlan, planRate } from "./context/usage"
+import { effortCost, effortStats, refreshEffortStats } from "./context/effortstats"
 import { APP_NAME, appVersion } from "./context/version"
-import { config, listSavedSettings, reloadConfig, resetSettings, restoreSettings, saveConfig, saveSettings } from "./context/config"
+import { config, configRevision, listSavedSettings, reloadConfig, resetSettings, restoreSettings, saveConfig, saveSettings } from "./context/config"
 import {
   actions,
   exit,
@@ -38,7 +39,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, claudeModelList, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -72,7 +73,7 @@ import {
   undo,
 } from "./context/tabs"
 import { agentColor, setTheme, themeName, themeList, theme } from "./context/theme"
-import { logFile } from "./context/log"
+import { log, logFile } from "./context/log"
 import { Logo } from "./component/logo"
 import { Prompt, setPromptText } from "./component/prompt"
 import { ModBand, ModStatus } from "./component/mods"
@@ -275,7 +276,7 @@ function DialogFavoriteVariants(props) {
         ...variantsOf(props.model).map((level) => ({
           title: level,
           value: level,
-          description: EFFORT_HINTS[level],
+
           gutter: <text fg={chosen().includes(level) ? theme.success : theme.textMuted}>{chosen().includes(level) ? "[x]" : "[ ]"}</text>,
         })),
         { title: "Done", value: "", description: chosen().length ? `${chosen().length} variant row${chosen().length === 1 ? "" : "s"} under Favorites` : "one row: the model with its last variant" },
@@ -349,6 +350,97 @@ function claudeModels() {
       const older = !alias && versionNumber(model) < (newest[family(model) ?? model.value] ?? 0)
       return { ...model, displayName: label, older }
     })
+}
+
+const FAMILY_TITLE = { opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" }
+const nextIn = (list, value) => list[(list.indexOf(value) + 1) % list.length]
+
+/** Fable fallback settings: on/off, the model it falls back to, how many levels its reasoning goes up. */
+function DialogFableFallback() {
+  const rule = () => (configRevision(), fableFallback())
+  const save = (change) => {
+    config.fableFallback = { ...fableFallback(), ...change }
+    saveConfig()
+  }
+  return (
+    <DialogSelect
+      title="Fable fallback"
+      options={[
+        { title: "Fable fallback", value: "enabled", description: "at the Fable limit a Fable tab goes on with another model", footer: rule().enabled ? "on" : "off" },
+        { title: "Fall back to", value: "model", description: "enter: next model", footer: FAMILY_TITLE[rule().model] },
+        { title: "Reasoning", value: "step", description: "levels above the Fable tab's own (enter: next)", footer: `+${rule().step}` },
+      ]}
+      onSelect={(option) => {
+        if (option.value === "enabled") save({ enabled: !rule().enabled })
+        if (option.value === "model") save({ model: nextIn(FABLE_FAMILIES, rule().model) })
+        if (option.value === "step") save({ step: (rule().step + 1) % 4 })
+      }}
+    />
+  )
+}
+
+/** Back to Fable settings: on/off, and for Opus, Sonnet and Haiku whether they return and how many levels lower. */
+function DialogFableUpgrade() {
+  const rule = () => (configRevision(), fableUpgrade())
+  const save = (change) => {
+    const now = fableUpgrade()
+    config.fableUpgrade = { enabled: now.enabled, models: now.models, ...change }
+    saveConfig()
+  }
+  const setModel = (family, change) => save({ models: { ...rule().models, [family]: { ...rule().models[family], ...change } } })
+  return (
+    <DialogSelect
+      title="Back to Fable"
+      options={[
+        {
+          title: "Back to Fable",
+          value: "enabled",
+          description: "after a used-up Fable limit resets, these tabs return to Fable",
+          footer: rule().enabled ? "on" : "off",
+        },
+        ...FABLE_FAMILIES.flatMap((family) => [
+          { title: FAMILY_TITLE[family], value: `on:${family}`, description: `${FAMILY_TITLE[family]} tabs return to Fable`, footer: rule().models[family].on ? "on" : "off", category: FAMILY_TITLE[family] },
+          { title: `${FAMILY_TITLE[family]} reasoning`, value: `step:${family}`, description: "levels lower on Fable (enter: next)", footer: `-${rule().models[family].step}`, category: FAMILY_TITLE[family] },
+        ]),
+      ]}
+      onSelect={(option) => {
+        const [kind, family] = option.value.split(":")
+        if (kind === "enabled") save({ enabled: !rule().enabled })
+        if (kind === "on") setModel(family, { on: !rule().models[family].on })
+        if (kind === "step") setModel(family, { step: (rule().models[family].step + 1) % 4 })
+      }}
+    />
+  )
+}
+
+/**
+ * Select all: the whole chat goes to the clipboard, and the part of it on screen is highlighted (a terminal app can
+ * only mark what is drawn).
+ */
+function selectAll(renderer) {
+  const scroll = refs.scroll
+  if (copyText(renderer, transcript())) toast.show({ variant: "success", message: "Whole chat selected and copied", duration: 2000 })
+  if (!scroll || scroll.isDestroyed) return
+  try {
+    const first = (function find(node) {
+      for (const child of node.getChildren?.() ?? []) {
+        if (child.selectable) return child
+        const found = find(child)
+        if (found) return found
+      }
+    })(scroll)
+    if (!first) return
+    renderer.startSelection(first, scroll.x, scroll.y)
+    // Widen the selection to the whole chat column, one container up at a time.
+    const inside = (node) => {
+      for (let at = scroll; at; at = at.parent) if (at === node) return true
+      return false
+    }
+    for (let i = 0; i < 40 && !inside(renderer.getSelectionContainer?.()); i++) renderer.updateSelection(undefined, scroll.x + scroll.width - 1, scroll.y + scroll.height - 1)
+    renderer.updateSelection(undefined, scroll.x + scroll.width - 1, scroll.y + scroll.height - 1, { finishDragging: true })
+  } catch (error) {
+    log("select all", error)
+  }
 }
 
 /** How full a plan limit window gets before "Pause before a limit" pauses (default 95 %). */
@@ -755,20 +847,31 @@ function DialogModels() {
   )
 }
 
+/**
+ * Variants with what each really costs: the price per token is the same at every level, the tokens are not. Each
+ * row shows the measured average of one request at that level (price and output tokens), from Claude Code's own
+ * transcripts of your past work; a level never used shows nothing.
+ */
 function DialogEffort() {
   const levels = createMemo(() => variantsOf(store.model))
-  // Every variant costs the same per token: the model's API price and its estimated price on the plan.
-  const price = createMemo(() => {
-    const facts = priceFacts(store.model, store.modelId, providerName(store.model), [modelLabel()])
-    const api = facts.facts.find((item) => item.startsWith("API "))
-    return [api && !facts.footer.includes(api.slice(4)) ? api : "", facts.footer].filter(Boolean).join(" · ")
-  })
+  onMount(() => void refreshEffortStats())
+  // The model's full id (an alias like "haiku" may not be resolved yet before its first reply).
+  const modelId = () =>
+    store.modelId ?? store.models.find((item) => item.value === store.model)?.resolvedModel ?? CLAUDE_IDS[store.model] ?? String(store.model).replace(/\[.*$/, "")
+  const price = () => modelMeta(store.model, modelId()).price
+  const measured = (level) => {
+    if (splitModel(store.model)) return undefined
+    const cost = effortCost(modelId(), level === "default" ? undefined : level, price())
+    if (!cost) return undefined
+    const tokens = cost.output >= 1000 ? `${(cost.output / 1000).toFixed(1)}K` : String(cost.output)
+    return `${cost.dollars !== undefined ? `≈$${cost.dollars < 0.1 ? cost.dollars.toFixed(3) : cost.dollars.toFixed(2)} a request · ` : ""}${tokens} out · ${cost.requests.toLocaleString()} measured`
+  }
   return (
     <DialogSelect
-      title={`Select variant · ${modelLabel()}`}
+      title={`Variant · ${modelLabel()}${price() ? ` · API ${priceText(price())}/M` : ""}`}
       options={[
-        { title: "default", value: "default", description: "model default", footer: price() },
-        ...levels().map((level) => ({ title: level, value: level, description: EFFORT_HINTS[level], footer: price() })),
+        { title: "default", value: "default", footer: (effortStats(), measured("default")) },
+        ...levels().map((level) => ({ title: level, value: level, footer: (effortStats(), measured(level)) })),
       ]}
       current={store.effort ?? "default"}
       onSelect={(option) => {
@@ -1856,6 +1959,8 @@ function DialogSettings() {
     },
     { key: "pauseNearLimit", title: "Pause before a limit", description: "near a plan limit, pause until it resets (resume to go on up to 100%)", get: flag("pauseNearLimit", true), set: write("pauseNearLimit") },
     { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
+    { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
+    { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
     { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what Agent Code draws", get: () => modsEnabled(), set: () => {} },
@@ -1894,6 +1999,8 @@ function DialogSettings() {
           dialog.replace(() => <DialogPauseAt back />)
           return
         }
+        if (option.value === "fable.fallback") return dialog.replace(() => <DialogFableFallback />)
+        if (option.value === "fable.upgrade") return dialog.replace(() => <DialogFableUpgrade />, undefined, "large")
         if (option.value === "settings.save") {
           dialog.replace(() => (
             <DialogPrompt
@@ -2419,6 +2526,33 @@ export function App() {
       },
     },
     { id: "pause.limit.threshold", title: "Auto-pause threshold", category: "Session", run: () => dialog.replace(() => <DialogPauseAt />) },
+    {
+      id: "fable.fallback.toggle",
+      title: fableFallback().enabled ? "Turn off Fable fallback" : "Turn on Fable fallback",
+      category: "Session",
+      slash: "fable-fallback",
+      run: () => {
+        config.fableFallback = { ...fableFallback(), enabled: !fableFallback().enabled }
+        saveConfig()
+        const rule = fableFallback()
+        toast.show({ variant: "info", message: rule.enabled ? `Fable fallback on: at the Fable limit, ${FAMILY_TITLE[rule.model]} with reasoning +${rule.step}` : "Fable fallback off" })
+      },
+    },
+    { id: "fable.fallback.settings", title: "Fable fallback settings", category: "Session", run: () => dialog.replace(() => <DialogFableFallback />) },
+    {
+      id: "fable.upgrade.toggle",
+      title: fableUpgrade().enabled ? "Turn off Back to Fable" : "Turn on Back to Fable",
+      category: "Session",
+      slash: "fable-return",
+      run: () => {
+        const now = fableUpgrade()
+        config.fableUpgrade = { ...now, enabled: !now.enabled }
+        saveConfig()
+        toast.show({ variant: "info", message: !now.enabled ? "Back to Fable on: after a used-up Fable limit resets, tabs return to Fable" : "Back to Fable off" })
+      },
+    },
+    { id: "fable.upgrade.settings", title: "Back to Fable settings", category: "Session", run: () => dialog.replace(() => <DialogFableUpgrade />, undefined, "large") },
+    { id: "chat.select_all", title: "Select all (copy the whole chat)", category: "Session", run: () => selectAll(renderer) },
     { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
     { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
     { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },

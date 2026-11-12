@@ -71,10 +71,19 @@ function rememberSessionEffort(sessionID, effort) {
   saveConfig()
 }
 
-/** The level a conversation was on, else the one last chosen for its model. */
-function sessionEffort(sessionID, model) {
+/**
+ * The level a conversation was on: Agent Code's own record, else the level its transcript last ran at (Claude Code
+ * saves it with every request), else the one last chosen for its model. Found in the transcript, it is recorded,
+ * so it is the session's own from then on.
+ */
+function sessionEffort(sessionID, model, history) {
   const own = sessionID ? config.sessionEffort?.[sessionID] : undefined
   if (own !== undefined) return own === "default" ? undefined : own
+  const ran = history?.findLast((entry) => entry.type === "assistant" && typeof entry.effort === "string")?.effort
+  if (ran && sessionID && !splitModel(model)) {
+    rememberSessionEffort(sessionID, ran)
+    return ran
+  }
   return storedEffort(model)
 }
 
@@ -648,6 +657,7 @@ export async function pollPlanUsage(force = false) {
     })
     if (usage) {
       applyUsage(usage)
+      checkFableReturn()
       if (catalog.plan && !usage.week?.hit) samplePlanRate(usage.week?.utilization, catalog.planLabel ?? catalog.plan)
     }
     // At the 5-hour wall Anthropic may offer a reset: look (at most once a minute).
@@ -773,6 +783,149 @@ function applyUsage(usage) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Fable fallback and return (sidebar, under auto-pause; Settings → Fable fallback… / Back to Fable…)
+//  - fallback: a Fable tab that hits the Fable limit (or would pause before it) goes on at once on another model
+//    (Opus by default) with its reasoning level raised (+1 by default). Off by default.
+//  - return: once a Fable limit that was used up resets, tabs on Opus, Sonnet or Haiku go back to Fable with their
+//    level lowered (Opus 1, Sonnet 2, Haiku 3 levels by default; each model can be left out). On by default.
+// ---------------------------------------------------------------------------
+
+const LEVELS = ["low", "medium", "high", "xhigh", "max"]
+const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved to another model. Continue the work from where it stopped."
+const allSessions = new Set()
+
+export const FABLE_FAMILIES = ["opus", "sonnet", "haiku"]
+const UPGRADE_DEFAULTS = { opus: { on: true, step: 1 }, sonnet: { on: true, step: 2 }, haiku: { on: true, step: 3 } }
+
+export function fableFallback() {
+  const own = config.fableFallback ?? {}
+  return { enabled: own.enabled === true, model: FABLE_FAMILIES.includes(own.model) ? own.model : "opus", step: Number.isInteger(own.step) ? own.step : 1 }
+}
+
+export function fableUpgrade() {
+  const own = config.fableUpgrade ?? {}
+  return {
+    enabled: own.enabled !== false,
+    models: Object.fromEntries(FABLE_FAMILIES.map((family) => [family, { ...UPGRADE_DEFAULTS[family], ...(own.models?.[family] ?? {}) }])),
+  }
+}
+
+/** opus, sonnet, haiku or fable: the Claude family a tab's model belongs to. */
+export function familyOf(store) {
+  return String(store.modelId ?? store.model ?? "").match(/opus|sonnet|haiku|fable/i)?.[0]?.toLowerCase()
+}
+
+const isFableLimit = (type) => type === "seven_day_overage_included"
+
+/** A level moved by `step` (negative: lower) within what the model offers; "default" counts as high. */
+function shiftEffort(effort, step, levels) {
+  const list = LEVELS.filter((level) => !levels?.length || levels.includes(level))
+  if (!list.length) return effort
+  let index = list.indexOf(effort && list.includes(effort) ? effort : "high")
+  if (index < 0) index = Math.min(list.length - 1, 2)
+  return list[Math.max(0, Math.min(list.length - 1, index + step))]
+}
+
+/** The tab's own value for a family: its alias when Claude Code offers one, else the newest model of it. */
+function familyModel(session, family) {
+  const models = session.store.models ?? []
+  if (models.some((model) => model.value === family)) return family
+  const matches = models.filter((model) => String(model.resolvedModel ?? model.value).toLowerCase().includes(family))
+  return matches.at(-1)?.value ?? family
+}
+
+const levelsOf = (session, value) => session.store.models?.find((model) => model.value === value)?.supportedEffortLevels
+
+/** Move a Fable tab to the fallback model. True when it moved. */
+export async function fallBackFromFable(session) {
+  const rule = fableFallback()
+  if (!rule.enabled || session.disposed || splitModel(session.store.model) || familyOf(session.store) !== "fable") return false
+  const target = familyModel(session, rule.model)
+  const effort = shiftEffort(session.store.effort, rule.step, levelsOf(session, target))
+  const from = `${session.modelLabel?.() ?? "Fable"}${session.store.effort ? ` · ${session.store.effort}` : ""}`
+  await session.setModel(target)
+  await session.setEffort(effort)
+  session.notice?.(`Fable limit reached: moved from ${from} to ${session.modelLabel?.() ?? target} · ${effort} (Fable fallback). Back to Fable when its limit resets${fableUpgrade().enabled ? "" : " is off"}.`, "warning")
+  return true
+}
+
+/** Tabs on Opus, Sonnet or Haiku go (back) to Fable after its used-up limit reset. */
+async function returnToFable() {
+  const rule = fableUpgrade()
+  if (!rule.enabled) return
+  for (const session of allSessions) {
+    if (session.disposed || session.store.engine || splitModel(session.store.model)) continue
+    const family = familyOf(session.store)
+    const own = rule.models[family]
+    if (!own?.on) continue
+    const target = familyModel(session, "fable")
+    const effort = shiftEffort(session.store.effort, -own.step, levelsOf(session, target))
+    const from = `${session.modelLabel?.() ?? family}${session.store.effort ? ` · ${session.store.effort}` : ""}`
+    try {
+      await session.setModel(target)
+      await session.setEffort(effort)
+      session.notice?.(`The Fable limit has reset: moved from ${from} back to ${session.modelLabel?.() ?? "Fable"} · ${effort} (Back to Fable).`, "info")
+    } catch (error) {
+      log("back to Fable failed", error)
+    }
+  }
+}
+
+// Whether the Fable window was used up, shared by every window and kept across restarts (only the harness's own
+// readings: the usage API's Fable meter and Claude Code's refusals).
+const fableFile = () => path.join(process.env.ACODE_SHARED_STATE || stateDir, "fable-limit.json")
+function readFableState() {
+  try {
+    return JSON.parse(readFileSync(fableFile(), "utf8")) ?? {}
+  } catch {
+    return {}
+  }
+}
+function writeFableState(state) {
+  try {
+    writeFileSync(fableFile(), JSON.stringify(state))
+  } catch (error) {
+    log("fable state write failed", error)
+  }
+}
+
+let fableSeenFull
+let fableReturned
+
+function noteFableFull(resetsAt) {
+  if (!resetsAt) return
+  fableSeenFull = resetsAt
+  if (readFableState().fullUntil !== resetsAt) writeFableState({ ...readFableState(), fullUntil: resetsAt })
+}
+
+/** A refusal by the Fable limit: its meter shows full until it resets. */
+function markFableHit(resetsAt) {
+  const list = [...(limits.scoped ?? [])]
+  const index = list.findIndex((w) => /fable/i.test(w.name))
+  const until = resetsAt ?? list[index]?.resetsAt
+  const full = { ...(list[index] ?? { name: "Fable" }), utilization: 100, hit: true, resetsAt: until }
+  if (index >= 0) list[index] = full
+  else list.push(full)
+  setLimits("scoped", list)
+  noteFableFull(until)
+  shareLimits()
+  void pollPlanUsage(true)
+}
+
+/** After each reading: remember a used-up Fable window; once it has reset, bring the tabs back to Fable. */
+function checkFableReturn() {
+  const fable = (limits.scoped ?? []).find((w) => /fable/i.test(w.name))
+  if (fable && fable.utilization >= 100 && fable.resetsAt && fable.resetsAt > Date.now()) return noteFableFull(fable.resetsAt)
+  const state = readFableState()
+  const until = state.fullUntil ?? (state.returnedFor === fableSeenFull ? fableSeenFull : undefined)
+  if (!until || Date.now() < until || fableReturned === until) return
+  fableReturned = until
+  if (state.fullUntil === until) writeFableState({ returnedFor: until, returnedAt: Date.now() })
+  log("Fable limit reset after it was used up: back to Fable")
+  void returnToFable()
+}
+
 function applySharedUsage(usage                             ) {
   // A window from before a reset (an older Agent Code still running publishes what it last saw) doesn't replace a newer one.
   const stale = (theirs, mine) =>
@@ -781,6 +934,7 @@ function applySharedUsage(usage                             ) {
     usage = { ...usage, week: stale(usage.week, limits.week) ? limits.week : usage.week, fiveHour: stale(usage.fiveHour, limits.fiveHour) ? limits.fiveHour : usage.fiveHour }
   applyUsage(usage)
   if ("offer" in usage) setLimits("offer", usage.offer)
+  checkFableReturn()
   checkAutoResume()
 }
 
@@ -1513,6 +1667,7 @@ export function createSession(seed             ) {
     stop()
     disposed = true
     limitResetListeners.delete(onLimitReset)
+    allSessions.delete(self)
     clearTimeout(mcpPoll)
     emit("closed")
   }
@@ -2028,6 +2183,7 @@ export function createSession(seed             ) {
   // A limit reset was used: a pause before the limit is over.
   const onLimitReset = () => store.pause?.reason === "limit" && resume()
   limitResetListeners.add(onLimitReset)
+  allSessions.add(self)
 
   /** Pause until `until` (ms; undefined = until resumed by hand). */
   function pause(until, reason = "user", windows) {
@@ -2078,6 +2234,11 @@ export function createSession(seed             ) {
       ...own.map((w) => ({ ...w, key: `scoped:${w.name}` })),
     ].filter((w) => w && w.resetsAt && w.resetsAt > Date.now() && w.utilization >= at && !waivedPause(w))
     if (!windows.length) return
+    // Only the Fable window is near its end and Fable fallback is on: switch model instead of pausing.
+    if (fableFallback().enabled && windows.every((w) => /^scoped:fable/i.test(w.key)) && familyOf(store) === "fable") {
+      void fallBackFromFable(api)
+      return
+    }
     const until = Math.max(...windows.map((w) => w.resetsAt)) + 30_000
     pause(until, "limit", windows.map((w) => ({ key: w.key, resetsAt: w.resetsAt })))
     pushNotice(
@@ -2509,7 +2670,9 @@ export function createSession(seed             ) {
       setStore("messages", convertHistory(history))
       const used = savedModel(id, history         )
       if (used) setStore("model", used)
-      setStore("effort", sessionEffort(id, store.model))
+      setStore("effort", sessionEffort(id, store.model, history))
+      // The model is the session's own from now on, too (an older one only had it in its transcript).
+      if (used) rememberSessionModel(id, used)
       recomputeDerived()
       loadRevert()
     } catch (error) {
@@ -3037,6 +3200,11 @@ export function createSession(seed             ) {
         const resetsAt = info.resetsAt ? info.resetsAt * (info.resetsAt < 1e12 ? 1000 : 1) : undefined
         if (info.status === "rejected" && !info.isUsingOverage) {
           limitResetsAt = resetsAt
+          // The Fable limit (a share of the weekly one) is its own window: the other meters are untouched.
+          if (isFableLimit(info.rateLimitType)) {
+            fableRefused = true
+            return markFableHit(resetsAt)
+          }
           return markLimitHit(info.rateLimitType, resetsAt)
         }
         const key = windowKey(info.rateLimitType)
@@ -3074,7 +3242,9 @@ export function createSession(seed             ) {
           setStore("version", message.claude_code_version)
           if (message.output_style) setStore("outputStyle", message.output_style)
           // Provider models' variants are Agent Code's own (applied by its proxy), not Claude Code's effort.
-          if (message.effort !== undefined && message.effort !== null && !splitModel(store.model)) setStore("effort", message.effort)
+          // A session with its own level keeps it (Claude Code would report its global setting for "default").
+          const ownLevel = store.sessionID ? config.sessionEffort?.[store.sessionID] : undefined
+          if (message.effort !== undefined && message.effort !== null && !splitModel(store.model) && ownLevel === undefined) setStore("effort", message.effort)
           if (message.fast_mode_state) setStore("fast", message.fast_mode_state === "on" || message.fast_mode_state === "enabled")
           setStore("skills", reconcile(message.skills ?? []))
           setStore("plugins", reconcile(message.plugins ?? []))
@@ -3556,6 +3726,7 @@ export function createSession(seed             ) {
   // What this turn learned about a limit refusal; the result message doesn't always carry it.
   let limitRefusal
   let limitResetsAt
+  let fableRefused = false
 
   function handleResult(message     ) {
     const error =
@@ -3565,9 +3736,11 @@ export function createSession(seed             ) {
           ? message.result
           : undefined
     const interrupted = lastTurn()?.interrupted
-    const refusal = isLimitError(error) ? error : limitRefusal
+    const refusal = isLimitError(error) || /fable limit/i.test(error ?? "") ? error : limitRefusal
     const resetsAt = limitResetsAt ?? limitResetTime(refusal)
+    const fable = !!refusal && !splitModel(store.model) && (fableRefused || /fable limit/i.test(refusal))
     limitRefusal = limitResetsAt = undefined
+    fableRefused = false
     batch(() => {
       if (typeof message.total_cost_usd === "number") {
         // total_cost_usd is cumulative for the process; carry over costs from earlier processes.
@@ -3581,6 +3754,16 @@ export function createSession(seed             ) {
       finishTurn({ error: error && !interrupted ? error : undefined })
       setStore("compacting", false)
     })
+    // The Fable limit: with Fable fallback on, the work goes on at once on the fallback model; otherwise it waits.
+    if (fable) {
+      markFableHit(resetsAt)
+      if (interrupted) return
+      void fallBackFromFable(api).then((moved) => {
+        if (moved) send(FABLE_RESUME_PROMPT)
+        else armAutoResume(api, resetsAt)
+      })
+      return
+    }
     // Only Claude's own refusals count against the Claude plan (other providers answer 429 too).
     if (refusal && !splitModel(store.model)) markLimitHit(/weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined, resetsAt)
     if (refusal && !interrupted) armAutoResume(api, resetsAt)
@@ -3611,6 +3794,7 @@ export function createSession(seed             ) {
   }
 
   const api = Object.assign(self, {
+    notice: pushNotice,
     start,
     stop,
     ensureStarted,

@@ -53,7 +53,7 @@ function save(cache       ) {
 }
 
 const price = (cost     )                    =>
-  cost && typeof cost.input === "number" ? { input: cost.input, output: cost.output ?? 0, cacheRead: cost.cache_read } : undefined
+  cost && typeof cost.input === "number" ? { input: cost.input, output: cost.output ?? 0, cacheRead: cost.cache_read, cacheWrite: cost.cache_write } : undefined
 
 async function fetchDev()                        {
   const response = await fetch("https://models.dev/api.json", { headers: { "user-agent": "agent-code" }, signal: AbortSignal.timeout(10_000) })
@@ -126,7 +126,7 @@ export function refreshCatalog() {
 // Per-model facts
 // ---------------------------------------------------------------------------
 
-const CLAUDE_IDS                         = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5", fable: "claude-fable-5-1" }
+export const CLAUDE_IDS                         = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5", fable: "claude-fable-5-1" }
 
 
 
