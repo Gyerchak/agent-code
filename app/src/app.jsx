@@ -2783,14 +2783,17 @@ export function App() {
 
   useLayer({ commands })
 
-  // Copy-on-select, like opencode.
+  // Copy-on-select, like opencode. The selection stays: in the prompt it can still be typed over or deleted; it
+  // goes with the next click. Each selection is copied once (a click that ends without a new one copies nothing).
+  let copiedSelection
   const onMouseUp = () => {
-    const selected = renderer.getSelection()?.getSelectedText()
-    if (!selected) return
+    const selection = renderer.getSelection()
+    const selected = selection?.getSelectedText()
+    if (!selected || selection === copiedSelection) return
+    copiedSelection = selection
     // A copied prompt carries its files' paths, not their placeholders.
     const text = selectionWithPaths(selected, store.messages)
     if (copyText(renderer, text)) toast.show({ variant: "info", message: "Copied to clipboard", duration: 1500 })
-    renderer.clearSelection()
   }
 
   // Plugin routes: a registered name renders instead of home/session.
