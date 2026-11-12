@@ -1,6 +1,6 @@
 {
   "name": "agent-code",
-  "version": "5.5.1",
+  "version": "5.5.2",
   "description": "Agent Code: one terminal for Claude Code, opencode, DeepSeek Harness and Codex",
   "scripts": {
     "build": "node scripts/build.mjs",

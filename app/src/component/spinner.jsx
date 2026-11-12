@@ -17,15 +17,15 @@ function useFrame(count        , interval        ) {
 export function Spinner(props                                          ) {
   const color = () => props.color ?? theme.textMuted
   if (config.animations === false)
-    return <text fg={color()}>{props.children ? <>⋯ {props.children}</> : "⋯"}</text>
+    return <text selectable={false} fg={color()}>{props.children ? <>⋯ {props.children}</> : "⋯"}</text>
   const frame = useFrame(SPINNER_FRAMES.length, 80)
   return (
     <box flexDirection="row" gap={1} flexShrink={props.children ? 1 : 0}>
-      <text flexShrink={0} fg={color()}>
+      <text selectable={false} flexShrink={0} fg={color()}>
         {SPINNER_FRAMES[frame()]}
       </text>
       <Show when={props.children}>
-        <text fg={color()}>{props.children}</text>
+        <text selectable={false} fg={color()}>{props.children}</text>
       </Show>
     </box>
   )
@@ -33,14 +33,14 @@ export function Spinner(props                                          ) {
 
 /** Knight-rider "blocks" scanner shown in the prompt footer while a session runs. */
 export function Scanner(props                 ) {
-  if (config.animations === false) return <text fg={theme.textMuted}>[⋯]</text>
+  if (config.animations === false) return <text selectable={false} fg={theme.textMuted}>[⋯]</text>
   const def = createMemo(() => {
     const options = { color: props.color, style: "blocks"         , inactiveFactor: 0.6, minAlpha: 0.3 }
     return { frames: createFrames(options), colors: createColors(options) }
   })
   const frame = useFrame(def().frames.length, 40)
   return (
-    <text>
+    <text selectable={false}>
       <For each={Array.from(def().frames[frame() % def().frames.length])}>
         {(char, index) => (
           <span style={{ fg: def().colors(frame() % def().frames.length, index(), def().frames.length, 8)         }}>{char}</span>

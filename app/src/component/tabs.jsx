@@ -64,13 +64,6 @@ export function TabBar() {
           const over = () => {
             lastOver = ++events
             setHover(session.key)
-            // A tab held down and moved over this one takes its place (the drag events themselves go to whatever
-            // cell was pressed and never reached the tab, so the move is made here and on release).
-            const held = dragging()
-            if (held && held !== session && !held.disposed) {
-              dragged = true
-              moveTabTo(held, tabs().indexOf(session))
-            }
           }
           const attention = () => session.store.permissions.length > 0 || session.store.questions.length > 0 || session.store.unseen === "attention"
           return (
@@ -105,18 +98,18 @@ export function TabBar() {
                 focusTab(held && dragged ? held : session)
               }}
             >
-              <text fg={theme.textMuted}>{index() <= 9 ? index() : "·"}</text>
+              <text selectable={false} fg={theme.textMuted}>{index() <= 9 ? index() : "·"}</text>
               <Show
                 when={running()}
                 fallback={
                   <Show when={attention() || session.store.unseen === "done"}>
-                    <text fg={attention() ? theme.warning : theme.success}>●</text>
+                    <text selectable={false} fg={attention() ? theme.warning : theme.success}>●</text>
                   </Show>
                 }
               >
                 <Spinner color={attention() ? theme.warning : theme.textMuted} />
               </Show>
-              <text fg={focused() ? theme.text : theme.textMuted} attributes={focused() ? TextAttributes.BOLD : undefined} wrapMode="none">
+              <text selectable={false} fg={focused() ? theme.text : theme.textMuted} attributes={focused() ? TextAttributes.BOLD : undefined} wrapMode="none">
                 {label(session)}
               </text>
               {/* The ✕ cell always exists, so moving onto it never collapses the tab under the pointer. */}
@@ -135,7 +128,7 @@ export function TabBar() {
         }}
       </For>
       <Show when={hidden() > 0}>
-        <text fg={theme.textMuted} onMouseUp={() => runCommand("session.list")}>
+        <text selectable={false} fg={theme.textMuted} onMouseUp={() => runCommand("session.list")}>
           {" "}+{hidden()} more
         </text>
       </Show>
@@ -147,11 +140,11 @@ export function TabBar() {
         onMouseOut={() => setHover(undefined)}
         onMouseUp={() => runCommand("tab.new")}
       >
-        <text fg={theme.textMuted}>+</text>
+        <text selectable={false} fg={theme.textMuted}>+</text>
       </box>
       <box flexGrow={1} />
       <Show when={dimensions().width >= 110}>
-        <text fg={theme.textMuted}>{shortcut("tab.next")} next  </text>
+        <text selectable={false} fg={theme.textMuted}>{shortcut("tab.next")} next  </text>
       </Show>
       <box
         paddingLeft={1}
@@ -161,7 +154,7 @@ export function TabBar() {
         onMouseOut={() => setHover(undefined)}
         onMouseUp={() => runCommand("session.list")}
       >
-        <text fg={theme.text}>
+        <text selectable={false} fg={theme.text}>
           ≡ sessions <span style={{ fg: theme.textMuted }}>{shortcut("session.list")}</span>
         </text>
       </box>
