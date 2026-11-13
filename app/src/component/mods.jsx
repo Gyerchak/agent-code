@@ -1,3 +1,4 @@
+import { dialog } from "../ui/dialog"
 import { RGBA, TextAttributes } from "@opentui/core"
 import { openCommand } from "../context/platform"
 import { useTerminalDimensions } from "@opentui/solid"
@@ -388,6 +389,8 @@ export function ModPanes(props                                                  
                   title: pane().title,
                   isFocused: focused(),
                   bodyColumns: Math.max(10, props.columns - 4),
+                  // Claude Code 2.1.323: tells a pane when a dialog or a prompt above the input covers the prompt.
+                  isPromptCovered: dialog.open || store.permissions.length > 0 || store.questions.length > 0 || store.elicitations.length > 0,
                   placement: props.placement,
                   scroll: scroll(bodyRows()),
                   view: {},

@@ -641,14 +641,14 @@ let lastWork = 0
 const working = () => Date.now() - lastWork < 45_000
 
 export async function pollPlanUsage(force = false) {
-  if (planInflight || (!force && Date.now() - planLast < (working() ? 18_000 : 30_000))) {
+  if (planInflight || (!force && Date.now() - planLast < (working() ? 55_000 : 30_000))) {
     checkAutoResume()
     return planExact
   }
   planInflight = true
   planLast = Date.now()
   try {
-    const usage = await fetchPlanUsage(force, working() ? 18_000 : 100_000)
+    const usage = await fetchPlanUsage(force, working() ? 55_000 : 100_000)
     planExact = !!usage
     // Claude Code rewrites the plan into its credentials when the login refreshes (e.g. after a plan change).
     void planDetails().then((plan) => {
@@ -945,7 +945,8 @@ function startPlanPoll() {
   void pollPlanUsage()
   // Not forced: forcing skips the shared cache, so every open window hit the endpoint itself and earned 429s.
   let ticks = 0
-  planPoll = setInterval(() => (working() || ++ticks % 6 === 0) && void pollPlanUsage(), 20_000)
+  // Every minute while work is running, every 2 minutes otherwise (shared by all windows: one asks, all read).
+  planPoll = setInterval(() => (working() || ++ticks % 2 === 0) && void pollPlanUsage(), 60_000)
   planPoll.unref?.()
 }
 
@@ -1034,6 +1035,7 @@ export function onModel(store, name) {
 /** A turn was refused by a limit: wait for the reset, then continue on our own. */
 function armAutoResume(session         , resetsAt         ) {
   if (config.autoResume !== true) return
+  log("auto-resume armed", session.store.sessionID, resetsAt ? new Date(resetsAt).toISOString() : "no reset time")
   if (resetsAt) refusedUntil.set(session, resetsAt)
   else refusedUntil.delete(session)
   session.setStore("resumeAt", 0)
@@ -1044,14 +1046,22 @@ function armAutoResume(session         , resetsAt         ) {
     .then(() => checkAutoResume())
 }
 
+/** "all" (default): every waiting tab goes on together; "one": one after another, each once the previous is done. */
+const resumeMode = () => (config.autoResumeMode === "one" ? "one" : "all")
+// Tabs continued by auto-resume whose turn is still going (for "one at a time").
+const resumingNow = new Set()
+
 /** Continue a tab whose wait is over, booting or reviving its process first (a bare send would be dropped). */
 async function fireAutoResume(session         ) {
+  log("auto-resume fires", session.store.sessionID, session.store.model)
+  resumingNow.add(session)
   try {
     if (session.store.fatal && session.store.sessionID) await session.start({ resume: session.store.sessionID })
     else await session.ensureStarted()
     session.send(RESUME_PROMPT)
   } catch (error) {
     log("auto-resume failed, trying again in 5 minutes", error)
+    resumingNow.delete(session)
     if (session.disposed) return
     setResumeAt(session, Date.now() + 5 * 60_000)
     waitingResume.add(session)
@@ -1077,10 +1087,22 @@ function checkAutoResume() {
       if (Date.now() < session.store.resumeAt) continue
       // A turn is going (e.g. a background task reported in) or the process is booting: continue once it is free.
       if (session.store.status === "running" || session.store.booting) continue
+      // One at a time: wait while another tab continued by auto-resume is still working.
+      for (const other of resumingNow) if (other.disposed || other.store.status !== "running") resumingNow.delete(other)
+      if (resumeMode() === "one" && resumingNow.size) continue
       waitingResume.delete(session)
       resumeTries.set(session, (resumeTries.get(session) ?? 0) + 1)
       setResumeAt(session, undefined)
       void fireAutoResume(session)
+      if (resumeMode() === "one") break
+      // All together: a limit that let this tab go lets the other Claude tabs on the plan go too, even those whose
+      // own time was a guess (a backoff, or a reading the usage endpoint refused to refresh).
+      if (!splitModel(session.store.model)) {
+        for (const other of waitingResume) {
+          if (other === session || other.disposed || splitModel(other.store.model) || !other.store.resumeAt) continue
+          if (other.store.resumeAt > Date.now()) setResumeAt(other, Date.now())
+        }
+      }
     } catch (error) {
       log("auto-resume check failed", error)
     }
@@ -1090,6 +1112,8 @@ function checkAutoResume() {
 /** A turn finished without a limit error: the next limit starts the backoff afresh. */
 export function resumeSucceeded(session         ) {
   resumeTries.delete(session)
+  // One at a time: this tab is done, the next one may go.
+  if (resumingNow.delete(session) && waitingResume.size) checkAutoResume()
 }
 
 /** Cancel a pending auto-resume (the user typed something or turned the setting off). */
@@ -1147,10 +1171,8 @@ export const ACODE_MCP = "acode"
 export const TODO_TOOL = "mcp__acode__todowrite"
 export const isTodoTool = (name        ) => name === "TodoWrite" || name === TODO_TOOL
 
-function planningServer() {
-  return createSdkMcpServer({
-    name: ACODE_MCP,
-    tools: [
+function planningTools() {
+  return [
       tool(
         "todowrite",
         "Create or replace the task checklist shown to the user. Send the full list every time.",
@@ -1170,8 +1192,30 @@ function planningServer() {
         // Keep it in the prompt instead of behind tool search, or the model rarely reaches for it.
         { alwaysLoad: true },
       ),
-    ],
-  })
+  ]
+}
+
+// Built-in plugins add tools to Agent Code's own MCP server ("acode"). A part is called once per Claude Code start with
+// that session and { tool, z }, and returns the tools to offer (or nothing); they are allowed without asking.
+const toolParts = new Map()
+export function registerToolPart(id, part) {
+  toolParts.set(id, part)
+  return () => void toolParts.delete(id)
+}
+
+/** Agent Code's own MCP server for one session: the checklist (when planning is on) and the plugins' tools. */
+function acodeServer(session) {
+  const own = []
+  for (const part of toolParts.values()) {
+    try {
+      own.push(...(part(session, { tool, z }) ?? []))
+    } catch (error) {
+      log("tool part failed", error)
+    }
+  }
+  if (!config.planning && !own.length) return undefined
+  const all = [...(config.planning ? planningTools() : []), ...own]
+  return { server: createSdkMcpServer({ name: ACODE_MCP, tools: all }), allowed: all.map((item) => `mcp__${ACODE_MCP}__${item.name}`) }
 }
 
 // Built-in plugins (acode-agents, acode-memory) add to Claude's system prompt and pre-approve their own tool calls.
@@ -1530,6 +1574,7 @@ export function createSession(seed             ) {
       ...(policy.enabled ? [] : ["Agent", "Task"]),
     ]
     ensureBoxTrusted(store.cwd)
+    const own = acodeServer(api)
     log("start", JSON.stringify({ model: store.model, resume: options.resume, resumeAt: options.resumeAt, sessionId: options.sessionId, fork: options.fork, continue: options.continue }))
     const q = query({
       prompt: input,
@@ -1551,9 +1596,9 @@ export function createSession(seed             ) {
         settings: extraSettings(store.model)       ,
         hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) : []), pauseHook()] },
         // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
-        mcpServers: { ...acodeMcpServers(), ...(config.planning ? { [ACODE_MCP]: planningServer() } : {}) },
+        mcpServers: { ...acodeMcpServers(), ...(own ? { [ACODE_MCP]: own.server } : {}) },
         plugins: modPlugins(),
-        allowedTools: config.planning ? [TODO_TOOL] : undefined,
+        allowedTools: own?.allowed.length ? own.allowed : undefined,
         resume: options.resume,
         resumeSessionAt: options.resumeAt,
         continue: options.continue,
@@ -1567,6 +1612,8 @@ export function createSession(seed             ) {
           // Agent Code passes CLAUDE_CODE_PLUGIN_DIRS mods itself (as `plugins`), so each can be switched off.
           ...withoutKey(process.env, "CLAUDE_CODE_PLUGIN_DIRS"),
           CLAUDE_AGENT_SDK_CLIENT_APP: "agent-code",
+          // Claude Code 2.1.323: its "resume this session" hints name Agent Code's own command.
+          CLAUDE_CODE_RESUME_HINT_COMMAND: "acode -r",
           ...providerVars,
           // Claude Code assumes 200K for models it doesn't know: give it the real window so it compacts in time.
           ...(external && !routed ? contextEnv(store.model, providerVars?.ANTHROPIC_MODEL) : {}),
@@ -3249,6 +3296,9 @@ export function createSession(seed             ) {
           if (message.fast_mode_state) setStore("fast", message.fast_mode_state === "on" || message.fast_mode_state === "enabled")
           setStore("skills", reconcile(message.skills ?? []))
           setStore("plugins", reconcile(message.plugins ?? []))
+          // Plugins that did not load (Claude Code 2.1.323 reports them to hosts): say so once per start.
+          if (message.plugin_errors?.length)
+            pushNotice(`Plugins that did not load: ${message.plugin_errors.map((item) => `${item.plugin} (${item.message || item.type})`).join("; ")}`, "warning")
           setStore(
             "mcp",
             reconcile(
@@ -3280,6 +3330,7 @@ export function createSession(seed             ) {
           "compaction",
         )
         setStore("compacting", false)
+        emit("compacted")
         return
       }
       case "local_command_output":

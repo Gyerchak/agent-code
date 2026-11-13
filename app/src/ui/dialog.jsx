@@ -195,7 +195,7 @@ export function DialogSelect   (props
     // With `search` the caller finds the options for the typed text itself (e.g. full-text search).
     if (!needle || props.search) return options
     return options
-      .map((option) => ({ option, score: fuzzy(needle, `${option.title} ${option.description ?? ""} ${option.category ?? ""}`) }))
+      .map((option) => ({ option, score: fuzzy(needle, `${option.title} ${option.description ?? ""} ${option.category ?? ""} ${option.keywords ?? ""}`) }))
       .filter((item) => item.score >= 0)
       .sort((a, b) => b.score - a.score)
       .map((item) => item.option)
@@ -228,7 +228,8 @@ export function DialogSelect   (props
     on(
       () => props.current,
       () => {
-        if (props.current === undefined) return
+        // `startAtTop`: the current row is marked, but the list opens at its first row (opencode 2.3's session list).
+        if (props.current === undefined || props.startAtTop) return
         const index = flat().findIndex((option) => option.value === props.current)
         if (index >= 0) setStore("selected", index)
       },
@@ -339,6 +340,7 @@ export function DialogSelect   (props
               onInput={(value        ) => {
                 setStore("filter", value)
                 props.search?.(value)
+                props.onFilter?.(value)
               }}
               focusedBackgroundColor={theme.backgroundPanel}
               cursorColor={theme.primary}

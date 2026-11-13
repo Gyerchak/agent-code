@@ -9,7 +9,8 @@ import os from "node:os"
 import path from "node:path"
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { config, saveConfig } from "../context/config"
-import { registerAutoAllow, registerPromptPart, registerSettingsPart } from "../context/session"
+import { onSessionEvent, registerAutoAllow, registerPromptPart, registerSettingsPart, registerToolPart } from "../context/session"
+import { listMemories, memoryPrompt, memoryTools, openMemories, openMemoriesChanged, reopenText, sessionStore } from "./memorytools"
 import { appendContext, store, tabs } from "../context/tabs"
 import { providerKind, splitModel } from "../context/providers"
 import { syntax, theme } from "../context/theme"
@@ -334,8 +335,21 @@ function MemoryPreview(props                                                    
 export function MemorySection() {
   // Claude writes memories during a turn: re-read when it finishes.
   createEffect(on(() => store.status, () => bump(), { defer: true }))
-  const list = createMemo(() => memories())
-  const shown = createMemo(() => list().slice(0, 4))
+  const own = createMemo(() => (version(), sessionStore(store)))
+  const open = createMemo(() => (openMemoriesChanged(), new Set(openMemories(store.sessionID).map((name) => name.toLowerCase()))))
+  const isOpen = (memory) => open().has(memory.name.toLowerCase()) || open().has(path.basename(memory.file, ".md").toLowerCase())
+  // Open ones first: they are what this session has in its context.
+  const list = createMemo(() => {
+    const all = (version(), listMemories(own()))
+    return [...all.filter(isOpen), ...all.filter((memory) => !isOpen(memory))]
+  })
+  const shown = createMemo(() => list().slice(0, 5))
+  // In context: the index (names and a line each), plus the text of the memories this session has open.
+  const tokens = createMemo(() => {
+    const index = own().box ? list().reduce((sum, memory) => sum + memory.name.length + memory.description.length + 12, 0) : memoryTokens(own().dir) * 3.5
+    const opened = list().filter(isOpen).reduce((sum, memory) => sum + memory.size, 0)
+    return { index: Math.ceil(index / 3.5), open: Math.ceil(opened / 3.5) }
+  })
   return (
     <box onMouseUp={() => openMemory()}>
       <box flexDirection="row" gap={1}>
@@ -347,16 +361,17 @@ export function MemorySection() {
         </text>
         <text fg={useOn() ? theme.textMuted : theme.warning}>{useOn() ? (list().length ? String(list().length) : "") : "off"}</text>
       </box>
-      <Show when={useOn() && memoryTokens() > 0}>
+      <Show when={useOn() && (tokens().index > 0 || tokens().open > 0)}>
         <text fg={theme.textMuted} wrapMode="none" truncate>
-          names only in context · ≈{memoryTokens().toLocaleString()} tok
+          index ≈{tokens().index.toLocaleString()} tok{tokens().open ? ` · open ≈${tokens().open.toLocaleString()} tok` : ""}
         </text>
       </Show>
       <Show when={list().length} fallback={<text fg={theme.textMuted}>{useOn() ? "nothing yet · click to add" : "memory is off"}</text>}>
         <For each={shown()}>
           {(memory) => (
-            <text fg={theme.text} wrapMode="none" truncate>
-              <span style={{ fg: typeColor(memory.type) }}>•</span> {memory.name}
+            <text fg={isOpen(memory) ? theme.text : theme.textMuted} wrapMode="none" truncate>
+              <span style={{ fg: isOpen(memory) ? theme.success : typeColor(memory.type) }}>{isOpen(memory) ? "●" : "•"}</span> {memory.name}
+              {isOpen(memory) ? <span style={{ fg: theme.textMuted }}> open</span> : ""}
             </text>
           )}
         </For>
@@ -402,6 +417,17 @@ export const memoryPlugin         = (api) => {
     }),
   )
   api.lifecycle.onDispose(registerPromptPart("acode-memory", () => (config.memoryUse !== false && config.memoryLearn !== false && !boxDir ? LEARN_PROMPT : undefined)))
+  // Memory as tools: the index in the prompt, a memory's text only when a session opens it.
+  api.lifecycle.onDispose(registerPromptPart("acode-memory-tools", () => memoryPrompt()))
+  api.lifecycle.onDispose(registerToolPart("acode-memory", (session, sdk) => memoryTools(session, sdk)))
+  // After a compaction the memories a session still has open come back (and only those).
+  api.lifecycle.onDispose(
+    onSessionEvent((event) => {
+      if (event.type !== "compacted") return
+      const again = reopenText(event.session)
+      if (again) event.session.appendContext(again)
+    }),
+  )
   // Claude may write its own memory folder without asking.
   api.lifecycle.onDispose(
     registerAutoAllow("acode-memory", (tool, input) => {

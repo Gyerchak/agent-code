@@ -26,8 +26,10 @@ import {
   actions,
   exit,
   focusPrompt,
+  cycleTranscriptDetail,
   promptMode,
   refs,
+  transcriptDetail,
   setPromptMode,
   route,
   setRoute,
@@ -1018,21 +1020,32 @@ function dayCategory(ms        ) {
   return date.toDateString()
 }
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function DialogSessions() {
   onMount(() => void refreshSessions())
-  const options = createMemo(() =>
-    app.sessions.map((session) => ({
+  const [typed, setTyped] = createSignal("")
+  const options = createMemo(() => {
+    const list = app.sessions.map((session) => ({
       title: (session.customTitle ?? session.summary ?? session.firstPrompt ?? session.sessionId).replace(/\s+/g, " "),
       value: session.sessionId,
       category: dayCategory(session.lastModified),
       footer: (findTab(session.sessionId) ? "open · " : "") + relativeTime(session.lastModified),
-    })),
-  )
+      // A session can be found by its id (or the start of it), as in opencode 2.3.
+      keywords: session.sessionId,
+    }))
+    // A full session id that isn't listed here (another folder, a child session): offer to open it anyway.
+    const id = typed().trim()
+    if (SESSION_ID.test(id) && !list.some((item) => item.value === id)) list.unshift({ title: `Open session ${id}`, value: id, category: "By id", footer: "open", keywords: id })
+    return list
+  })
   return (
     <DialogSelect
       title="Sessions"
       options={options()}
       current={store.sessionID}
+      startAtTop
+      onFilter={setTyped}
       emptyText="No sessions yet in this directory"
       onSelect={(option) => {
         dialog.clear()
@@ -1928,6 +1941,13 @@ function DialogSettings() {
     { key: "subagentPick", title: "  Claude picks", description: "Claude chooses each subagent's model + effort", get: flag("subagentPick", true), set: write("subagentPick"), restart: true },
     { key: "subagentSame", title: "  Same as session", description: "always this session's model + effort", get: flag("subagentSame", false), set: write("subagentSame"), restart: true },
     { key: "autoResume", title: "Auto resume", description: "continue after a 5-hour/weekly limit resets", get: flag("autoResume", false), set: write("autoResume") },
+    {
+      key: "autoResumeMode",
+      title: "  Resume",
+      description: "when several tabs wait for a limit: all at once, or one after another",
+      get: () => config.autoResume === true,
+      set: () => {},
+    },
     { key: "autoLimitReset", title: "  Use limit resets", description: "with auto resume: use a 5-hour reset Anthropic offers at the limit", get: flag("autoLimitReset", true), set: write("autoLimitReset") },
     { key: "autoModel", title: "Auto model", description: "Haiku picks model + effort for new sessions", get: flag("autoModel", false), set: write("autoModel") },
     {
@@ -1961,6 +1981,7 @@ function DialogSettings() {
     { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
     { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
+    { key: "transcriptDetail", title: "Transcript detail", description: "low: each run of steps is one row · medium: every step · high: thoughts open too", get: () => true, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
     { key: "mods.dialog", title: "Mods…", description: "Claude Code mods: which load, what Agent Code draws", get: () => modsEnabled(), set: () => {} },
@@ -1977,6 +1998,8 @@ function DialogSettings() {
       footer: (setting.get() ? "on" : "off") + (setting.tier && config.subagentPriority?.[setting.tier]?.length ? ` · ${config.subagentPriority[setting.tier] .length} first` : ""),
       gutter: <text fg={setting.get() ? theme.success : theme.textMuted}>{setting.get() ? "[x]" : "[ ]"}</text>,
       // Saving, restoring and resetting the settings are actions, not switches.
+      ...(setting.key === "transcriptDetail" ? { footer: transcriptDetail(), gutter: <text fg={theme.textMuted}>{" ≡ "}</text> } : {}),
+      ...(setting.key === "autoResumeMode" ? { footer: config.autoResumeMode === "one" ? "one at a time" : "all at once", gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> } : {}),
       ...(setting.key === "pauseAt" ? { footer: `${config.pauseAt ?? 95}%`, gutter: <text fg={theme.textMuted}>{" % "}</text> } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
@@ -1997,6 +2020,17 @@ function DialogSettings() {
         }
         if (option.value === "pauseAt") {
           dialog.replace(() => <DialogPauseAt back />)
+          return
+        }
+        if (option.value === "transcriptDetail") {
+          cycleTranscriptDetail()
+          setTick((n) => n + 1)
+          return
+        }
+        if (option.value === "autoResumeMode") {
+          config.autoResumeMode = config.autoResumeMode === "one" ? "all" : "one"
+          saveConfig()
+          setTick((n) => n + 1)
           return
         }
         if (option.value === "fable.fallback") return dialog.replace(() => <DialogFableFallback />)

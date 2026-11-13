@@ -300,10 +300,23 @@ function primitiveSummary(input                         ) {
     .join(" ")
 }
 
+// Agent Code's memory tools read as what they do: "Memory · open chart-colours".
+const MEMORY_VERBS = { memory_list: "list", memory_search: "search", memory_open: "open", memory_close: "close", memory_save: "save" }
+
 function toolName(name        ) {
   const mcp = name.match(/^mcp__(.+?)__(.+)$/)
+  if (mcp?.[1] === "acode" && MEMORY_VERBS[mcp[2]]) return `Memory · ${MEMORY_VERBS[mcp[2]]}`
   if (mcp) return `${mcp[1]}_${mcp[2]}`
   return name
+}
+
+/** A memory call's arguments in a few words: the names, the search, the memory saved. */
+function memorySummary(name, input) {
+  if (!/^mcp__acode__memory_/.test(name)) return undefined
+  if (Array.isArray(input.names)) return input.names.join(", ")
+  if (typeof input.query === "string") return `"${input.query}"`
+  if (typeof input.name === "string") return input.name
+  return ""
 }
 
 function GenericTool(props                    ) {
@@ -320,7 +333,7 @@ function GenericTool(props                    ) {
         part={props.part}
         onClick={entries().length || output() ? () => setExpanded((value) => !value) : undefined}
       >
-        {`${toolName(props.part.name)} ${primitiveSummary(props.part.input)}`.trim()}
+        {`${toolName(props.part.name)} ${memorySummary(props.part.name, props.part.input) ?? primitiveSummary(props.part.input)}`.trim()}
       </InlineTool>
       <Show when={expanded()}>
         <box paddingLeft={3 + INLINE_TOOL_ICON_WIDTH}>

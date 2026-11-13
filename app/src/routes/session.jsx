@@ -1,7 +1,7 @@
 import { RGBA, TextAttributes } from "@opentui/core"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, Match, on, Show, Switch } from "solid-js"
-import { actions, refs, SIDEBAR_DOCK_WIDTH, setSidebarOpen, showScrollbar, showThinking, sidebarShown } from "../context/app"
+import { actions, refs, SIDEBAR_DOCK_WIDTH, setSidebarOpen, showScrollbar, showThinking, sidebarShown, transcriptDetail } from "../context/app"
 import { shortcut } from "../context/keymap"
 import { dialog } from "../ui/dialog"
 import { active, store } from "../context/tabs"
@@ -612,6 +612,33 @@ function AssistantView(props                               ) {
   const [expanded, setExpanded] = createSignal(false)
   const hiddenParts = createMemo(() => (expanded() ? 0 : Math.max(0, allParts().length - PART_WINDOW)))
   const visibleParts = createMemo(() => (hiddenParts() ? allParts().slice(hiddenParts()) : allParts()))
+  // Low detail: each run of two or more steps (tool calls and thoughts) becomes one activity row. The parts keep
+  // their own components (so nothing is redrawn from scratch); a part inside a closed run just draws nothing.
+  const [openRuns, setOpenRuns] = createSignal(new Set())
+  const runs = createMemo(() => {
+    const info = new Map()
+    if (transcriptDetail() !== "low") return info
+    let run = []
+    const flush = () => {
+      if (run.length >= 2) run.forEach((part, index) => info.set(part, { first: run[0], index, parts: run }))
+      run = []
+    }
+    for (const part of visibleParts()) {
+      const step = (part.type === "tool" && !isSubagentTool(part.name)) || part.type === "reasoning"
+      if (step) run.push(part)
+      else flush()
+    }
+    flush()
+    return info
+  })
+  const runOpen = (first) => openRuns().has(first)
+  const toggleRun = (first) =>
+    setOpenRuns((set) => {
+      const next = new Set(set)
+      if (next.has(first)) next.delete(first)
+      else next.add(first)
+      return next
+    })
   return (
     <>
       <Show when={hiddenParts() > 0}>
@@ -622,11 +649,23 @@ function AssistantView(props                               ) {
         </box>
       </Show>
       <For each={visibleParts()}>
-        {(part) => (
-          <box marginTop={1} flexShrink={0}>
-            <PartView part={part} message={props.message} />
-          </box>
-        )}
+        {(part) => {
+          const run = () => runs().get(part)
+          return (
+            <>
+              <Show when={run()?.index === 0}>
+                <box marginTop={1} flexShrink={0}>
+                  <ActivityRow parts={run().parts} open={runOpen(part)} onToggle={() => toggleRun(part)} />
+                </box>
+              </Show>
+              <Show when={!run() || runOpen(run().first)}>
+                <box marginTop={1} flexShrink={0}>
+                  <PartView part={part} message={props.message} />
+                </box>
+              </Show>
+            </>
+          )
+        }}
       </For>
       <Show when={props.message.retry}>
         {(retry                                              ) => (
@@ -643,6 +682,47 @@ function AssistantView(props                               ) {
         </box>
       </Show>
     </>
+  )
+}
+
+const stepName = (part) => {
+  if (part.type === "reasoning") return "thought"
+  const mcp = part.name.match(/^mcp__(.+?)__(.+)$/)
+  if (mcp?.[1] === "acode" && mcp[2].startsWith("memory_")) return "Memory"
+  return mcp ? mcp[2] : part.name
+}
+
+/** A folded run of steps: how many, of which kinds, what is going on now, and what failed. */
+function ActivityRow(props) {
+  const summary = createMemo(() => {
+    const counts = new Map()
+    for (const part of props.parts) counts.set(stepName(part), (counts.get(stepName(part)) ?? 0) + 1)
+    return [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(" · ")
+  })
+  const running = createMemo(() => props.parts.findLast((part) => (part.type === "tool" ? part.status === "running" || part.status === "pending" : !part.end)))
+  const failed = createMemo(() => props.parts.filter((part) => part.type === "tool" && part.status === "error").length)
+  const now = () => {
+    const part = running()
+    if (!part) return ""
+    if (part.type === "reasoning") return "thinking"
+    const target = part.input?.file_path ?? part.input?.path ?? part.input?.pattern ?? part.input?.command ?? part.input?.description ?? part.input?.query
+    return `${stepName(part)}${target ? ` ${String(target).split("\n")[0].slice(0, 60)}` : ""}`
+  }
+  return (
+    <box paddingLeft={3} flexDirection="row" gap={1} onMouseUp={() => props.onToggle()}>
+      <Show when={running()} fallback={<text fg={theme.textMuted}>{props.open ? "▾" : "▸"}</text>}>
+        <Spinner color={theme.textMuted} />
+      </Show>
+      <text fg={theme.textMuted} wrapMode="none" truncate>
+        {props.parts.length} steps · {summary()}
+        <Show when={failed()}>
+          <span style={{ fg: theme.error }}> · {failed()} failed</span>
+        </Show>
+        <Show when={now()}>
+          <span style={{ fg: theme.text }}> · {now()}</span>
+        </Show>
+      </text>
+    </box>
   )
 }
 
@@ -730,7 +810,7 @@ function reasoningTitle(text        ) {
 }
 
 function ReasoningView(props                         ) {
-  const [expanded, setExpanded] = createSignal(false)
+  const [expanded, setExpanded] = createSignal(transcriptDetail() === "high")
   const done = () => props.part.end !== undefined
   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
   const fg = () => (expanded() ? alpha(theme.warning, 0.6) : theme.warning)

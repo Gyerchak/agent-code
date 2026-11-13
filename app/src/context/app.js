@@ -35,6 +35,20 @@ export function toggleThinking() {
   saveConfig()
 }
 
+/**
+ * How much of a reply's work the chat shows (opencode 2.3's session verbosity): "low" folds each run of tool calls
+ * and thoughts into one activity row (click to open it), "medium" shows every step on its own line, "high" also opens
+ * every thought.
+ */
+export const [transcriptDetail, setTranscriptDetail] = createSignal(["low", "medium", "high"].includes(config.transcriptDetail) ? config.transcriptDetail : "low")
+export function cycleTranscriptDetail() {
+  const next = { low: "medium", medium: "high", high: "low" }[transcriptDetail()]
+  setTranscriptDetail(next)
+  config.transcriptDetail = next
+  saveConfig()
+  return next
+}
+
 export function toggleDetails() {
   const next = !showDetails()
   setShowDetails(next)
