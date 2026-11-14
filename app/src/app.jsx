@@ -41,7 +41,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -2002,6 +2002,18 @@ function DialogSettings() {
     { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
     {
+      key: "orchestrator",
+      title: "Orchestrator mode",
+      get: () => orchestrator().enabled,
+      set: (value) => {
+        config.orchestrator = { ...(config.orchestrator ?? {}), enabled: value }
+        // Orchestrating needs subagents at all.
+        if (value && config.subagents === false) config.subagents = true
+        saveConfig()
+      },
+      restart: true,
+    },
+    {
       key: "subagent.routing",
       title: "Subagent routing",
       get: () => subagentRouting().enabled,
@@ -2027,6 +2039,7 @@ function DialogSettings() {
     const back = () => setTick((value) => value + 1)
     if (setting?.tier) return dialog.push(() => <DialogPriority tier={setting.tier} onClose={back} />)
     if (key === "subagent.routing") return openRouting(back)
+    if (key === "orchestrator") return openOrchestrator(back)
     if (key === "fable.fallback") return dialog.push(() => <DialogFableFallback />)
     if (key === "fable.upgrade") return dialog.push(() => <DialogFableUpgrade />)
     if (key === "pauseAt") return dialog.push(() => <DialogPauseAt stacked />)
@@ -2136,6 +2149,12 @@ function DialogSettings() {
         if (!setting) return
         setting.set(!setting.get())
         setTick((value) => value + 1)
+        // Orchestrator mode turned on for the first time: open its setup right away.
+        if (setting.key === "orchestrator" && setting.get() && !config.orchestrator?.configured) {
+          config.orchestrator = { ...config.orchestrator, configured: true }
+          saveConfig()
+          openOrchestrator()
+        }
         // Subagent routing turned on for the first time: open its setup right away.
         if (setting.key === "subagent.routing" && setting.get() && !config.subagentRouting?.configured) {
           config.subagentRouting = { ...config.subagentRouting, configured: true }
@@ -2159,6 +2178,180 @@ function DialogSettings() {
       footer={
         <text fg={theme.text}>
           enter <span style={{ fg: theme.textMuted }}>toggle</span>
+        </text>
+      }
+    />
+  )
+}
+
+let orchestratorChanged = false
+
+/** Open the orchestrator setup on top of the current dialog; idle tabs restart once it closes, if anything changed. */
+function openOrchestrator(back) {
+  dialog.push(
+    () => <DialogOrchestrator />,
+    () => {
+      back?.()
+      if (!orchestratorChanged) return
+      orchestratorChanged = false
+      for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+    },
+  )
+}
+
+function saveOrchestrator(change) {
+  config.orchestrator = { ...(config.orchestrator ?? {}), configured: true, ...change }
+  if (change.enabled && config.subagents === false) config.subagents = true
+  saveConfig()
+  orchestratorChanged = true
+}
+
+/**
+ * Orchestrator mode (right-click on its Settings row): the main chat plans and delegates. Sections: what the
+ * subagents may differ in (reasoning, model or both), the reasoning section, the models section, the way of working.
+ * Sections that the chosen way doesn't use are hidden.
+ */
+function DialogOrchestrator() {
+  const [tick, setTick] = createSignal(0)
+  const bump = (change) => {
+    saveOrchestrator(change)
+    setTick((value) => value + 1)
+  }
+  const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
+  const dot = (on) => <text fg={on ? theme.primary : theme.textMuted}>{on ? "(•)" : "( )"}</text>
+  const options = createMemo(() => {
+    tick()
+    const rule = orchestrator()
+    const own = store.effort ? `yours: ${store.effort}` : "yours: default"
+    const usesLevels = rule.strategy !== "model"
+    const usesModels = rule.strategy !== "effort"
+    const counts = `${rule.selected.length} selected · ${rule.excluded.length} excluded`
+    return [
+      { title: "Orchestrator mode", value: "enabled", description: "the main chat plans and delegates to subagents", footer: rule.enabled ? "on" : "off", gutter: box(rule.enabled) },
+      ...ORCH_STRATEGIES.map((item) => ({ title: item.title, value: `strategy:${item.key}`, category: "Subagents use", gutter: dot(rule.strategy === item.key) })),
+      ...(usesLevels
+        ? [{ title: "Higher reasoning than the orchestrator", value: "higherEffort", description: own, category: "Reasoning", footer: rule.higherEffort ? "allowed" : "off", gutter: box(rule.higherEffort) }]
+        : []),
+      ...(usesModels
+        ? [
+            { title: "Stronger models than the orchestrator", value: "strongerModels", category: "Models", footer: rule.strongerModels ? "allowed" : "off", gutter: box(rule.strongerModels) },
+            { title: "Models from", value: "pool", category: "Models", description: "enter: next", footer: ORCH_POOLS.find((item) => item.key === rule.pool).title, gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> },
+            { title: "Choose models…", value: "models", category: "Models", description: "select, exclude, whole providers at once", footer: counts, gutter: <text fg={theme.textMuted}>{" › "}</text> },
+          ]
+        : []),
+      { title: "Delegation", value: "delegation", category: "Way of working", description: "enter: next", footer: ORCH_DELEGATION.find((item) => item.key === rule.delegation).title, gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> },
+      { title: "Parallel subagents", value: "parallel", category: "Way of working", description: "independent subtasks run at once", footer: rule.parallel ? "on" : "off", gutter: box(rule.parallel) },
+      { title: "Check results", value: "review", category: "Way of working", description: "the orchestrator verifies each result", footer: rule.review ? "on" : "off", gutter: box(rule.review) },
+    ]
+  })
+  const next = (list, key) => list[(list.findIndex((item) => item.key === key) + 1) % list.length].key
+  return (
+    <DialogSelect
+      title="Orchestrator mode"
+      options={options()}
+      onSelect={(option) => {
+        const rule = orchestrator()
+        const [kind, value] = option.value.split(":")
+        if (kind === "enabled") return bump({ enabled: !rule.enabled })
+        if (kind === "strategy") return bump({ strategy: value })
+        if (kind === "higherEffort") return bump({ higherEffort: !rule.higherEffort })
+        if (kind === "strongerModels") return bump({ strongerModels: !rule.strongerModels })
+        if (kind === "pool") return bump({ pool: next(ORCH_POOLS, rule.pool) })
+        if (kind === "delegation") return bump({ delegation: next(ORCH_DELEGATION, rule.delegation) })
+        if (kind === "parallel") return bump({ parallel: !rule.parallel })
+        if (kind === "review") return bump({ review: !rule.review })
+        if (kind === "models") dialog.push(() => <DialogOrchestratorModels onDone={() => setTick((n) => n + 1)} />)
+      }}
+    />
+  )
+}
+
+/**
+ * The models orchestrator mode may consider: Enter selects (for "Only selected"), right-click or ctrl+x excludes a
+ * model from consideration altogether; whole providers, or everything, at once.
+ */
+function DialogOrchestratorModels(props) {
+  const [tick, setTick] = createSignal(0)
+  onMount(() => void refreshProviders().then(() => setTick((value) => value + 1)))
+  const groups = createMemo(() => {
+    tick()
+    const out = [{ id: "anthropic", name: "Anthropic", models: claudeModels().map((model) => ({ value: model.value, title: model.displayName })) }]
+    for (const provider of providers.list) {
+      const models = provider.models
+        .filter((model) => !model.appOnly)
+        .map((model) => ({ value: `${provider.id}/${model.id}`, title: model.label ?? model.id }))
+        .filter((item) => providerKind(item.value) !== "harness")
+      if (models.length) out.push({ id: provider.id, name: provider.name, models })
+    }
+    return out
+  })
+  const save = (change) => {
+    saveOrchestrator(change)
+    props.onDone?.()
+    setTick((value) => value + 1)
+  }
+  const options = createMemo(() => {
+    tick()
+    const rule = orchestrator()
+    const selected = new Set(rule.selected)
+    const excluded = new Set(rule.excluded)
+    const mark = (value) =>
+      excluded.has(value) ? <text fg={theme.error}>[-]</text> : <text fg={selected.has(value) ? theme.success : theme.textMuted}>{selected.has(value) ? "[x]" : "[ ]"}</text>
+    const rows = [
+      { title: "Select all models (any provider)", value: "all", category: "All", gutter: <text fg={theme.textMuted}>{" + "}</text> },
+      { title: "Unselect all", value: "none", category: "All", footer: `${selected.size} selected`, gutter: <text fg={theme.textMuted}>{" − "}</text> },
+      { title: "Clear exclusions", value: "clear", category: "All", footer: `${excluded.size} excluded`, gutter: <text fg={theme.textMuted}>{" ↺ "}</text> },
+    ]
+    for (const group of groups()) {
+      const all = group.models.every((model) => selected.has(model.value))
+      rows.push({ title: `All ${group.name}`, value: `group:${group.id}`, category: group.name, footer: all ? "unselect group" : "select group", gutter: <text fg={theme.textMuted}>{all ? " − " : " + "}</text> })
+      for (const model of group.models) {
+        const stronger = !rule.strongerModels && strongerModel(model.value, store.model)
+        rows.push({
+          title: model.title,
+          value: `model:${model.value}`,
+          category: group.name,
+          description: model.value === store.model ? "this tab's model" : stronger ? "stronger than this tab's model: not used" : undefined,
+          gutter: mark(model.value),
+        })
+      }
+    }
+    return rows
+  })
+  const toggleExcluded = (value) => {
+    if (!value.startsWith("model:")) return
+    const id = value.slice(6)
+    const rule = orchestrator()
+    const excluded = rule.excluded.includes(id) ? rule.excluded.filter((item) => item !== id) : [...rule.excluded, id]
+    save({ excluded, selected: rule.selected.filter((item) => item !== id) })
+  }
+  return (
+    <DialogSelect
+      title="Orchestrator: models"
+      options={options()}
+      onSelect={(option) => {
+        const rule = orchestrator()
+        const [kind, ...rest] = option.value.split(":")
+        const id = rest.join(":")
+        if (kind === "all") return save({ selected: groups().flatMap((group) => group.models.map((model) => model.value)).filter((value) => !rule.excluded.includes(value)) })
+        if (kind === "none") return save({ selected: [] })
+        if (kind === "clear") return save({ excluded: [] })
+        if (kind === "group") {
+          const group = groups().find((item) => item.id === id)
+          const values = group.models.map((model) => model.value)
+          const all = values.every((value) => rule.selected.includes(value))
+          return save({ selected: all ? rule.selected.filter((value) => !values.includes(value)) : [...new Set([...rule.selected, ...values.filter((value) => !rule.excluded.includes(value))])] })
+        }
+        if (kind === "model") {
+          const selected = rule.selected.includes(id) ? rule.selected.filter((item) => item !== id) : [...rule.selected, id]
+          save({ selected, excluded: rule.excluded.filter((item) => item !== id) })
+        }
+      }}
+      onRightClick={(option) => toggleExcluded(option.value)}
+      actions={[{ keybind: "ctrl+x", label: "exclude", run: (option) => toggleExcluded(option.value) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>select</span> · right-click <span style={{ fg: theme.textMuted }}>exclude from consideration</span>
         </text>
       }
     />

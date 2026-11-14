@@ -26,6 +26,7 @@ import { ensureBoxTrusted } from "./box"
 import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
+import { modelVariants } from "./variants"
 import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
@@ -791,7 +792,7 @@ function applyUsage(usage) {
 //    level lowered (Opus 1, Sonnet 2, Haiku 3 levels by default; each model can be left out). On by default.
 // ---------------------------------------------------------------------------
 
-const LEVELS = ["low", "medium", "high", "xhigh", "max"]
+export const LEVELS = ["low", "medium", "high", "xhigh", "max"]
 const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved to another model. Continue the work from where it stopped."
 const allSessions = new Set()
 
@@ -1378,6 +1379,13 @@ function routingNeedsRouter(main) {
   return routeSlots(rule).some((slot) => (slot.model === "same" ? false : splitModel(slot.model) ? true : !!splitModel(main)))
 }
 
+/** Whether orchestrator mode's pool reaches beyond what the session's own connection can call. */
+function orchestratorNeedsRouter(main) {
+  const rule = orchestrator()
+  if (rule.strategy === "effort") return false
+  return orchestratorCandidates(main, rule).some((value) => (splitModel(value) ? value !== main : !!splitModel(main)))
+}
+
 /** The routed subagent types for one Claude Code start, and the lines telling Claude when to use which. */
 function routingAgents(main, mainEffort) {
   const rule = subagentRouting()
@@ -1407,12 +1415,225 @@ Every task you delegate with the Agent tool goes to a subagent whose model and r
 ${kinds.length ? "Anything else, by complexity" : "By complexity"}:
 ${levels.join("\n")}`
 
+// ---------------------------------------------------------------------------
+// Orchestrator mode (Settings, under Back to Fable; off by default; right-click to set up): the main chat, on its
+// own model and variant, plans and delegates the work to subagents and checks what comes back. Which subagents it
+// may use: its own model at other reasoning levels, other models at its own level, or both; a pool of models (same
+// provider, any provider, or only selected ones, minus exclusions); nothing stronger than itself unless allowed.
+// Off, it adds nothing to the context.
+// ---------------------------------------------------------------------------
+
+export const ORCH_STRATEGIES = [
+  { key: "effort", title: "Same model, other reasoning levels" },
+  { key: "model", title: "Same reasoning, other models" },
+  { key: "both", title: "Other models and reasoning levels" },
+]
+export const ORCH_POOLS = [
+  { key: "same", title: "Same provider" },
+  { key: "any", title: "Any provider" },
+  { key: "selected", title: "Only selected" },
+]
+export const ORCH_DELEGATION = [
+  { key: "mostly", title: "Mostly delegate", text: "Do small, quick things yourself; delegate the rest." },
+  { key: "all", title: "Delegate everything", text: "Do not do the work yourself, not even small edits: you plan, delegate, check and integrate." },
+  { key: "helps", title: "When it helps", text: "Delegate when a subtask is large, can run in parallel, or would fill your context; otherwise do it yourself." },
+]
+const MAX_POOL = 10
+
+export function orchestrator() {
+  const own = config.orchestrator ?? {}
+  return {
+    enabled: own.enabled === true,
+    strategy: ORCH_STRATEGIES.some((item) => item.key === own.strategy) ? own.strategy : "effort",
+    higherEffort: own.higherEffort === true,
+    strongerModels: own.strongerModels === true,
+    pool: ORCH_POOLS.some((item) => item.key === own.pool) ? own.pool : "same",
+    selected: own.selected ?? [],
+    excluded: own.excluded ?? [],
+    delegation: ORCH_DELEGATION.some((item) => item.key === own.delegation) ? own.delegation : "mostly",
+    parallel: own.parallel !== false,
+    review: own.review !== false,
+  }
+}
+
+const FAMILY_RANK = { haiku: 1, sonnet: 2, opus: 3, fable: 4 }
+const familyName = (value) => Object.keys(FAMILY_RANK).find((family) => String(value).toLowerCase().includes(family))
+
+/** Whether `value` is a stronger model than `main`: Claude by family, otherwise by output price. */
+export function strongerModel(value, main) {
+  if (value === main) return false
+  const a = familyName(value)
+  const b = familyName(main)
+  if (!splitModel(value) && !splitModel(main) && a && b) return FAMILY_RANK[a] > FAMILY_RANK[b]
+  const pa = modelMeta(value).price?.output
+  const pb = modelMeta(main).price?.output
+  return pa !== undefined && pb !== undefined && pa > pb
+}
+
+/** The reasoning levels a model offers (Claude: Claude Code's list; providers: their variants). */
+function modelLevels(value) {
+  if (splitModel(value)) return (modelVariants(value) ?? []).filter((level) => LEVELS.includes(level))
+  const listed = claudeModels.find((model) => model.value === value)?.supportedEffortLevels
+  return (listed?.length ? listed : LEVELS).filter((level) => LEVELS.includes(level))
+}
+
+const poolLabel = (value) => (splitModel(value) ? `${splitModel(value).model} (${providerName(value)})` : (claudeModels.find((model) => model.value === value)?.displayName?.replace(/\s*\(.*\)$/, "") ?? value))
+
+/** Every model the pool may draw from: Claude aliases (and any Claude version the user selected), provider models. */
+export function orchestratorCandidates(main, rule = orchestrator()) {
+  const claude = claudeModels
+    .filter((model) => model.value !== "default" && (CLAUDE_ALIASES.includes(model.value) || rule.selected.includes(model.value)))
+    .map((model) => ({ value: model.value, provider: "anthropic" }))
+  const external = providers.list.flatMap((provider) =>
+    provider.models
+      .filter((model) => !model.appOnly)
+      .map((model) => ({ value: `${provider.id}/${model.id}`, provider: provider.id }))
+      .filter((item) => providerKind(item.value) !== "harness"),
+  )
+  const home = splitModel(main)?.provider.id ?? "anthropic"
+  let list = [...claude, ...external]
+  if (rule.pool === "same") list = list.filter((item) => item.provider === home)
+  if (rule.pool === "selected") list = list.filter((item) => rule.selected.includes(item.value))
+  list = list.filter((item) => !rule.excluded.includes(item.value))
+  if (!rule.strongerModels) list = list.filter((item) => !strongerModel(item.value, main))
+  return list.map((item) => item.value)
+}
+
+/** The subagent types orchestrator mode offers for one Claude Code start (empty while routing decides the models). */
+function orchestratorAgents(main, mainEffort, routingOn) {
+  const rule = orchestrator()
+  if (routingOn) return { rule, types: new Map(), agents: {}, self: undefined }
+  const level = mainEffort && LEVELS.includes(mainEffort) ? mainEffort : undefined
+  let pool = rule.strategy === "effort" ? [main] : orchestratorCandidates(main, rule)
+  // The orchestrator's own model first, then what the user chose, their favourites and recent ones; a short list.
+  const rank = (value) =>
+    value === main ? 0 : rule.selected.includes(value) ? 1 : (config.favoriteModels ?? []).includes(value) ? 2 : (config.recentModels ?? []).includes(value) ? 3 : 4
+  if (!rule.excluded.includes(main) && !pool.includes(main)) pool.unshift(main)
+  pool = [...new Set(pool)].sort((a, b) => rank(a) - rank(b)).slice(0, MAX_POOL)
+  const types = new Map()
+  const agents = {}
+  for (const value of pool) {
+    const name = value === main ? "orchestrated" : `on-${(splitModel(value)?.model ?? value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+    const external = !!splitModel(value)
+    // A provider model runs at the orchestrator's level when it has one of that name ("<provider>/<model>#<level>").
+    const variant = external && level && modelLevels(value).includes(level) && rule.strategy !== "effort" ? level : undefined
+    const meta = modelMeta(value)
+    types.set(name, { value, external, levels: modelLevels(value), price: meta.price })
+    agents[name] = {
+      description: `Subagent on ${poolLabel(value)}${value === main ? " (your own model)" : ""}.`,
+      prompt: "You are a capable software engineering agent working for an orchestrator. Complete the subtask you are given using the available tools, then report the result concisely: what you did, what you found, anything left open.",
+      model: value === main && !external ? "inherit" : variant ? `${value}#${variant}` : value,
+    }
+  }
+  // Searches and other quick looks go to the cheapest model in the pool.
+  const cheapest = [...types].sort((a, b) => (a[1].price?.output ?? 0) - (b[1].price?.output ?? 0))[0]?.[0]
+  return { rule, types, agents, self: types.has("orchestrated") ? "orchestrated" : [...types.keys()][0], cheapest, level, main }
+}
+
+function orchestratorPrompt(orch, routingOn) {
+  const { rule } = orch
+  const lines = [
+    "# Orchestrator mode",
+    `You are the orchestrator of this session: understand the goal, plan, split the work into clear self-contained subtasks, delegate them with the Agent tool, check what comes back and integrate it. ${ORCH_DELEGATION.find((item) => item.key === rule.delegation).text}${rule.parallel ? " Run independent subtasks in parallel (several Agent calls in one message)." : ""}${rule.review ? " Check each result before relying on it, and send the subtask back or redo it when it falls short." : ""} Give every subagent all it needs in its prompt: the goal, the files, the constraints and what to report.`,
+  ]
+  if (routingOn) {
+    lines.push("Which model runs each subtask is fixed by the routed subagent types below.")
+    return lines.join("\n")
+  }
+  const mine = orch.level ?? "default"
+  const allowed = (orch.types.get(orch.self)?.levels ?? LEVELS).filter((level) => rule.higherEffort || !orch.level || LEVELS.indexOf(level) <= LEVELS.indexOf(orch.level))
+  if (rule.strategy === "effort") {
+    lines.push(
+      `Every subagent runs on your own model: use subagent_type ${orch.self}. Choose its reasoning with the Agent tool's effort parameter by how hard the subtask is (the lowest that will do it well): ${allowed.join(", ")}${rule.higherEffort ? "" : ` (not above your own, ${mine})`}.`,
+    )
+    return lines.join("\n")
+  }
+  const entries = [...orch.types].map(([name, info]) => {
+    const price = info.price ? ` · $${info.price.input}/$${info.price.output} per M` : ""
+    return `- ${name}: ${poolLabel(info.value)}${info.value === orch.main ? " (your own model)" : ""}${price}`
+  })
+  lines.push(`Choose the model for each subtask with subagent_type, the cheapest that will do it well:\n${entries.join("\n")}`)
+  if (rule.strategy === "model") lines.push(`Subagents run at your reasoning level (${mine}); do not set effort.`)
+  else lines.push(`Choose the reasoning of Claude subagents with the effort parameter: ${allowed.join(", ")}${rule.higherEffort ? "" : ` (not above your own, ${mine})`}.`)
+  return lines.join("\n")
+}
+
+/** The Agent call rewritten for orchestrator mode: one of its types, with an allowed reasoning level. */
+function orchestrateCall(orch, next) {
+  const type = next.subagent_type || "general-purpose"
+  let target = orch.types.has(type) ? type : undefined
+  if (!target && (type in BUILTIN_ROUTES || type === "general-purpose")) target = type === "Explore" || type === "claude-code-guide" ? (orch.cheapest ?? orch.self) : orch.self
+  if (!target) return next
+  next.subagent_type = target
+  delete next.model
+  const info = orch.types.get(target)
+  if (info.external) {
+    delete next.effort
+    return next
+  }
+  const { rule, level } = orch
+  if (rule.strategy === "model") {
+    if (level && info.levels.includes(level)) next.effort = level
+    else delete next.effort
+    return next
+  }
+  let wanted = LEVELS.includes(next.effort) ? next.effort : level
+  if (!wanted) {
+    delete next.effort
+    return next
+  }
+  if (!rule.higherEffort && level && LEVELS.indexOf(wanted) > LEVELS.indexOf(level)) wanted = level
+  // The model's own nearest level at or below the wanted one.
+  const own = info.levels.filter((item) => LEVELS.indexOf(item) <= LEVELS.indexOf(wanted))
+  if (own.length) next.effort = own.at(-1)
+  else delete next.effort
+  return next
+}
+
+// What each session started with, so switching something off can tell the conversation once that it's gone.
+const FEATURE_GONE = {
+  orchestrator: "orchestrator mode is off: work normally instead of planning and delegating everything, and its subagent types are gone",
+  routing: "subagent routing is off: the routed subagent types are gone",
+  planning: "the planning checklist is off",
+  noTests: "running tests is allowed again",
+  noQuestions: "asking clarifying questions is allowed again",
+  installTools: "installing new tools is no longer allowed",
+}
+function activeFeatures(routes, orch) {
+  return [
+    orch && "orchestrator",
+    routes && "routing",
+    config.planning && "planning",
+    config.runTests === false && "noTests",
+    config.askQuestions === false && "noQuestions",
+    config.installTools === true && "installTools",
+  ].filter(Boolean)
+}
+
+/** The note for features this session had and has no longer (once); remembers what it has now. */
+function featureChange(sessionId, now) {
+  if (!sessionId) return undefined
+  const all = { ...(config.sessionFeatures ?? {}) }
+  const before = all[sessionId] ?? []
+  const gone = before.filter((id) => !now.includes(id))
+  if (now.length) all[sessionId] = now
+  else delete all[sessionId]
+  if (JSON.stringify(all) !== JSON.stringify(config.sessionFeatures ?? {})) {
+    const keys = Object.keys(all)
+    for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
+    config.sessionFeatures = all
+    saveConfig()
+  }
+  if (!gone.length) return undefined
+  return `[Agent Code] The user changed settings since earlier in this conversation: ${gone.map((id) => FEATURE_GONE[id]).join("; ")}. Earlier instructions about ${gone.length === 1 ? "this" : "these"} no longer apply.`
+}
+
 const PICK_PROMPT =
   "When delegating to subagents (the Agent tool), choose each subagent's model and effort to fit the task: haiku with low effort for searches, file reading and mechanical edits; sonnet for ordinary implementation; opus with higher effort only for hard reasoning. You may set the Agent tool's model and effort parameters for this without being asked."
 const providerPrompt = (lines          ) =>
   `Subagents on other models are available as subagent_type values, by kind:\n${lines.join("\n")}\nUse them for routine delegated work (searches, reading, summaries, mechanical edits), the ones marked preferred first; keep Claude models for anything that needs careful judgment. They don't count against the user's Claude limits.`
 
-function subagentHooks(main              , effort                               , routes)                        {
+function subagentHooks(main              , effort                               , routes, orch)                        {
   return [
     {
       matcher: "Agent|Task",
@@ -1429,6 +1650,12 @@ function subagentHooks(main              , effort                               
               delete next.model
               delete next.effort
             }
+            if (JSON.stringify(next) === JSON.stringify(input.tool_input ?? {})) return {}
+            return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: next } }
+          }
+          // Orchestrator mode: its own subagent types, reasoning kept within what the user allows.
+          if (orch?.types.size) {
+            orchestrateCall(orch, next)
             if (JSON.stringify(next) === JSON.stringify(input.tool_input ?? {})) return {}
             return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: next } }
           }
@@ -1688,17 +1915,32 @@ export function createSession(seed             ) {
     const sessionKey = options.sessionId ?? options.resume ?? store.sessionID
     // Mixing providers: Claude Code keeps its Claude login and every request goes through Agent Code's router.
     const routing = policy.enabled && subagentRouting().enabled
-    const routed = routing ? routingNeedsRouter(store.model) || policy.providers : policy.providers
+    const orchOn = policy.enabled && orchestrator().enabled && !routing
+    const routed = routing
+      ? routingNeedsRouter(store.model) || policy.providers
+      : orchOn
+        ? orchestratorNeedsRouter(store.model) || policy.providers
+        : policy.providers
     const providerVars = routed ? await routerEnv(sessionKey, store.model) : external ? await providerEnv(store.model, sessionKey) : undefined
     if (gen !== generation) return
     if (routed && !providers.list.length) await refreshProviders()
     if (gen !== generation) return
     // Routing replaces Claude's own pick and the provider tiers: the user's slots decide every subagent's model.
     const routes = routing ? routingAgents(store.model, splitModel(store.model) ? undefined : store.effort) : undefined
-    const { agents, lines } = routes ? { agents: routes.agents, lines: [] } : routed && policy.pick ? providerAgents(store.model) : { agents: {}, lines: []             }
+    const orch = policy.enabled && orchestrator().enabled ? orchestratorAgents(store.model, splitModel(store.model) ? undefined : store.effort, !!routes) : undefined
+    const { agents, lines } = routes
+      ? { agents: routes.agents, lines: [] }
+      : orch
+        ? { agents: orch.agents, lines: [] }
+        : routed && policy.pick
+          ? providerAgents(store.model)
+          : { agents: {}, lines: []             }
     const extra           = []
+    if (orch) extra.push(orchestratorPrompt(orch, !!routes))
     if (routes) extra.push(routingPrompt(routes))
-    else if (policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
+    else if (!orch && policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
+    // Once, in the conversation: what was switched off since this session last ran (its instructions are gone).
+    const goneNote = featureChange(sessionKey, activeFeatures(routes, orch))
     if (lines.length) extra.push(providerPrompt(lines))
     const append = behaviourPrompt(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
     const disallowed = [
@@ -1726,7 +1968,7 @@ export function createSession(seed             ) {
         disallowedTools: disallowed.length ? disallowed : undefined,
         agents: Object.keys(agents).length ? agents : undefined,
         settings: extraSettings(store.model)       ,
-        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort), routes?.names) : []), pauseHook()] },
+        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort), routes?.names, orch) : []), pauseHook()] },
         // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
         mcpServers: { ...acodeMcpServers(), ...(own ? { [ACODE_MCP]: own.server } : {}) },
         plugins: modPlugins(),
@@ -1754,6 +1996,7 @@ export function createSession(seed             ) {
     })
     current = { q, input, generation: gen }
     if (options.sessionId && !store.sessionID) setStore("sessionID", options.sessionId)
+    if (goneNote && store.messages.length) appendContext(goneNote)
     void pump(q, gen)
     try {
       const init = await q.initializationResult()
