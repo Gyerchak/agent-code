@@ -273,11 +273,32 @@ function writeRate(rate) {
 export function notePlanSpend(dollars) {
   if (!(dollars > 0)) return
   const rate = readRate()
-  writeRate({ ...rate, spent: (rate.spent ?? 0) + dollars })
+  writeRate({ ...rate, spent: (rate.spent ?? 0) + dollars, spent5: (rate.spent5 ?? 0) + dollars })
+  rateCache = undefined
+}
+
+let rateCache
+/** The measured API dollars per 1 % of the weekly and of the 5-hour window (read at most every 10 s). */
+export function planPerPercent() {
+  if (!rateCache || Date.now() - rateCache.time > 10_000) {
+    const rate = readRate()
+    rateCache = { time: Date.now(), week: rate.perPercent, five: rate.perPercent5 }
+  }
+  return rateCache
 }
 
 /** A fresh weekly reading (percent): once it moved 2 points, fold the dollars spent meanwhile into the estimate. */
-export function samplePlanRate(week, plan) {
+export function samplePlanRate(week, plan, five) {
+  rateCache = undefined
+  // The 5-hour window the same way: a reset (or first reading) starts over, 2 points of growth make a sample.
+  if (typeof five === "number") {
+    const now = readRate()
+    if (now.base5 === undefined || five < now.base5 || now.plan !== plan) writeRate({ ...now, base5: five, spent5: 0, ...(now.plan !== plan ? { perPercent5: undefined } : {}) })
+    else if (five - now.base5 >= 2) {
+      const sample = now.spent5 > 0 ? now.spent5 / (five - now.base5) : undefined
+      writeRate({ ...now, base5: five, spent5: 0, ...(sample ? { perPercent5: now.perPercent5 ? now.perPercent5 * 0.7 + sample * 0.3 : sample } : {}) })
+    }
+  }
   if (typeof week !== "number") return
   const rate = readRate()
   // A new plan or a weekly reset starts over from here.

@@ -139,14 +139,23 @@ function connect() {
     if (!prefs.sound) send({ cmd: "audio", on: false })
   }
   ws.onmessage = (event) => (typeof event.data === "string" ? onEvent(JSON.parse(event.data)) : onBinary(event.data))
-  ws.onclose = () => {
+  let opened = false
+  ws.addEventListener("open", () => (opened = true))
+  ws.onclose = async () => {
     if (s.ws !== ws) return
     s.ws = undefined
     resetDecoder()
-    if (s.open && !document.hidden) {
-      status("Connection lost · reconnecting…")
-      setTimeout(() => s.open && !s.ws && !document.hidden && connect(), 2000)
+    if (!s.open || document.hidden) return
+    // Closed before it ever opened: ask why. A wrong token or remote desktop switched off won't fix itself.
+    if (!opened) {
+      try {
+        const answer = await fetch("api/desktop/state", { headers: { authorization: `Bearer ${s.token}` } })
+        if (answer.status === 401) return status("This phone isn't paired any more: pair it again on the PC (/phone)")
+        if (answer.status === 403) return status("Remote desktop is switched off on the PC (/phone → Remote desktop)")
+      } catch {}
     }
+    status("Connection lost · reconnecting…")
+    setTimeout(() => s.open && !s.ws && !document.hidden && connect(), opened ? 2000 : 5000)
   }
 }
 
@@ -183,6 +192,7 @@ function onEvent(message) {
     case "view":
       s.view = message.view
       resetDecoder()
+      send({ cmd: "keyframe" })
       if (!view.fw) Object.assign(view, { fw: message.width, fh: message.height })
       break
     case "oneScreen":
@@ -272,7 +282,7 @@ function onBinary(buffer) {
     }
     return
   }
-  if (bytes[0] === 2 && prefs.sound) playOpus(bytes.subarray(10), Number(new DataView(buffer).getBigUint64(1)))
+  if (bytes[0] === 2 && prefs.sound) playOpus(bytes.subarray(9), Number(new DataView(buffer).getBigUint64(1)))
 }
 
 function onFrame(frame) {
@@ -471,6 +481,8 @@ function stageMove(event) {
       if (g.done) return
       if (!g.dragging) {
         g.dragging = true
+        // The press starts where the finger went down, not where the PC's cursor happened to be.
+        send({ cmd: "move", x: cursor.u, y: cursor.v })
         send({ cmd: "button", button: "left", down: true })
       }
       Object.assign(cursor, clampPoint(toFrame(event.clientX, event.clientY)))

@@ -197,6 +197,22 @@ export function phoneServerState() {
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".png": "image/png", ".json": "application/json" }
 const FILE_MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf", ".mp4": "video/mp4", ".webm": "video/webm", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8", ".json": "application/json" }
 
+// Wrong tokens per address: 20 within 10 minutes block it for the rest of those 10 minutes.
+function failed(ip) {
+  const now = Date.now()
+  const entry = failures.get(ip)
+  failures.set(ip, entry && now - entry.since < 10 * 60_000 ? { count: entry.count + 1, since: entry.since } : { count: 1, since: now })
+}
+function blocked(ip) {
+  const entry = failures.get(ip)
+  if (!entry) return false
+  if (Date.now() - entry.since > 10 * 60_000) {
+    failures.delete(ip)
+    return false
+  }
+  return entry.count > 20
+}
+
 function authorized(request, url) {
   const token = phoneToken()
   const given = (request.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || url.searchParams.get("t") || ""
@@ -359,11 +375,12 @@ async function handle(request, response) {
   try {
     if (url.pathname.startsWith("/api/")) {
       const ip = request.socket.remoteAddress ?? ""
-      if ((failures.get(ip) ?? 0) > 20) return json(response, 429, { error: "too many wrong tokens" })
+      if (blocked(ip)) return json(response, 429, { error: "too many wrong tokens: wait 10 minutes" })
       if (!authorized(request, url)) {
-        failures.set(ip, (failures.get(ip) ?? 0) + 1)
+        failed(ip)
         return json(response, 401, { error: "pair this phone again (the token is wrong or was renewed)" })
       }
+      failures.delete(ip)
       return await handleApi(request, response, url)
     }
     // The phone app itself: static files, no secrets in them.
@@ -489,6 +506,16 @@ function startDesktop() {
     stopWhisper()
     // A helper that was killed can't put the screens back itself.
     if (existsSync(ONE_SCREEN_MARK)) spawnSync(findBinary("python3") ?? "python3", [DESKTOP_HELPER, "--restore", "--state", stateDir], { stdio: "ignore", timeout: 20_000 })
+    // Stopped on purpose while a phone (re)connected: start again for it.
+    if (desktop.stopping && desktop.viewers.size) {
+      desktop.stopping = false
+      try {
+        return startDesktop()
+      } catch (error) {
+        log("desktop restart", error)
+      }
+    }
+    desktop.stopping = false
     for (const viewer of desktop.viewers) viewer.send(JSON.stringify({ type: "status", state: "stopped", text: "Screen sharing stopped on the PC" }))
   })
 }
@@ -507,17 +534,30 @@ export function stopDesktop(now = false) {
   for (const viewer of desktop.viewers) if (now) viewer.close(1001)
   const proc = desktop.proc
   if (!proc) return
+  desktop.stopping = !now
   helperSend({ cmd: "stop" })
   setTimeout(() => proc.exitCode === null && proc.kill("SIGTERM"), now ? 1500 : 4000)
 }
 
 process.on("exit", () => desktop.proc?.kill("SIGTERM"))
 
+// "Everything on one screen" left on by a crash or a power loss: put the screens back when Agent Code starts.
+setTimeout(() => {
+  if (!desktop.proc && DESKTOP_HELPER && existsSync(ONE_SCREEN_MARK))
+    spawn(findBinary("python3") ?? "python3", [DESKTOP_HELPER, "--restore", "--state", stateDir], { stdio: "ignore", detached: true }).unref()
+}, 4000).unref?.()
+
 function onHelperData(chunk) {
   let buffer = desktop.buffer.length ? Buffer.concat([desktop.buffer, chunk]) : chunk
   let at = 0
   while (buffer.length - at >= 5) {
     const length = buffer.readUInt32BE(at + 1)
+    if (buffer[at] < 1 || buffer[at] > 3 || length > 32 * 1024 * 1024) {
+      log("desktop helper output broken: restarting it", buffer[at], length)
+      desktop.buffer = Buffer.alloc(0)
+      desktop.proc?.kill("SIGTERM")
+      return
+    }
     if (buffer.length - at - 5 < length) break
     onHelperFrame(buffer[at], buffer.subarray(at + 5, at + 5 + length))
     at += 5 + length
@@ -621,8 +661,8 @@ function upgrade(request, socket) {
   const url = new URL(request.url ?? "/", "http://acode")
   const ip = request.socket.remoteAddress ?? ""
   if (url.pathname !== "/api/desktop/ws" || String(request.headers.upgrade ?? "").toLowerCase() !== "websocket" || !request.headers["sec-websocket-key"]) return socket.destroy()
-  if ((failures.get(ip) ?? 0) > 20 || !authorized(request, url)) {
-    failures.set(ip, (failures.get(ip) ?? 0) + 1)
+  if (blocked(ip) || !authorized(request, url)) {
+    failed(ip)
     return socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n")
   }
   if (!phoneSettings().desktop) return socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
@@ -693,8 +733,19 @@ function webSocket(socket, on) {
       finish()
     },
   }
-  const ping = setInterval(() => frame(9), 20_000)
+  let heard = Date.now()
+  const ping = setInterval(() => {
+    if (Date.now() - heard > 45_000) {
+      log("desktop viewer silent for 45 s: dropped")
+      socket.destroy()
+      return finish()
+    }
+    frame(9)
+  }, 15_000)
+  socket.on("close", finish)
+  socket.on("error", finish)
   socket.on("data", (chunk) => {
+    heard = Date.now()
     buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk
     while (buffer.length >= 2) {
       const fin = (buffer[0] & 0x80) !== 0

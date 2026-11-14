@@ -59,6 +59,10 @@ def log(*parts):
 
 _out_lock = threading.Lock()
 _out_broken = False
+# The framed output to Agent Code uses a private copy of stdout. fd 1 itself points at /dev/null, so programs this
+# helper starts (apps, files, wl-copy) can't write stray bytes into the frames.
+_FRAMES = os.fdopen(os.dup(1), "wb", buffering=0)
+os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
 
 
 def emit(kind, payload):
@@ -67,8 +71,7 @@ def emit(kind, payload):
         return
     try:
         with _out_lock:
-            sys.stdout.buffer.write(struct.pack(">BI", kind, len(payload)) + payload)
-            sys.stdout.buffer.flush()
+            _FRAMES.write(struct.pack(">BI", kind, len(payload)) + payload)
     except (BrokenPipeError, ValueError, OSError):
         # Agent Code went away: stop on the main loop (that also puts the screens back).
         _out_broken = True
@@ -326,7 +329,8 @@ class Desktop:
             chain = self.encoder(self.video_variant, ow, oh, cuda_ok=False)
             text = f"{head} ! {chain} ! " + self.tail() + " " + " ".join(branches) if chain else None
         else:
-            index = self.view if isinstance(self.view, int) else 0
+            index = self.view if isinstance(self.view, int) and 0 <= self.view < len(self.streams) else 0
+            self.view = index
             s = self.streams[index]
             ow, oh = self.output_size(s["w"], s["h"])
             self.layout = [{"stream": index, "u": 0, "v": 0, "uw": 1, "vh": 1}]
@@ -480,12 +484,14 @@ class Desktop:
         for part in self.layout:
             if part["u"] <= u <= part["u"] + part["uw"] and part["v"] <= v <= part["v"] + part["vh"]:
                 s = self.streams[part["stream"]]
-                return s["node"], (u - part["u"]) / part["uw"] * s["w"], (v - part["v"]) / part["vh"] * s["h"]
+                x = (u - part["u"]) / part["uw"] * s["w"]
+                y = (v - part["v"]) / part["vh"] * s["h"]
+                return s["node"], min(max(x, 0), s["w"] - 1), min(max(y, 0), s["h"] - 1)
         part = self.layout[0] if self.layout else None
         if not part:
             return None
         s = self.streams[part["stream"]]
-        return s["node"], min(max(u, 0), 1) * s["w"], min(max(v, 0), 1) * s["h"]
+        return s["node"], min(max(u, 0), 1) * (s["w"] - 1), min(max(v, 0), 1) * (s["h"] - 1)
 
     def notify(self, method, signature, *args):
         if TEST:
@@ -517,7 +523,7 @@ class Desktop:
                 kept = (types[0], subprocess.run(["wl-paste", "-n", "-t", types[0]], capture_output=True, timeout=3).stdout)
             except Exception:
                 kept = None
-        subprocess.run(["wl-copy", text], timeout=3)
+        subprocess.run(["wl-copy", text], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.08)
         terminal = active_window_class() in TERMINALS
         keys = [KEY_LEFTCTRL] + ([KEY_LEFTSHIFT] if terminal else []) + [KEY_V]
@@ -527,7 +533,7 @@ class Desktop:
             self.key(code, False)
         time.sleep(0.4)
         if kept:
-            subprocess.run(["wl-copy", "-t", kept[0]], input=kept[1], timeout=3)
+            subprocess.run(["wl-copy", "-t", kept[0]], input=kept[1], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # -- KWin: virtual desktops, windows -------------------------------------
 
@@ -583,7 +589,8 @@ class Desktop:
         app = Gio.DesktopAppInfo.new(ident)
         if not app:
             raise ValueError("no such app")
-        app.launch([], None)
+        # Started on its own (own session, no pipes of ours), like from the app menu.
+        subprocess.Popen(["gio", "launch", app.get_filename()], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     @staticmethod
     def safe_path(p):
@@ -613,7 +620,7 @@ class Desktop:
         if TEST:
             log("open", real)
             return
-        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(real).get_uri(), None)
+        subprocess.Popen(["gio", "open", real], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     # -- "everything on one screen" ------------------------------------------
 
@@ -635,6 +642,8 @@ class Desktop:
                 # The other screens' streams end with their outputs; show the one that stays.
                 self.streams = [self.streams[index]] if index < len(self.streams) else self.streams[:1]
                 index = 0
+                names = output_names()
+                event({"type": "screens", "screens": [{"index": i, "name": names.get((s["x"], s["y"]), f"Screen {i + 1}"), "x": s["x"], "y": s["y"], "w": s["w"], "h": s["h"]} for i, s in enumerate(self.streams)]})
             self.view = index
             self.start_video()
             return {"oneScreen": True, "view": self.view}

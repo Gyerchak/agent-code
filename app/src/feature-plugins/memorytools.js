@@ -105,6 +105,7 @@ export function boxIndex() {
 
 /** The text re-added to a session after a compaction: the memories it still has open. */
 export function reopenText(session) {
+  if (config.memoryUse === false) return undefined
   const names = openMemories(session.store.sessionID)
   if (!names.length) return undefined
   const list = listMemories(sessionStore(session.store))
@@ -207,7 +208,12 @@ export function memoryTools(session, { tool, z }) {
       "Close memories this session no longer needs, so they are not added back after the next compaction.",
       { names: z.array(z.string()).min(1) },
       async ({ names }) => {
-        const drop = new Set(names.map(key))
+        // A memory may be named by its front matter or its file: close it either way.
+        const list = listMemories(store())
+        const drop = new Set(names.flatMap((name) => {
+          const memory = find(list, name)
+          return [key(name), ...(memory ? [key(memory.name), key(path.basename(memory.file))] : [])]
+        }))
         const left = openMemories(sid()).filter((name) => !drop.has(key(name)))
         setOpen(sid(), left)
         return text(left.length ? `Closed. Still open: ${left.join(", ")}.` : "Closed. No memories open in this session.")

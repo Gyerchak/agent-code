@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { fableFallback, fableUpgrade, limits,                                     } from "../context/session"
+import { autoPauseFor, fableFallback, fableUpgrade, limits, liveWindow } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -119,9 +119,9 @@ export function UsageSection() {
       <Match when={kind() === "anthropic" && limits.available && (limits.fiveHour || limits.week)}>
         <Section title="Usage" right={<text fg={theme.textMuted}>{catalog.plan ? planTitle() : ""}</text>}>
           <Show when={limits.rolling !== false}>
-            <Meter label="5-hour " window={limits.fiveHour} />
+            <Meter label="5-hour " window={liveWindow(limits.fiveHour, "fiveHour")} />
           </Show>
-          <Meter label="Weekly " window={limits.week} />
+          <Meter label="Weekly " window={liveWindow(limits.week, "week")} />
           {/* Per-model weekly limits (Fable on Max and up: at most a share of the weekly limit). */}
           <For each={limits.scoped ?? []}>
             {(w) => (
@@ -436,8 +436,10 @@ export function PauseBar() {
  */
 export function AutoPauseToggle() {
   const [hover, setHover] = createSignal(false)
-  const on = () => (configRevision(), config.pauseNearLimit !== false)
-  const level = () => (configRevision(), config.pauseAt ?? 95)
+  // This tab's auto-pause: its own setting, else the one for every tab.
+  const rule = () => (configRevision(), autoPauseFor(store.sessionID))
+  const on = () => rule().on
+  const level = () => rule().at
   return (
     <box
       flexShrink={0}
@@ -450,8 +452,11 @@ export function AutoPauseToggle() {
       <text fg={on() ? theme.text : theme.textMuted} wrapMode="none" truncate>
         <span style={{ fg: on() ? theme.success : theme.textMuted }}>{on() ? "◉" : "○"}</span>
         {on() ? `  Auto-pause at ${level()}%` : "  Auto-pause off"}
+        <Show when={rule().own}>
+          <span style={{ fg: theme.textMuted }}> · this tab</span>
+        </Show>
         <Show when={hover()}>
-          <span style={{ fg: theme.textMuted }}> (right click: level)</span>
+          <span style={{ fg: theme.textMuted }}> (right click: this tab / every tab)</span>
         </Show>
       </text>
     </box>
@@ -474,10 +479,28 @@ function SwitchRow(props) {
         <span style={{ fg: props.on ? theme.success : theme.textMuted }}>{props.on ? "◉" : "○"}</span>
         {"  " + props.label}
         <Show when={hover()}>
-          <span style={{ fg: theme.textMuted }}> (right click: settings)</span>
+          <span style={{ fg: theme.textMuted }}>{` (right click: ${props.hint ?? "settings"})`}</span>
         </Show>
       </text>
     </box>
+  )
+}
+
+/**
+ * Auto-resume, right below auto-pause: a click turns it on or off (default on), a right click switches between
+ * resuming all waiting tabs at once and one at a time (the same as Settings → "Auto resume" / "Resume").
+ */
+export function AutoResumeToggle() {
+  const on = () => (configRevision(), config.autoResume !== false)
+  const one = () => (configRevision(), config.autoResumeMode === "one")
+  return (
+    <SwitchRow
+      on={on()}
+      label={on() ? `Auto-resume on · ${one() ? "one at a time" : "all tabs"}` : "Auto-resume off"}
+      hint={one() ? "all tabs" : "one at a time"}
+      toggle="auto.resume.toggle"
+      settings="auto.resume.mode"
+    />
   )
 }
 
@@ -550,6 +573,7 @@ export function SidebarFooter() {
       <box flexShrink={0}>
         <PauseBar />
         <AutoPauseToggle />
+        <AutoResumeToggle />
         <FableFallbackToggle />
         <FableReturnToggle />
         <PhoneRow />

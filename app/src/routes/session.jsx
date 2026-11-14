@@ -458,7 +458,8 @@ function MessageView(props                      ) {
           <UserMessageView message={props.message               } />
         </box>
       </Match>
-      <Match when={props.message.type === "assistant"}>
+      {/* A finished reply with nothing in it (Claude Code's "No response requested." to a background note) is not drawn. */}
+      <Match when={props.message.type === "assistant" && !(props.message.end !== undefined && !props.message.parts.length && !props.message.error && !props.message.retry)}>
         <box flexShrink={0} id={`msg-${props.message.id}`} backgroundColor={highlighted() === props.message.id ? theme.backgroundElement : undefined}>
           <AssistantView message={props.message                    } />
         </box>
@@ -699,7 +700,7 @@ function ActivityRow(props) {
     for (const part of props.parts) counts.set(stepName(part), (counts.get(stepName(part)) ?? 0) + 1)
     return [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(" · ")
   })
-  const running = createMemo(() => props.parts.findLast((part) => (part.type === "tool" ? part.status === "running" || part.status === "pending" : !part.end)))
+  const running = createMemo(() => props.parts.findLast((part) => (part.type === "tool" ? part.status === "running" || part.status === "pending" : part.end === undefined)))
   const failed = createMemo(() => props.parts.filter((part) => part.type === "tool" && part.status === "error").length)
   const now = () => {
     const part = running()
@@ -810,7 +811,10 @@ function reasoningTitle(text        ) {
 }
 
 function ReasoningView(props                         ) {
-  const [expanded, setExpanded] = createSignal(transcriptDetail() === "high")
+  // Open by default at "high" detail (also for thoughts already on screen when it changes); a click decides after that.
+  const [toggled, setToggled] = createSignal()
+  const expanded = () => toggled() ?? transcriptDetail() === "high"
+  const setExpanded = (value) => setToggled(typeof value === "function" ? value(expanded()) : value)
   const done = () => props.part.end !== undefined
   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
   const fg = () => (expanded() ? alpha(theme.warning, 0.6) : theme.warning)

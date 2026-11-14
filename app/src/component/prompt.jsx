@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto"
 import { config, saveConfig } from "../context/config"
 import { clock, draft, exit, focusPrompt, SIDEBAR_DOCK_WIDTH, sidebarShown, promptMode, refs, setPromptMode, setRoute, showDetails } from "../context/app"
 import { allCommands, leaderActive, matchesId, runCommand, shortcut, useLayer } from "../context/keymap"
-import { agentIndex, limits, onModel, stripAnsi } from "../context/session"
+import { agentIndex, limits, liveWindow, onModel, stripAnsi } from "../context/session"
 import { active, currentAgent, interrupt, modelLabel, pickModel, store } from "../context/tabs"
 import { agentColor, syntax, theme, tint } from "../context/theme"
 import { listFiles, rankFiles } from "../context/files"
@@ -405,11 +405,23 @@ export function Prompt(props                                         ) {
   function acceptAutocomplete(submitAfter         ) {
     const option = auto.options[auto.selected]
     if (!option) {
+      const slash = auto.visible === "/"
       setAuto("visible", false)
+      // Enter on a command no suggestion matches (e.g. one that has nothing to act on now): handle it as typed.
+      if (submitAfter && slash) submit()
       return
     }
     if (auto.visible === "/") {
-      const local = allCommands().find((command) => command.slash === option.value)
+      // The exact name of a command was typed: Enter means that command, never a different suggestion (typing
+      // /resume with nothing paused must not run /autoresume).
+      const typed = auto.query
+      const named = (name) => allCommands().some((item) => item.slash === name || item.slashAliases?.includes(name)) || store.commands.some((item) => item.name === name)
+      if (submitAfter && typed && option.value.toLowerCase() !== typed && named(typed)) {
+        setAuto("visible", false)
+        submit()
+        return
+      }
+      const local = allCommands().find((command) => command.slash === option.value && (!command.enabled || command.enabled()))
       if (local && submitAfter) {
         setText("")
         setAuto("visible", false)
@@ -687,8 +699,8 @@ export function Prompt(props                                         ) {
     if (showLimits()) {
       // The fuller of 5h/week first, then the other, then this model's own weekly limit.
       const main = [
-        limits.fiveHour && { key: "fiveHour", label: "5h", window: limits.fiveHour },
-        limits.week && { key: "week", label: "wk", window: limits.week },
+        limits.fiveHour && { key: "fiveHour", label: "5h", window: liveWindow(limits.fiveHour, "fiveHour") },
+        limits.week && { key: "week", label: "wk", window: liveWindow(limits.week, "week") },
       ].filter(Boolean).sort((a, b) => barUsed(b.window) - barUsed(a.window))
       const bars = [...main, ownScoped() && { key: "scoped", label: ownScoped().name.slice(0, 2).toLowerCase(), window: ownScoped() }].filter(Boolean)
       const room = (list, reset) => list.reduce((sum, bar) => sum + barLength(bar.label, bar.window, reset) + GAP, 0)
@@ -1021,8 +1033,8 @@ export function Prompt(props                                         ) {
                 </Show>
                 <Show when={fit().fiveHour || fit().week || fit().scoped}>
                   <box flexDirection="row" gap={2} flexShrink={0}>
-                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={w()} reset={!fit().compact} />}</Show>
-                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={w()} reset={!fit().compact} />}</Show>
+                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={liveWindow(w(), "fiveHour")} reset={!fit().compact} />}</Show>
+                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={liveWindow(w(), "week")} reset={!fit().compact} />}</Show>
                     <Show when={fit().scoped && ownScoped()}>
                       {(w) => <UsageBar label={w().name.slice(0, 2).toLowerCase()} window={w()} reset={!fit().compact} />}
                     </Show>
@@ -1080,10 +1092,16 @@ export function barUsed(window) {
   return window.resetsAt && window.resetsAt <= clock() ? 0 : window.utilization
 }
 
+/** "42%", or "~42.7%" while the meter carries the estimate since the last reading. */
+export function usedText(window) {
+  const used = barUsed(window)
+  return window.estimated ? `~${used.toFixed(1)}%` : `${Math.round(used)}%`
+}
+
 /** Columns a footer UsageBar takes: "5h ▰▰▰▱▱▱ 42%" and, with `reset`, " 2h13m". */
 function barLength(label, window, reset) {
   const time = reset && window.resetsAt && window.resetsAt > clock() ? 1 + shortReset(window.resetsAt).length : 0
-  return label.length + 1 + BAR_WIDTH + 1 + String(Math.round(barUsed(window))).length + 1 + time
+  return label.length + 1 + BAR_WIDTH + 1 + usedText(window).length + time
 }
 
 export function UsageBar(props                                                                             ) {
@@ -1094,7 +1112,7 @@ export function UsageBar(props                                                  
   return (
     <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
       {props.label} <span style={{ fg: color() }}>{"▰".repeat(filled())}</span>
-      <span style={{ fg: theme.border }}>{"▱".repeat(width() - filled())}</span> {Math.round(used())}%
+      <span style={{ fg: theme.border }}>{"▱".repeat(width() - filled())}</span> {usedText(props.window)}
       <Show when={props.reset !== false && props.window.resetsAt && props.window.resetsAt > clock()}>
         <span style={{ fg: theme.textMuted }}> {shortReset(props.window.resetsAt )}</span>
       </Show>

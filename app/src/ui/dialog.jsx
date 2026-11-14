@@ -17,6 +17,8 @@ export function setDialogRefocus(fn            ) {
   refocus = fn
 }
 
+const rememberedRows = new Map()
+
 export const dialog = {
   get open() {
     return dialogStore.stack.length > 0
@@ -223,6 +225,21 @@ export function DialogSelect   (props
     ),
   )
 
+  // `memoryKey`: come back to the row that was selected when this dialog was last left (a dialog under a pushed one
+  // is drawn again when that one closes).
+  if (props.memoryKey) {
+    const remembered = rememberedRows.get(props.memoryKey)
+    if (remembered !== undefined)
+      queueMicrotask(() => {
+        const index = flat().findIndex((option) => option.value === remembered)
+        if (index >= 0) setStore("selected", index)
+      })
+    createEffect(() => {
+      const value = flat()[store.selected]?.value
+      if (value !== undefined) rememberedRows.set(props.memoryKey, value)
+    })
+  }
+
   // Start on the current value.
   createEffect(
     on(
@@ -409,12 +426,13 @@ export function DialogSelect   (props
                         onMouseDrag={dragTo}
                         onMouseDragEnd={() => (dragValue = undefined)}
                         onMouseUp={(event) => {
-                          // Right-click: the row's own settings, where the dialog has them.
-                          if (event?.button === 2 && props.onRightClick) {
+                          // Right-click: the row's own settings, where the dialog has them (or its `side` choice).
+                          if (event?.button === 2 && (props.onRightClick || (props.side && option.side !== false))) {
                             dragValue = undefined
                             const i = flat().indexOf(option)
                             if (i >= 0) setStore("selected", i)
-                            props.onRightClick(option)
+                            if (props.onRightClick) props.onRightClick(option)
+                            else props.side.run(option)
                             return
                           }
                           // Released on another row: the held row moves there (drag events don't reach the rows).
@@ -433,7 +451,9 @@ export function DialogSelect   (props
                             ●
                           </text>
                         </Show>
-                        <Show when={option.gutter}>{option.gutter}</Show>
+                        <Show when={option.gutter}>
+                          <box flexShrink={0}>{option.gutter}</box>
+                        </Show>
                         <text
                           flexGrow={1}
                           fg={fg()}
@@ -449,6 +469,20 @@ export function DialogSelect   (props
                         <Show when={option.footer}>
                           <text flexShrink={0} fg={active() ? fg() : theme.textMuted}>
                             {option.footer}
+                          </text>
+                        </Show>
+                        {/* `side`: the same choice for something wider (e.g. every tab), clickable at the row's right. */}
+                        <Show when={props.side && option.side !== false}>
+                          <text
+                            flexShrink={0}
+                            fg={active() ? fg() : theme.primary}
+                            onMouseUp={(event) => {
+                              event?.stopPropagation?.()
+                              dragValue = undefined
+                              props.side.run(option)
+                            }}
+                          >
+                            {`│ ${props.side.label}`}
                           </text>
                         </Show>
                       </box>

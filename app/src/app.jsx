@@ -14,7 +14,7 @@ import { ensureMcpFile, importMcp, mcpFile } from "./context/mcp"
 import { discoverMods, ensureModsDir, modEnabled, modsDir, modsEnabled, modsShows, setModEnabled, setModsSetting } from "./context/mods"
 import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js"
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -41,7 +41,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -443,6 +443,75 @@ function selectAll(renderer) {
   } catch (error) {
     log("select all", error)
   }
+}
+
+/**
+ * Auto-pause for this tab and for every tab. Enter (or a click) sets it for this tab; the "every tab" cell on the right
+ * (right-click, ctrl+o) sets the setting for every tab. A tab's own setting comes first; tabs without one follow
+ * the setting for every tab.
+ */
+function DialogAutoPause() {
+  const [tick, setTick] = createSignal(0)
+  const sid = () => store.sessionID
+  const options = createMemo(() => {
+    tick()
+    configRevision()
+    const mine = autoPauseFor(sid())
+    const every = { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 }
+    const others = autoPauseOverrides().filter((id) => id !== sid()).length
+    return [
+      {
+        title: mine.on ? "Auto-pause on" : "Auto-pause off",
+        value: "toggle",
+        description: `this tab${mine.own ? " (its own setting)" : " (follows every tab)"} · every tab: ${every.on ? `on at ${every.at}%` : "off"}`,
+        gutter: <text fg={mine.on ? theme.success : theme.textMuted}>{mine.on ? "[x]" : "[ ]"}</text>,
+        category: "Pause before a limit",
+      },
+      ...[70, 75, 80, 85, 90, 95, 98, 99].map((value) => ({
+        title: `${value}%`,
+        value: String(value),
+        category: "Pause at",
+        description: [value === mine.at ? "this tab" : "", value === every.at ? "every tab" : "", value === 95 ? "default" : ""].filter(Boolean).join(" · ") || undefined,
+        gutter: <text fg={value === mine.at ? theme.primary : theme.textMuted}>{value === mine.at ? "(•)" : "( )"}</text>,
+      })),
+      ...(mine.own ? [{ title: "Follow the setting for every tab", value: "follow", category: "This tab", side: false }] : []),
+      ...(others ? [{ title: `Make every tab follow it`, value: "followAll", category: "Every tab", description: `${others} other tab${others === 1 ? " has" : "s have"} its own setting`, side: false }] : []),
+    ]
+  })
+  const apply = (option, every) => {
+    if (option.value === "follow") setSessionAutoPause(sid(), { on: null, at: null })
+    else if (option.value === "followAll") {
+      config.sessionAutoPause = {}
+      saveConfig()
+    } else if (option.value === "toggle") {
+      if (every || !sid()) {
+        config.pauseNearLimit = config.pauseNearLimit === false
+        saveConfig()
+      } else setSessionAutoPause(sid(), { on: !autoPauseFor(sid()).on })
+    } else {
+      const at = Number(option.value)
+      if (every || !sid()) {
+        config.pauseAt = at
+        config.pauseNearLimit = true
+        saveConfig()
+      } else setSessionAutoPause(sid(), { at, on: true })
+    }
+    setTick((value) => value + 1)
+  }
+  return (
+    <DialogSelect
+      title="Auto-pause"
+      options={options()}
+      onSelect={(option) => apply(option, false)}
+      side={{ label: "every tab", run: (option) => apply(option, true) }}
+      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => option.side !== false && apply(option, true) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
+        </text>
+      }
+    />
+  )
 }
 
 /** How full a plan limit window gets before "Pause before a limit" pauses (default 95 %). */
@@ -1023,6 +1092,23 @@ function dayCategory(ms        ) {
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/** The folder a Claude Code session was started in, from its transcript (first line with a cwd), if it is anywhere. */
+function sessionFolder(id) {
+  const root = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects")
+  try {
+    for (const project of readdirSync(root)) {
+      const file = path.join(root, project, `${id}.jsonl`)
+      if (!existsSync(file)) continue
+      for (const line of readFileSync(file, "utf8").split("\n", 50)) {
+        const cwd = line.match(/"cwd":"((?:[^"\\]|\\.)*)"/)?.[1]
+        if (cwd) return JSON.parse(`"${cwd}"`)
+      }
+      return undefined
+    }
+  } catch {}
+  return undefined
+}
+
 function DialogSessions() {
   onMount(() => void refreshSessions())
   const [typed, setTyped] = createSignal("")
@@ -1035,9 +1121,13 @@ function DialogSessions() {
       // A session can be found by its id (or the start of it), as in opencode 2.3.
       keywords: session.sessionId,
     }))
-    // A full session id that isn't listed here (another folder, a child session): offer to open it anyway.
+    // A full session id that isn't listed (a child session of this folder, or one from another folder).
     const id = typed().trim()
-    if (SESSION_ID.test(id) && !list.some((item) => item.value === id)) list.unshift({ title: `Open session ${id}`, value: id, category: "By id", footer: "open", keywords: id })
+    if (SESSION_ID.test(id) && !list.some((item) => item.value === id)) {
+      const where = sessionFolder(id)
+      if (where === store.cwd) list.unshift({ title: `Open session ${id}`, value: id, category: "By id", footer: "open", keywords: id, byId: true })
+      else if (where) list.unshift({ title: `Session ${id}`, value: `elsewhere:${where}`, category: "By id", description: `in ${where}: open Agent Code there`, keywords: id })
+    }
     return list
   })
   return (
@@ -1049,9 +1139,10 @@ function DialogSessions() {
       onFilter={setTyped}
       emptyText="No sessions yet in this directory"
       onSelect={(option) => {
+        if (option.value.startsWith("elsewhere:")) return toast.show({ variant: "info", message: `That session belongs to ${option.value.slice(10)}: open Agent Code in that folder to continue it`, duration: 6000 })
         dialog.clear()
         setRoute("session")
-        void openSession(option.value, option.title)
+        void openSession(option.value, option.byId ? undefined : option.title)
       }}
       actions={[
         {
@@ -1833,11 +1924,68 @@ function DialogLogin() {
   )
 }
 
-/** How long to pause the focused tab: by hand, for a while, at a time, or until the 5-hour window resets. */
+/**
+ * How long to pause: Enter (or a click on the row) pauses this tab; the "every tab" cell on the right (or a
+ * right-click, or ctrl+o) does the same for every open tab. By hand, for a while, at a time, or until the 5-hour
+ * window resets.
+ */
 function DialogPause() {
   const fiveHour = limits.fiveHour?.resetsAt && limits.fiveHour.resetsAt > Date.now() ? limits.fiveHour.resetsAt : undefined
   const at = (minutes) => Date.now() + minutes * 60_000
+  const paused = tabs().filter((tab) => tab.store.pause)
+  // Who a choice applies to: this tab, or every open tab.
+  const targets = (all) => (all ? tabs().filter((tab) => !tab.disposed) : [active()])
+  const pauseFor = (until, all) => {
+    const list = targets(all)
+    for (const tab of list) tab.pause(until)
+    dialog.clear()
+    const when = until ? ` until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""
+    toast.show({
+      variant: "info",
+      message: all
+        ? `Paused ${list.length} tab${list.length === 1 ? "" : "s"}${when}: work stops at its next step; nothing is sent until they resume`
+        : active().engine || active().store.engine
+          ? `Paused${when}: stopped now, a short continue on resume`
+          : `Paused${when}: the work stops at its next step; nothing is sent until it resumes`,
+      duration: 4000,
+    })
+  }
+  const choose = (option, all) => {
+    if (option.value === "resume") {
+      const list = all || !active().store.pause ? paused : [active()]
+      for (const tab of list) tab.resume()
+      dialog.clear()
+      return toast.show({ variant: "info", message: list.length ? `Resumed ${list.length === 1 && !all ? "this tab" : `${list.length} tab${list.length === 1 ? "" : "s"}`}` : "Nothing was paused here" })
+    }
+    if (option.value === "time") {
+      dialog.replace(() => (
+        <DialogPrompt
+          title={`Resume ${all ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
+          placeholder="e.g. 14:30 or 45"
+          onConfirm={(value) => {
+            const text = value.trim()
+            const clock = text.match(/^(\d{1,2}):(\d{2})$/)
+            let until
+            if (clock) {
+              const date = new Date()
+              date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
+              if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
+              until = date.getTime()
+            } else if (/^\d+$/.test(text)) until = at(Number(text))
+            dialog.clear()
+            if (!until) return toast.show({ variant: "warning", message: "Write a time like 14:30 or a number of minutes" })
+            pauseFor(until, all)
+          }}
+        />
+      ))
+      return
+    }
+    pauseFor(option.value === "manual" ? undefined : option.value === "reset" ? fiveHour + 30_000 : at(Number(option.value)), all)
+  }
   const options = [
+    ...(paused.length
+      ? [{ title: active().store.pause ? "Resume this tab" : "Resume", value: "resume", description: `${paused.length} tab${paused.length === 1 ? "" : "s"} paused`, category: "Paused" }]
+      : []),
     { title: "Until I resume", value: "manual", description: "click the bar, /resume or ctrl+x p again" },
     { title: "15 minutes", value: "15" },
     { title: "30 minutes", value: "30" },
@@ -1851,41 +1999,14 @@ function DialogPause() {
       title="Pause"
       flatten
       options={options}
-      onSelect={(option) => {
-        const session = active()
-        if (option.value === "time") {
-          dialog.replace(() => (
-            <DialogPrompt
-              title="Resume at (HH:MM) or after N minutes"
-              placeholder="e.g. 14:30 or 45"
-              onConfirm={(value) => {
-                const text = value.trim()
-                const clock = text.match(/^(\d{1,2}):(\d{2})$/)
-                let until
-                if (clock) {
-                  const date = new Date()
-                  date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
-                  if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
-                  until = date.getTime()
-                } else if (/^\d+$/.test(text)) until = at(Number(text))
-                dialog.clear()
-                if (!until) return toast.show({ variant: "warning", message: "Write a time like 14:30 or a number of minutes" })
-                session.pause(until)
-                toast.show({ variant: "info", message: `Paused until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` })
-              }}
-            />
-          ))
-          return
-        }
-        const until = option.value === "manual" ? undefined : option.value === "reset" ? fiveHour + 30_000 : at(Number(option.value))
-        session.pause(until)
-        dialog.clear()
-        toast.show({
-          variant: "info",
-          message: session.engine || session.store.engine ? "Paused: stopped now, a short continue on resume" : "Paused: the work stops at its next step; nothing is sent until it resumes",
-          duration: 4000,
-        })
-      }}
+      onSelect={(option) => choose(option, false)}
+      side={{ label: "every tab", run: (option) => choose(option, true) }}
+      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>this tab</span>
+        </text>
+      }
     />
   )
 }
@@ -1960,12 +2081,12 @@ function DialogSettings() {
     })),
     { key: "subagentPick", title: "  Claude picks", description: "Claude chooses each subagent's model + effort", get: flag("subagentPick", true), set: write("subagentPick"), restart: true },
     { key: "subagentSame", title: "  Same as session", description: "always this session's model + effort", get: flag("subagentSame", false), set: write("subagentSame"), restart: true },
-    { key: "autoResume", title: "Auto resume", description: "continue after a 5-hour/weekly limit resets", get: flag("autoResume", false), set: write("autoResume") },
+    { key: "autoResume", title: "Auto resume", description: "continue after a 5-hour/weekly limit resets", get: flag("autoResume", true), set: (value         ) => (write("autoResume")(value), autoResumeChanged()) },
     {
       key: "autoResumeMode",
       title: "  Resume",
       description: "when several tabs wait for a limit: all at once, or one after another",
-      get: () => config.autoResume === true,
+      get: () => config.autoResume !== false,
       set: () => {},
     },
     { key: "autoLimitReset", title: "  Use limit resets", description: "with auto resume: use a 5-hour reset Anthropic offers at the limit", get: flag("autoLimitReset", true), set: write("autoLimitReset") },
@@ -2066,6 +2187,7 @@ function DialogSettings() {
   return (
     <DialogSelect
       title="Settings"
+      memoryKey="settings"
       options={options()}
       flatten
       onSelect={(option) => {
@@ -2248,6 +2370,7 @@ function DialogOrchestrator() {
   return (
     <DialogSelect
       title="Orchestrator mode"
+      memoryKey="orchestrator"
       options={options()}
       onSelect={(option) => {
         const rule = orchestrator()
@@ -2430,8 +2553,8 @@ function DialogSubagentRouting() {
   return (
     <DialogSelect
       title="Subagent routing"
+      memoryKey="routing"
       options={options()}
-      flatten
       onSelect={(option) => {
         if (option.value === "enabled") {
           const on = !subagentRouting().enabled
@@ -2631,7 +2754,7 @@ export function App() {
     )
   })
   useKeyboard((event          ) => dispatchKey(event))
-  actions.pause = () => dialog.replace(() => <DialogPause />)
+  actions.pause = () => dialog.replace(() => <DialogPause />, undefined, "large")
   actions.message = (id) => dialog.replace(() => <DialogMessage messageID={id} />)
   actions.redo = () =>
     dialog.replace(() => (
@@ -2737,7 +2860,8 @@ export function App() {
       category: "Session",
       slash: "compact",
       slashAliases: ["summarize"],
-      enabled: () => !!store.sessionID,
+      // Only once there is a conversation (Claude Code answers an empty one with an error and starts a transcript).
+      enabled: () => !!store.sessionID && store.messages.some((message) => message.type === "user"),
       run: () => {
         setRoute("session")
         send("/compact")
@@ -2951,16 +3075,42 @@ export function App() {
     },
     {
       id: "pause.limit.toggle",
-      title: config.pauseNearLimit === false ? "Turn on auto-pause before a limit" : "Turn off auto-pause before a limit",
+      title: autoPauseFor(store.sessionID).on ? "Turn off auto-pause before a limit (this tab)" : "Turn on auto-pause before a limit (this tab)",
       category: "Session",
       slash: "autopause",
       run: () => {
-        config.pauseNearLimit = config.pauseNearLimit === false
-        saveConfig()
-        toast.show({ variant: "info", message: config.pauseNearLimit ? `Auto-pause on: pausing at ${config.pauseAt ?? 95}% of a plan limit` : "Auto-pause before a limit off" })
+        const now = autoPauseFor(store.sessionID)
+        if (!store.sessionID) {
+          config.pauseNearLimit = !now.on
+          saveConfig()
+        } else setSessionAutoPause(store.sessionID, { on: !now.on })
+        const after = autoPauseFor(store.sessionID)
+        toast.show({ variant: "info", message: after.on ? `Auto-pause on for this tab: pausing at ${after.at}% of a plan limit` : "Auto-pause off for this tab" })
       },
     },
-    { id: "pause.limit.threshold", title: "Auto-pause threshold", category: "Session", run: () => dialog.replace(() => <DialogPauseAt />) },
+    { id: "pause.limit.threshold", title: "Auto-pause settings (this tab, every tab)", category: "Session", run: () => dialog.replace(() => <DialogAutoPause />, undefined, "large") },
+    {
+      id: "auto.resume.toggle",
+      title: config.autoResume === false ? "Turn on auto-resume after a limit" : "Turn off auto-resume after a limit",
+      category: "Session",
+      slash: "autoresume",
+      run: () => {
+        config.autoResume = config.autoResume === false
+        saveConfig()
+        autoResumeChanged()
+        toast.show({ variant: "info", message: config.autoResume ? "Auto-resume on: work goes on when a 5-hour/weekly limit resets" : "Auto-resume off: tabs stay stopped at a limit" })
+      },
+    },
+    {
+      id: "auto.resume.mode",
+      title: config.autoResumeMode === "one" ? "Auto-resume: all waiting tabs at once" : "Auto-resume: one tab at a time",
+      category: "Session",
+      run: () => {
+        config.autoResumeMode = config.autoResumeMode === "one" ? "all" : "one"
+        saveConfig()
+        toast.show({ variant: "info", message: config.autoResumeMode === "one" ? "Auto-resume: one tab at a time" : "Auto-resume: all waiting tabs at once" })
+      },
+    },
     {
       id: "fable.fallback.toggle",
       title: fableFallback().enabled ? "Turn off Fable fallback" : "Turn on Fable fallback",

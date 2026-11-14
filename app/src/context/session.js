@@ -6,7 +6,7 @@ import {
   query,
   tool,
 } from "@anthropic-ai/claude-agent-sdk"
-import { batch } from "solid-js"
+import { batch, createSignal } from "solid-js"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
@@ -27,7 +27,7 @@ import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
 import { modelVariants } from "./variants"
-import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, publishPlanUsage, samplePlanRate } from "./usage"
+import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, planPerPercent, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
 // renames every Claude alias to that provider's model (and drops some), so those tabs use this list.
@@ -659,7 +659,7 @@ export async function pollPlanUsage(force = false) {
     if (usage) {
       applyUsage(usage)
       checkFableReturn()
-      if (catalog.plan && !usage.week?.hit) samplePlanRate(usage.week?.utilization, catalog.planLabel ?? catalog.plan)
+      if (catalog.plan && !usage.week?.hit) samplePlanRate(usage.week?.utilization, catalog.planLabel ?? catalog.plan, usage.fiveHour?.hit ? undefined : usage.fiveHour?.utilization)
     }
     // At the 5-hour wall Anthropic may offer a reset: look (at most once a minute).
     if (limits.rolling !== false && (limits.fiveHour?.utilization ?? 0) >= 99) void checkResetOffer()
@@ -721,7 +721,7 @@ export async function checkResetOffer(force = false) {
     shareLimits()
   }
   const blocked = (limits.fiveHour?.utilization ?? 0) >= 99
-  if (offer && blocked && config.autoResume === true && config.autoLimitReset !== false) await useLimitReset(true)
+  if (offer && blocked && config.autoResume !== false && config.autoLimitReset !== false) await useLimitReset(true)
 }
 
 /** The 5-hour limit was reset (here or by Claude Code's own /limit-reset): waiting and paused tabs go on now. */
@@ -770,7 +770,42 @@ function shareLimits() {
  * Take a reading from Anthropic (or another Agent Code window). A plan without a rolling window (Ultra) has no 5-hour
  * meter at all; a weekly window missing from one reading keeps its last value instead of vanishing.
  */
+// The plan meters between readings: what this Agent Code spent on Claude since the reading last changed, turned into
+// percent with the measured dollars per 1 % (plan-rate.json). Readings come once a minute while working (faster
+// polling gets refused); this keeps the meters moving in between, and the next reading replaces the estimate.
+const [settledSince, setSettledSince] = createSignal(0)
+const liveAtReading = new WeakMap()
+let readingPrint = ""
+function newReading() {
+  setSettledSince(0)
+  for (const session of allSessions) liveAtReading.set(session, session.store.livePlanCost ?? 0)
+}
+function planSpendSince() {
+  let live = 0
+  for (const session of allSessions) live += Math.max(0, (session.store.livePlanCost ?? 0) - (liveAtReading.get(session) ?? 0))
+  return settledSince() + live
+}
+/** A finished turn: its Claude spend counts as settled (minus what the last reading already held). */
+function settlePlanSpend(session, dollars) {
+  const before = liveAtReading.get(session) ?? 0
+  liveAtReading.set(session, 0)
+  if (dollars > before) setSettledSince((value) => value + dollars - before)
+}
+/** A plan window with the estimate since the last reading added (`estimated` set); the reading itself otherwise. */
+export function liveWindow(window, kind) {
+  if (!window || window.hit || (window.resetsAt && window.resetsAt <= Date.now())) return window
+  const per = planPerPercent()[kind === "fiveHour" ? "five" : "week"]
+  const spent = planSpendSince()
+  if (!per || !(spent > 0)) return window
+  return { ...window, utilization: Math.min(100, (window.utilization ?? 0) + spent / per), estimated: true }
+}
+
 function applyUsage(usage) {
+  const print = `${usage.fiveHour?.utilization}|${usage.week?.utilization}`
+  if (print !== readingPrint) {
+    readingPrint = print
+    newReading()
+  }
   const rolling = usage.rolling ?? limits.rolling
   setLimits({
     available: true,
@@ -793,6 +828,37 @@ function applyUsage(usage) {
 // ---------------------------------------------------------------------------
 
 export const LEVELS = ["low", "medium", "high", "xhigh", "max"]
+
+// Auto-pause before a limit, per tab and for every tab: a tab's own setting (config.sessionAutoPause[session id])
+// comes first; the setting for every tab (config.pauseNearLimit / config.pauseAt) applies where a tab has none.
+export function autoPauseFor(sessionID) {
+  const own = (sessionID && config.sessionAutoPause?.[sessionID]) || {}
+  return {
+    on: own.on ?? config.pauseNearLimit !== false,
+    at: own.at ?? config.pauseAt ?? 95,
+    own: own.on !== undefined || own.at !== undefined,
+  }
+}
+
+/** Change a tab's own auto-pause (`null` for a field: follow the setting for every tab again). */
+export function setSessionAutoPause(sessionID, change) {
+  if (!sessionID) return
+  const all = { ...(config.sessionAutoPause ?? {}) }
+  const next = { ...(all[sessionID] ?? {}) }
+  for (const [key, value] of Object.entries(change)) {
+    if (value === null || value === undefined) delete next[key]
+    else next[key] = value
+  }
+  if (Object.keys(next).length) all[sessionID] = next
+  else delete all[sessionID]
+  const keys = Object.keys(all)
+  for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
+  config.sessionAutoPause = all
+  saveConfig()
+}
+
+/** Tabs (by session id) with their own auto-pause setting. */
+export const autoPauseOverrides = () => Object.keys(config.sessionAutoPause ?? {})
 const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved to another model. Continue the work from where it stopped."
 const allSessions = new Set()
 
@@ -1035,7 +1101,7 @@ export function onModel(store, name) {
 
 /** A turn was refused by a limit: wait for the reset, then continue on our own. */
 function armAutoResume(session         , resetsAt         ) {
-  if (config.autoResume !== true) return
+  if (config.autoResume === false) return
   log("auto-resume armed", session.store.sessionID, resetsAt ? new Date(resetsAt).toISOString() : "no reset time")
   if (resetsAt) refusedUntil.set(session, resetsAt)
   else refusedUntil.delete(session)
@@ -1050,12 +1116,12 @@ function armAutoResume(session         , resetsAt         ) {
 /** "all" (default): every waiting tab goes on together; "one": one after another, each once the previous is done. */
 const resumeMode = () => (config.autoResumeMode === "one" ? "one" : "all")
 // Tabs continued by auto-resume whose turn is still going (for "one at a time").
-const resumingNow = new Set()
+const resumingNow = new Map()
 
 /** Continue a tab whose wait is over, booting or reviving its process first (a bare send would be dropped). */
 async function fireAutoResume(session         ) {
   log("auto-resume fires", session.store.sessionID, session.store.model)
-  resumingNow.add(session)
+  resumingNow.set(session, { fired: Date.now(), ran: false })
   try {
     if (session.store.fatal && session.store.sessionID) await session.start({ resume: session.store.sessionID })
     else await session.ensureStarted()
@@ -1072,7 +1138,7 @@ async function fireAutoResume(session         ) {
 function checkAutoResume() {
   for (const session of waitingResume) {
     try {
-      if (session.disposed || config.autoResume !== true || session.store.resumeAt === undefined) {
+      if (session.disposed || config.autoResume === false || session.store.resumeAt === undefined) {
         waitingResume.delete(session)
         if (!session.disposed && session.store.resumeAt !== undefined) setResumeAt(session, undefined)
         continue
@@ -1089,7 +1155,11 @@ function checkAutoResume() {
       // A turn is going (e.g. a background task reported in) or the process is booting: continue once it is free.
       if (session.store.status === "running" || session.store.booting) continue
       // One at a time: wait while another tab continued by auto-resume is still working.
-      for (const other of resumingNow) if (other.disposed || other.store.status !== "running") resumingNow.delete(other)
+      for (const [other, state] of resumingNow) {
+        if (other.store.status === "running") state.ran = true
+        // Done once its turn ran and ended; a tab that never got going counts for at most 10 minutes.
+        if (other.disposed || (state.ran && other.store.status !== "running") || Date.now() - state.fired > 10 * 60_000) resumingNow.delete(other)
+      }
       if (resumeMode() === "one" && resumingNow.size) continue
       waitingResume.delete(session)
       resumeTries.set(session, (resumeTries.get(session) ?? 0) + 1)
@@ -1101,6 +1171,7 @@ function checkAutoResume() {
       if (!splitModel(session.store.model)) {
         for (const other of waitingResume) {
           if (other === session || other.disposed || splitModel(other.store.model) || !other.store.resumeAt) continue
+          if ((refusedUntil.get(other) ?? 0) > Date.now()) continue
           if (other.store.resumeAt > Date.now()) setResumeAt(other, Date.now())
         }
       }
@@ -1117,6 +1188,11 @@ export function resumeSucceeded(session         ) {
   if (resumingNow.delete(session) && waitingResume.size) checkAutoResume()
 }
 
+/** The auto-resume switch changed: turned off, every pending wait ends now instead of at the next 15 s check. */
+export function autoResumeChanged() {
+  if (config.autoResume === false) checkAutoResume()
+}
+
 /** Cancel a pending auto-resume (the user typed something or turned the setting off). */
 export function cancelAutoResume(session         ) {
   waitingResume.delete(session)
@@ -1128,7 +1204,7 @@ function restoreAutoResume(session         , id        ) {
   const pending = readPendingResumes()
   const at = pending[id]
   if (!at) return
-  if (config.autoResume !== true || at < Date.now() - RESUME_KEEP) {
+  if (config.autoResume === false || at < Date.now() - RESUME_KEEP) {
     delete pending[id]
     writePendingResumes(pending)
     return
@@ -1351,7 +1427,15 @@ export const ROUTE_LEVELS = [
 ]
 
 /** Claude Code's own subagent types and the level they go to while routing is on (custom agents and forks stay). */
-const BUILTIN_ROUTES = { Explore: "simple-task", "claude-code-guide": "simple-task", "general-purpose": "average-task", claude: "average-task", Plan: "hard-task" }
+const BUILTIN_ROUTES = {
+  Explore: "simple-task",
+  "claude-code-guide": "simple-task",
+  "statusline-setup": "simple-task",
+  "web-fetch": "browsing",
+  "general-purpose": "average-task",
+  claude: "average-task",
+  Plan: "hard-task",
+}
 
 /** The routing settings with defaults filled in. A slot's model "same" is the session's own model. */
 export function subagentRouting() {
@@ -1513,7 +1597,8 @@ function orchestratorAgents(main, mainEffort, routingOn) {
   const types = new Map()
   const agents = {}
   for (const value of pool) {
-    const name = value === main ? "orchestrated" : `on-${(splitModel(value)?.model ?? value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+    let name = value === main ? "orchestrated" : `on-${(splitModel(value)?.model ?? value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+    if (types.has(name)) name = `${name}-${(splitModel(value)?.provider.id ?? "claude").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
     const external = !!splitModel(value)
     // A provider model runs at the orchestrator's level when it has one of that name ("<provider>/<model>#<level>").
     const variant = external && level && modelLevels(value).includes(level) && rule.strategy !== "effort" ? level : undefined
@@ -1522,7 +1607,7 @@ function orchestratorAgents(main, mainEffort, routingOn) {
     agents[name] = {
       description: `Subagent on ${poolLabel(value)}${value === main ? " (your own model)" : ""}.`,
       prompt: "You are a capable software engineering agent working for an orchestrator. Complete the subtask you are given using the available tools, then report the result concisely: what you did, what you found, anything left open.",
-      model: value === main && !external ? "inherit" : variant ? `${value}#${variant}` : value,
+      model: value === main ? "inherit" : variant ? `${value}#${variant}` : value,
     }
   }
   // Searches and other quick looks go to the cheapest model in the pool.
@@ -1559,19 +1644,25 @@ function orchestratorPrompt(orch, routingOn) {
 }
 
 /** The Agent call rewritten for orchestrator mode: one of its types, with an allowed reasoning level. */
-function orchestrateCall(orch, next) {
+function orchestrateCall(orch, next, currentLevel) {
   const type = next.subagent_type || "general-purpose"
   let target = orch.types.has(type) ? type : undefined
-  if (!target && (type in BUILTIN_ROUTES || type === "general-purpose")) target = type === "Explore" || type === "claude-code-guide" ? (orch.cheapest ?? orch.self) : orch.self
-  if (!target) return next
-  next.subagent_type = target
+  if (!target && type in BUILTIN_ROUTES) target = ["Explore", "claude-code-guide", "statusline-setup", "web-fetch"].includes(type) ? (orch.cheapest ?? orch.self) : orch.self
   delete next.model
+  // The user's own agents and forks run as defined; Claude doesn't get to raise their reasoning either.
+  if (!target) {
+    delete next.effort
+    return next
+  }
+  next.subagent_type = target
   const info = orch.types.get(target)
   if (info.external) {
     delete next.effort
     return next
   }
-  const { rule, level } = orch
+  const { rule } = orch
+  // The orchestrator's reasoning now (it may have changed since the process started).
+  const level = LEVELS.includes(currentLevel) ? currentLevel : orch.level
   if (rule.strategy === "model") {
     if (level && info.levels.includes(level)) next.effort = level
     else delete next.effort
@@ -1628,6 +1719,26 @@ function featureChange(sessionId, now) {
   return `[Agent Code] The user changed settings since earlier in this conversation: ${gone.map((id) => FEATURE_GONE[id]).join("; ")}. Earlier instructions about ${gone.length === 1 ? "this" : "these"} no longer apply.`
 }
 
+// Claude Code's reply to a background task's note when there is nothing to say: not shown in the chat.
+const NO_REPLY = /^\s*No response requested\.?\s*$/i
+
+/** A background task's failure in a few words ("Agent "Review" failed: 5-hour limit, resets 22:40"). */
+function shortFailure(summary) {
+  return String(summary)
+    .replace(/Agent terminated early due to an API error:\s*/i, "")
+    .replace(/\s*\(error type [^)]*\)\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200)
+}
+
+/** From a <task-notification> note: one short line if the task failed, else nothing. */
+function taskFailure(text) {
+  const status = text.match(/<status>([^<]*)<\/status>/)?.[1]
+  if (!status || status === "completed" || status === "stopped") return undefined
+  return shortFailure(text.match(/<summary>([\s\S]*?)<\/summary>/)?.[1] ?? "A background task failed")
+}
+
 const PICK_PROMPT =
   "When delegating to subagents (the Agent tool), choose each subagent's model and effort to fit the task: haiku with low effort for searches, file reading and mechanical edits; sonnet for ordinary implementation; opus with higher effort only for hard reasoning. You may set the Agent tool's model and effort parameters for this without being asked."
 const providerPrompt = (lines          ) =>
@@ -1644,18 +1755,19 @@ function subagentHooks(main              , effort                               
           // Routing: every delegation goes to one of the user's routed types, with exactly its model and variant.
           if (routes?.size) {
             const type = next.subagent_type || "general-purpose"
-            const target = routes.has(type) ? type : BUILTIN_ROUTES[type]
-            if (target) {
-              next.subagent_type = target
-              delete next.model
-              delete next.effort
-            }
+            let target = routes.has(type) ? type : BUILTIN_ROUTES[type]
+            // web-fetch goes to browsing when that kind is on, else to the simple level.
+            if (target && !routes.has(target)) target = "simple-task"
+            if (target) next.subagent_type = target
+            // Every other type (the user's own agents, fork) keeps its definition, but Claude can't pick a model for it.
+            delete next.model
+            delete next.effort
             if (JSON.stringify(next) === JSON.stringify(input.tool_input ?? {})) return {}
             return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: next } }
           }
           // Orchestrator mode: its own subagent types, reasoning kept within what the user allows.
           if (orch?.types.size) {
-            orchestrateCall(orch, next)
+            orchestrateCall(orch, next, effort())
             if (JSON.stringify(next) === JSON.stringify(input.tool_input ?? {})) return {}
             return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: next } }
           }
@@ -1708,9 +1820,15 @@ const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expire
  * A harness's own instructions home: AGENTS.md with Agent Code's prompt, plus the user's ~/.agents/AGENTS.md (the
  * folder this replaces) when there is one. Returns the folder.
  */
-function writeHarnessInstructions(id, text) {
-  const dir = path.join(stateDir, `${id}-agents`)
+function writeHarnessInstructions(id, text, sessionId) {
+  // One folder per conversation: tabs with different agent mixes don't overwrite each other's instructions.
+  const root = path.join(stateDir, `${id}-agents`)
+  const dir = path.join(root, String(sessionId ?? "new").replace(/[^a-zA-Z0-9_-]/g, "") || "new")
   mkdirSync(dir, { recursive: true })
+  try {
+    const all = readdirSync(root).map((name) => ({ name, time: statSync(path.join(root, name)).mtimeMs })).sort((a, b) => b.time - a.time)
+    for (const old of all.slice(60)) rmSync(path.join(root, old.name), { recursive: true, force: true })
+  } catch {}
   let own = ""
   try {
     own = readFileSync(path.join(os.homedir(), ".agents", "AGENTS.md"), "utf8").trim()
@@ -1784,6 +1902,7 @@ export function createSession(seed             ) {
     outputStyle: from?.outputStyle,
     cost: 0,
     liveCost: 0,
+    livePlanCost: 0,
     subCost: 0,
     liveSubCost: 0,
     todos: [],
@@ -1994,8 +2113,9 @@ export function createSession(seed             ) {
         },
       },
     })
-    current = { q, input, generation: gen }
+    current = { q, input, generation: gen, shapedByModel: !!(orch || routes) }
     if (options.sessionId && !store.sessionID) setStore("sessionID", options.sessionId)
+    primeSubagentRead()
     if (goneNote && store.messages.length) appendContext(goneNote)
     void pump(q, gen)
     try {
@@ -2137,7 +2257,7 @@ export function createSession(seed             ) {
     // user's working profile and switches, as Claude gets them (not the parts about Claude-only tools).
     if (harness.instructions) {
       const text = behaviourPrompt([], { sessionId: resume ?? store.sessionID, session: api }, new Set(["acode-memory", "acode-memory-tools", "planning"]))
-      launch.env.DSH_AGENTS_HOME = writeHarnessInstructions(harness.id, text)
+      launch.env.DSH_AGENTS_HOME = writeHarnessInstructions(harness.id, text, resume ?? store.sessionID)
     }
     const mcpServers = harness.mcp ? acpMcpServers() : []
     const client = new AcpClient(store.cwd, {
@@ -2166,6 +2286,8 @@ export function createSession(seed             ) {
     }
     try {
       const hello = await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} })
+      // HTTP MCP servers only where the harness says it can take them.
+      if (!hello?.agentCapabilities?.mcpCapabilities?.http) for (let i = mcpServers.length - 1; i >= 0; i--) if (mcpServers[i].type === "http") mcpServers.splice(i, 1)
       // The harness's own version, for the sidebar's version line.
       const info = hello?.agentInfo ?? hello?.agent_info
       if (info?.version) setStore("engineVersion", String(info.version))
@@ -2657,8 +2779,9 @@ export function createSession(seed             ) {
    * resets. Resuming by hand goes on up to 100 %: that window doesn't pause again until it resets.
    */
   function pauseNearLimit() {
-    if (config.pauseNearLimit === false || splitModel(store.model) || store.pause) return
-    const at = config.pauseAt ?? 95
+    const rule = autoPauseFor(store.sessionID)
+    if (!rule.on || splitModel(store.model) || store.pause) return
+    const at = rule.at
     const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
     const windows = [
       limits.fiveHour && { key: "fiveHour", ...limits.fiveHour },
@@ -2854,6 +2977,8 @@ export function createSession(seed             ) {
     } catch (error) {
       log("setModel error", error)
     }
+    // Orchestrator mode and routing build their subagents from the tab's model: they are rebuilt with it.
+    if (current?.shapedByModel && previous !== value && !(await restart())) restartAfterTurn = true
     if (effortChanged) await setEffort(effort)
     // Claude Code knows the new model's window: ask it for the real numbers.
     if (!splitModel(value)) void refreshContext()
@@ -3608,7 +3733,7 @@ export function createSession(seed             ) {
       case "system":
         return handleSystem(message       )
       case "stream_event":
-        if (message.parent_tool_use_id) return
+        if (message.parent_tool_use_id) return childStream(message.parent_tool_use_id, message.event)
         return handleStream(message.event       )
       case "assistant":
         lastWork = Date.now()
@@ -3682,7 +3807,8 @@ export function createSession(seed             ) {
           setStore("skills", reconcile(message.skills ?? []))
           setStore("plugins", reconcile(message.plugins ?? []))
           // Plugins that did not load (Claude Code 2.1.323 reports them to hosts): say so once per start.
-          if (message.plugin_errors?.length)
+          const pluginErrors = JSON.stringify(message.plugin_errors ?? [])
+          if (message.plugin_errors?.length && current && current.pluginErrors !== pluginErrors && (current.pluginErrors = pluginErrors))
             pushNotice(`Plugins that did not load: ${message.plugin_errors.map((item) => `${item.plugin} (${item.message || item.type})`).join("; ")}`, "warning")
           setStore(
             "mcp",
@@ -3767,6 +3893,7 @@ export function createSession(seed             ) {
               part.background = false
             }
           })
+        if (message.status && message.status !== "completed" && message.status !== "stopped") pushNotice(shortFailure(message.summary ?? "A background task failed"), "warning")
         return
       case "notification":
         emit("toast", { message: message.text, variant: message.priority === "high" ? "warning" : "info" })
@@ -3830,6 +3957,7 @@ export function createSession(seed             ) {
     spend.clear()
     counted.clear()
     setStore("liveCost", 0)
+    setStore("livePlanCost", 0)
     setStore("liveSubCost", 0)
     setStore("subCost", 0)
   }
@@ -3853,7 +3981,9 @@ export function createSession(seed             ) {
           (merged.cache_creation_input_tokens ?? 0) * (price.cacheWrite ?? price.input * 1.25)) /
         1e6
       : 0
-    spend.set(id, { usage: merged, model: model ?? before?.model, cost, sub })
+    // Claude models count toward the plan; provider models (a provider tab, routed subagents) don't.
+    const plan = !splitModel(sub ? String(model ?? before?.model ?? "").split("#")[0] : store.model)
+    spend.set(id, { usage: merged, model: model ?? before?.model, cost, sub, plan })
     showSpend()
   }
   function showSpend(force = false) {
@@ -3866,28 +3996,54 @@ export function createSession(seed             ) {
     spendShown = Date.now()
     let all = 0
     let sub = 0
+    let plan = 0
     for (const item of spend.values()) {
       all += item.cost
       if (item.sub) sub += item.cost
+      if (item.plan) plan += item.cost
     }
     batch(() => {
       setStore("liveCost", all)
       setStore("liveSubCost", sub)
+      setStore("livePlanCost", plan)
     })
   }
   /** A turn's result arrived: its total includes everything seen so far, so the estimates are settled. */
   function settleSpend() {
     let sub = 0
+    let plan = 0
     for (const [id, item] of spend) {
       if (item.sub) sub += item.cost
+      if (item.plan) plan += item.cost
       counted.add(id)
     }
     spend.clear()
     batch(() => {
+      settlePlanSpend(self, plan)
       setStore("subCost", (value) => value + sub)
       setStore("liveCost", 0)
       setStore("liveSubCost", 0)
+      setStore("livePlanCost", 0)
     })
+  }
+  // Subagents' replies as they stream (foreground ones; background ones come from their transcripts below).
+  const childStreams = new Map()
+  function childStream(parent, event) {
+    if (event?.type === "message_start") {
+      const id = event.message?.id
+      if (!id) return
+      childStreams.set(parent, { id, model: event.message.model, chars: 0 })
+      noteSpend(id, event.message.model, event.message.usage, true)
+      return
+    }
+    const now = childStreams.get(parent)
+    if (!now) return
+    if (event.type === "content_block_delta") {
+      const delta = event.delta ?? {}
+      now.chars += (delta.text?.length ?? 0) + (delta.thinking?.length ?? 0) + (delta.partial_json?.length ?? 0)
+      noteSpend(now.id, now.model, { output_tokens: Math.round(now.chars / 4) }, true)
+    } else if (event.type === "message_delta" && event.usage) noteSpend(now.id, now.model, event.usage, true)
+    else if (event.type === "message_stop") childStreams.delete(parent)
   }
   // Subagents' own transcripts (<project>/<session>/subagents/*.jsonl): read as they grow, while anything runs.
   const subagentRead = new Map()
@@ -3924,9 +4080,18 @@ export function createSession(seed             ) {
       } catch {}
     }
   }
+  /** Start reading subagent transcripts from their current ends (what is there was counted before). */
+  function primeSubagentRead() {
+    subagentRead.clear()
+    if (!store.sessionID) return
+    const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", store.cwd.replace(/[^a-zA-Z0-9]/g, "-"), store.sessionID, "subagents")
+    try {
+      for (const name of readdirSync(dir)) if (name.endsWith(".jsonl")) subagentRead.set(path.join(dir, name), statSync(path.join(dir, name)).size)
+    } catch {}
+  }
   const spendPoll = setInterval(() => {
     if (store.status === "running" || Object.keys(store.tasks).length) readSubagentSpend()
-  }, 3000)
+  }, 2000)
   spendPoll.unref?.()
 
   function liveTokens(chars        ) {
@@ -4211,7 +4376,7 @@ export function createSession(seed             ) {
           )
           if (!part) {
             // Message without streaming (e.g. replayed or synthetic): create it whole.
-            if (kind === "text" && !value?.trim()) continue
+            if (kind === "text" && (!value?.trim() || NO_REPLY.test(value))) continue
             part =
               kind === "text"
                 ? { type: "text", id: `${msg.id}:${randomUUID()}`, text: value, done: true }
@@ -4512,6 +4677,15 @@ function convertHistory(history                                                )
         continue
       }
       if (entry.isMeta) continue
+      // Claude Code's own notes about background tasks are not the user's messages: not shown, except a failure as
+      // one short line. The reply that follows is a turn of its own.
+      if (entry.origin?.kind === "task-notification" || text.startsWith("<task-notification>")) {
+        if (turn) turn.end = turn.end ?? turn.start
+        turn = undefined
+        const failed = taskFailure(text)
+        if (failed) out.push({ type: "notice", id: entry.uuid ?? randomUUID(), text: failed, variant: "warning" })
+        continue
+      }
       const command = text.match(/<command-name>(.*?)<\/command-name>/)
       if (command) {
         const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1]
@@ -4546,7 +4720,7 @@ function convertHistory(history                                                )
       }
       if (msg?.model) turn.model = msg.model
       for (const block of msg?.content ?? []) {
-        if (block.type === "text" && block.text?.trim())
+        if (block.type === "text" && block.text?.trim() && !NO_REPLY.test(block.text))
           turn.parts.push({ type: "text", id: randomUUID(), text: block.text, done: true })
         else if (block.type === "thinking" && block.thinking?.trim())
           turn.parts.push({ type: "reasoning", id: randomUUID(), text: block.thinking, start: 0, end: 0 })

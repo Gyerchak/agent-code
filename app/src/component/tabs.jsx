@@ -71,7 +71,8 @@ export function TabBar() {
     const per = MAX_TITLE + 8
     const fit = Math.max(1, Math.floor((dimensions().width - 20) / per))
     if (list.length <= fit) return list
-    const index = list.indexOf(active())
+    // While a tab is held, the window stays around it (else it could scroll out from under the pointer).
+    const index = list.indexOf(floatX() !== undefined && dragging() ? dragging() : active())
     const start = Math.max(0, Math.min(index - Math.floor(fit / 2), list.length - fit))
     return list.slice(start, start + fit)
   })
@@ -103,6 +104,7 @@ export function TabBar() {
               ref={(r) => boxes.set(session, r)}
               onMouseDown={(event) => {
                 dragged = false
+                setFloatX(undefined)
                 downX = event.x
                 grabOffset = event.x - (boxes.get(session)?.x ?? event.x)
                 setDragging(session)
@@ -147,6 +149,12 @@ export function TabBar() {
                 onMouseOver={over}
                 onMouseUp={(event                             ) => {
                   event.stopPropagation()
+                  // The end of a drag, not a click on ✕.
+                  if (dragged) {
+                    dragged = false
+                    drop()
+                    return
+                  }
                   closeTab(session)
                 }}
               >
