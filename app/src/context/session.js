@@ -11,7 +11,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { execFile, execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeFileSync, statSync } from "node:fs"
 import { diffLines, structuredPatch } from "diff"
 import path from "node:path"
 import { AcpClient, acpContentText, acpToolInput, acpToolName, opencodeApi } from "./acp"
@@ -1556,6 +1556,9 @@ export function createSession(seed             ) {
     version: from?.version ?? claudeVersion,
     outputStyle: from?.outputStyle,
     cost: 0,
+    liveCost: 0,
+    subCost: 0,
+    liveSubCost: 0,
     todos: [],
     files: {},
     tasks: {},
@@ -1846,6 +1849,8 @@ export function createSession(seed             ) {
     limitResetListeners.delete(onLimitReset)
     allSessions.delete(self)
     clearTimeout(mcpPoll)
+    clearInterval(spendPoll)
+    clearTimeout(spendTimer)
     emit("closed")
   }
 
@@ -2804,6 +2809,7 @@ export function createSession(seed             ) {
       setStore("title", undefined)
       setStore("cost", 0)
       setStore("lastResultCost", 0)
+      resetSpend()
       setStore("context", undefined)
       setStore("todos", [])
       setStore("files", {})
@@ -3569,9 +3575,121 @@ export function createSession(seed             ) {
   let liveBase = 0
   let liveOutput = 0
   let liveShown = 0
+
+  // Live spend, counted like the tokens: every API reply of this session so far (the main agent's as it streams,
+  // each subagent's, background ones read from their transcripts) priced per model from the catalog. Claude Code's
+  // own total (the result's total_cost_usd, subagents included) replaces the estimate at the end of every turn.
+  const spend = new Map()
+  const counted = new Set()
+  let spendShown = 0
+  let spendTimer
+  function resetSpend() {
+    spend.clear()
+    counted.clear()
+    setStore("liveCost", 0)
+    setStore("liveSubCost", 0)
+    setStore("subCost", 0)
+  }
+  function priceOf(model, sub) {
+    if (sub) {
+      const value = String(model ?? "").split("#")[0]
+      return modelMeta(value || store.model).price
+    }
+    return modelMeta(store.model, model && model !== "<synthetic>" ? model : undefined).price
+  }
+  function noteSpend(id, model, usage, sub = false) {
+    if (!id || !usage || counted.has(id)) return
+    const before = spend.get(id)
+    const merged = { ...(before?.usage ?? {}) }
+    for (const [key, value] of Object.entries(usage)) if (typeof value === "number") merged[key] = value
+    const price = priceOf(model ?? before?.model, sub)
+    const cost = price
+      ? ((merged.input_tokens ?? 0) * price.input +
+          (merged.output_tokens ?? 0) * price.output +
+          (merged.cache_read_input_tokens ?? 0) * (price.cacheRead ?? price.input * 0.1) +
+          (merged.cache_creation_input_tokens ?? 0) * (price.cacheWrite ?? price.input * 1.25)) /
+        1e6
+      : 0
+    spend.set(id, { usage: merged, model: model ?? before?.model, cost, sub })
+    showSpend()
+  }
+  function showSpend(force = false) {
+    // At most a few updates a second.
+    if (!force && Date.now() - spendShown < 300) {
+      clearTimeout(spendTimer)
+      spendTimer = setTimeout(() => showSpend(true), 320)
+      return
+    }
+    spendShown = Date.now()
+    let all = 0
+    let sub = 0
+    for (const item of spend.values()) {
+      all += item.cost
+      if (item.sub) sub += item.cost
+    }
+    batch(() => {
+      setStore("liveCost", all)
+      setStore("liveSubCost", sub)
+    })
+  }
+  /** A turn's result arrived: its total includes everything seen so far, so the estimates are settled. */
+  function settleSpend() {
+    let sub = 0
+    for (const [id, item] of spend) {
+      if (item.sub) sub += item.cost
+      counted.add(id)
+    }
+    spend.clear()
+    batch(() => {
+      setStore("subCost", (value) => value + sub)
+      setStore("liveCost", 0)
+      setStore("liveSubCost", 0)
+    })
+  }
+  // Subagents' own transcripts (<project>/<session>/subagents/*.jsonl): read as they grow, while anything runs.
+  const subagentRead = new Map()
+  function readSubagentSpend() {
+    if (!store.sessionID || splitModel(store.model)) return
+    const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", store.cwd.replace(/[^a-zA-Z0-9]/g, "-"), store.sessionID, "subagents")
+    let files
+    try {
+      files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"))
+    } catch {
+      return
+    }
+    for (const name of files) {
+      const file = path.join(dir, name)
+      try {
+        const size = statSync(file).size
+        const from = subagentRead.get(file) ?? 0
+        if (size <= from) continue
+        const fd = openSync(file, "r")
+        const buffer = Buffer.alloc(size - from)
+        readSync(fd, buffer, 0, buffer.length, from)
+        closeSync(fd)
+        const text = buffer.toString("utf8")
+        const end = text.lastIndexOf("\n") + 1
+        subagentRead.set(file, from + Buffer.byteLength(text.slice(0, end)))
+        for (const line of text.slice(0, end).split("\n")) {
+          if (!line.includes('"usage"')) continue
+          try {
+            const entry = JSON.parse(line)
+            const message = entry.message
+            if (entry.type === "assistant" && message?.id && message.usage) noteSpend(message.id, message.model, message.usage, true)
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+  const spendPoll = setInterval(() => {
+    if (store.status === "running" || Object.keys(store.tasks).length) readSubagentSpend()
+  }, 3000)
+  spendPoll.unref?.()
+
   function liveTokens(chars        ) {
     if (!chars) return
     liveOutput += chars / 4
+    if (currentStreamMessage) noteSpend(currentStreamMessage, store.modelId, { output_tokens: Math.round(liveOutput) })
     // At most a few updates a second.
     if (Date.now() - liveShown < 250 || !liveBase) return
     liveShown = Date.now()
@@ -3587,6 +3705,7 @@ export function createSession(seed             ) {
         streamFirst = 0
         ensureTurn()
         const usage = event.message?.usage
+        noteSpend(currentStreamMessage, event.message?.model, usage)
         const input = (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0)
         liveOutput = 0
         if (input > 0) {
@@ -3598,6 +3717,7 @@ export function createSession(seed             ) {
       case "message_delta": {
         // Same measure as opencode's Zen gateway: output tokens / (last byte − first byte).
         const output = event.usage?.output_tokens
+        if (currentStreamMessage && event.usage) noteSpend(currentStreamMessage, undefined, event.usage)
         if (typeof output !== "number" || !streamFirst) return
         const ms = Date.now() - streamFirst
         streamFirst = 0
@@ -3711,6 +3831,7 @@ export function createSession(seed             ) {
 
   function childAssistant(parent        , message     ) {
     const msg = message.message
+    if (msg?.id && msg.usage && msg.model !== "<synthetic>") noteSpend(msg.id, msg.model, msg.usage, true)
     const blocks = msg?.content ?? []
     childTurn(parent, (turn) => {
       if (msg?.model && msg.model !== "<synthetic>") turn.model = msg.model
@@ -3805,6 +3926,7 @@ export function createSession(seed             ) {
       childAssistant(message.parent_tool_use_id, message)
       return
     }
+    if (msg?.id && msg.usage && msg.model !== "<synthetic>") noteSpend(msg.id, msg.model, msg.usage)
     if (message.context_usage) {
       const usage = message.context_usage
       setStore("context", { tokens: usage.total_tokens, percent: usage.percentage, max: usage.raw_max_tokens })
@@ -3936,6 +4058,9 @@ export function createSession(seed             ) {
           message.total_cost_usd >= store.lastResultCost ? message.total_cost_usd - store.lastResultCost : message.total_cost_usd
         setStore("cost", (cost) => cost + delta)
         setStore("lastResultCost", message.total_cost_usd)
+        // Read what subagents wrote last, then let Claude Code's exact total stand for all of it.
+        readSubagentSpend()
+        settleSpend()
         // Claude on the plan: count it toward the plan's measured worth (see planRate).
         if (catalog.plan && !splitModel(store.model)) notePlanSpend(delta)
       }

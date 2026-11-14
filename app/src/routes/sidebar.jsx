@@ -62,7 +62,7 @@ export function resetsIn(at         ) {
 
 export function ContextSection() {
   return (
-    <Show when={store.context || store.cost > 0}>
+    <Show when={store.context || store.cost + (store.liveCost ?? 0) > 0}>
       <box>
         <text fg={theme.text}>
           <b>Context</b>
@@ -77,8 +77,16 @@ export function ContextSection() {
             </>
           )}
         </Show>
-        <Show when={store.cost > 0}>
-          <text fg={theme.textMuted}>{money.format(store.cost)} spent</text>
+        <Show when={store.cost + (store.liveCost ?? 0) > 0}>
+          <text fg={theme.textMuted}>
+            {store.cost + (store.liveCost ?? 0) < 0.01 ? "<$0.01" : money.format(store.cost + (store.liveCost ?? 0))} spent
+            <Show when={(store.subCost ?? 0) + (store.liveSubCost ?? 0) > 0}>
+              <span style={{ fg: theme.textMuted }}>
+                {" "}
+                · subagents {(store.subCost ?? 0) + (store.liveSubCost ?? 0) < 0.01 ? "<$0.01" : `≈${money.format((store.subCost ?? 0) + (store.liveSubCost ?? 0))}`}
+              </span>
+            </Show>
+          </text>
         </Show>
       </box>
     </Show>
