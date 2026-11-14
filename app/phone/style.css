@@ -65,3 +65,53 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 dialog h3 { margin-top: 0; }
 .check { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* Remote desktop (desktop.js): the PC's screen full-screen, a slim bar, sheets for screens, windows, apps, files */
+body.desk-open > :not(#desk):not(dialog):not(script) { display: none !important; }
+#desk { position: fixed; inset: 0; background: #000; z-index: 10; touch-action: none; user-select: none; -webkit-user-select: none; }
+#desk-stage { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
+#desk-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; image-rendering: auto; }
+.desk-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: min(86vw, 520px); background: rgba(20, 20, 20, 0.92); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; text-align: center; font-size: 14px; }
+.desk-status.error { border-color: var(--red); }
+.desk-status.approval { border-color: var(--yellow); color: var(--yellow); }
+#desk-toast { position: absolute; left: 50%; top: calc(10px + env(safe-area-inset-top)); transform: translateX(-50%); max-width: 86vw; background: rgba(20, 20, 20, 0.92); border-radius: 10px; padding: 8px 14px; font-size: 13px; z-index: 5; pointer-events: none; overflow-wrap: anywhere; }
+.desk-fab { position: absolute; right: calc(10px + env(safe-area-inset-right)); top: calc(10px + env(safe-area-inset-top)); z-index: 4; width: 40px; height: 40px; border-radius: 50%; padding: 0; background: rgba(30, 30, 30, 0.7); border: 1px solid rgba(255, 255, 255, 0.15); font-size: 18px; }
+.desk-fab.left { right: auto; left: calc(10px + env(safe-area-inset-left)); }
+#desk-bar { position: absolute; left: 50%; bottom: calc(8px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; gap: 4px; padding: 6px; background: rgba(20, 20, 20, 0.9); border: 1px solid var(--border); border-radius: 14px; z-index: 4; max-width: 98vw; overflow-x: auto; scrollbar-width: none; }
+#desk-bar button { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 52px; padding: 5px 6px; font-size: 11px; background: none; border: none; }
+#desk-bar button i { font-style: normal; font-size: 19px; line-height: 1.1; }
+#desk-bar button.on { color: var(--accent); }
+#desk-bar button.rec { color: var(--red); }
+#desk-keys { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 4px; padding: 5px; overflow-x: auto; background: rgba(20, 20, 20, 0.95); z-index: 6; scrollbar-width: none; }
+#desk-keys button { flex: 0 0 auto; min-width: 44px; padding: 8px 10px; font-size: 14px; }
+#desk-keys button.on { background: var(--accent); color: #111; }
+#desk-input { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; border: none; padding: 0; resize: none; }
+#desk-sheet { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 7; display: flex; align-items: flex-end; justify-content: center; }
+#desk-sheet[hidden] { display: none; }
+.sheet-card { width: min(100vw, 560px); max-height: 82vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 14px 14px 0 0; padding: 10px 14px calc(14px + env(safe-area-inset-bottom)); touch-action: pan-y; }
+.sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.sheet-label { color: var(--muted); font-size: 12px; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip.on, .desks button.on, .row-item.on { border-color: var(--accent); color: var(--accent); }
+.desks { display: grid; gap: 6px; }
+.desks button { padding: 10px 4px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; margin: 4px 0; gap: 2px; overflow-wrap: anywhere; }
+.row-item.app { flex-direction: row; align-items: center; gap: 10px; }
+.row-item.app > span { display: flex; flex-direction: column; min-width: 0; }
+.row-item.app img, .row-item .letter { width: 32px; height: 32px; flex: 0 0 32px; border-radius: 6px; object-fit: contain; }
+.row-item .letter { display: grid; place-items: center; background: var(--element); color: var(--accent); font-weight: 700; }
+.file-row { flex-direction: row; align-items: center; gap: 8px; }
+.file-row > span:nth-child(1) { flex: 1; }
+.path { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.search { width: 100%; background: var(--element); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; margin-bottom: 6px; color: var(--text); }
+#desk-game { position: absolute; inset: 0; z-index: 3; }
+#game-look { position: absolute; top: 0; right: 0; bottom: 0; left: 38%; touch-action: none; }
+#game-joy { position: absolute; left: calc(5vmin + env(safe-area-inset-left)); bottom: 7vmin; width: 38vmin; height: 38vmin; border-radius: 50%; background: rgba(255, 255, 255, 0.08); border: 2px solid rgba(255, 255, 255, 0.25); touch-action: none; }
+#game-knob { position: absolute; left: 30%; top: 30%; width: 40%; height: 40%; border-radius: 50%; background: rgba(255, 255, 255, 0.35); pointer-events: none; }
+#game-keys { position: absolute; right: calc(10px + env(safe-area-inset-right)); bottom: 7vmin; display: grid; grid-template-columns: repeat(4, 15vmin); gap: 2vmin; }
+.gk { height: 15vmin; border-radius: 50%; background: rgba(255, 255, 255, 0.1); border: 2px solid rgba(255, 255, 255, 0.3); font-size: 4vmin; font-weight: 700; padding: 0; touch-action: none; }
+.gk.mouse { background: rgba(92, 156, 245, 0.18); border-color: rgba(92, 156, 245, 0.55); }
+.gk.edit { border-style: dashed; border-color: var(--accent); }
+.game-tools { position: absolute; left: calc(10px + env(safe-area-inset-left)); top: calc(10px + env(safe-area-inset-top)); display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.game-tools button { padding: 5px 10px; background: rgba(30, 30, 30, 0.75); }
+#desk [hidden] { display: none !important; }

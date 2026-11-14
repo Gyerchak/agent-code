@@ -21,25 +21,49 @@ export function TabBar() {
   const [hover, setHover] = createSignal        ()
   let events = 0
   let lastOver = 0
-  // Dragging a tab along the strip reorders it, like browser tabs: the tab follows the pointer over its neighbours.
+  // Dragging a tab works like grabbing a browser tab: the grabbed cell stays under the pointer (the tab floats along
+  // the strip, its place shown as an empty slot), neighbours give way once its middle passes theirs, and moving off
+  // the strip vertically doesn't drop it.
   const boxes = new Map()
+  let bar
   const [dragging, setDragging] = createSignal()
+  const [floatX, setFloatX] = createSignal()
   let dragged = false
+  let grabOffset = 0
+  let downX = 0
+  const floatLeft = (session, x) => {
+    const box = boxes.get(session)
+    const width = box?.width ?? MAX_TITLE
+    // It slides within the tabs, as in a browser: from the first tab's start to the last one's end.
+    const places = visible().map((item) => boxes.get(item)).filter((place) => place && !place.isDestroyed)
+    const min = places.length ? Math.min(...places.map((place) => place.x)) : (bar?.x ?? 0) + 1
+    const max = places.length ? Math.max(...places.map((place) => place.x + place.width)) - width : (bar?.x ?? 0) + (bar?.width ?? dimensions().width) - width - 1
+    return Math.max(min, Math.min(Math.max(min, max), x - grabOffset))
+  }
   const dragOver = (session, event) => {
     if (dragging() !== session) return
-    for (const [other, box] of boxes) {
-      if (other === session || box.isDestroyed) continue
-      // Past the middle of a neighbour: take its place.
-      const middle = box.x + box.width / 2
-      const from = tabs().indexOf(session)
+    if (!dragged && event.x === downX) return
+    dragged = true
+    setFloatX(event.x)
+    const box = boxes.get(session)
+    if (!box || box.isDestroyed) return
+    const middle = floatLeft(session, event.x) + box.width / 2
+    const from = tabs().indexOf(session)
+    // The farthest neighbour whose middle the floating tab has passed: take its place.
+    let target = from
+    for (const [other, place] of boxes) {
+      if (other === session || place.isDestroyed) continue
       const to = tabs().indexOf(other)
-      if (to < 0 || event.y !== box.y) continue
-      if ((to > from && event.x >= middle && event.x < box.x + box.width) || (to < from && event.x < middle && event.x >= box.x)) {
-        dragged = true
-        moveTabTo(session, to)
-        return
-      }
+      if (to < 0) continue
+      const center = place.x + place.width / 2
+      if (to > from && middle > center && to > target) target = to
+      if (to < from && middle < center && (target === from || to < target)) target = to
     }
+    if (target !== from) moveTabTo(session, target)
+  }
+  const drop = () => {
+    setDragging(undefined)
+    setFloatX(undefined)
   }
   // Keep a window of tabs around the focused one when they don't all fit.
   const visible = createMemo(() => {
@@ -53,7 +77,7 @@ export function TabBar() {
   })
   const hidden = createMemo(() => tabs().length - visible().length)
   return (
-    <box height={1} flexShrink={0} flexDirection="row" backgroundColor={theme.backgroundPanel} paddingLeft={1} paddingRight={1}>
+    <box ref={(r) => (bar = r)} height={1} flexShrink={0} flexDirection="row" backgroundColor={theme.backgroundPanel} paddingLeft={1} paddingRight={1}>
       <For each={visible()}>
         {(session) => {
           const index = () => tabs().indexOf(session) + 1
@@ -66,20 +90,25 @@ export function TabBar() {
             setHover(session.key)
           }
           const attention = () => session.store.permissions.length > 0 || session.store.questions.length > 0 || session.store.unseen === "attention"
+          // While it floats, the tab's own place in the strip is an empty slot of the same width.
+          const slot = () => dragging() === session && floatX() !== undefined
+          const ink = (color) => (slot() ? theme.background : color)
           return (
             <box
               flexDirection="row"
               paddingLeft={1}
               paddingRight={1}
               gap={1}
-              backgroundColor={dragging() === session ? theme.backgroundElement : focused() ? theme.backgroundElement : undefined}
+              backgroundColor={slot() ? theme.background : dragging() === session ? theme.backgroundElement : focused() ? theme.backgroundElement : undefined}
               ref={(r) => boxes.set(session, r)}
-              onMouseDown={() => {
+              onMouseDown={(event) => {
                 dragged = false
+                downX = event.x
+                grabOffset = event.x - (boxes.get(session)?.x ?? event.x)
                 setDragging(session)
               }}
               onMouseDrag={(event) => dragOver(session, event)}
-              onMouseDragEnd={() => setDragging(undefined)}
+              onMouseDragEnd={drop}
               onMouseOver={over}
               onMouseOut={() => {
                 // Out of the box then over one of its children arrives as out → over: wait a tick before collapsing.
@@ -88,7 +117,7 @@ export function TabBar() {
               }}
               onMouseUp={() => {
                 const held = dragging()
-                setDragging(undefined)
+                drop()
                 // Released on another tab: the held tab goes there (and stays the one in front).
                 if (held && held !== session && !held.disposed) {
                   moveTabTo(held, tabs().indexOf(session))
@@ -98,23 +127,23 @@ export function TabBar() {
                 focusTab(held && dragged ? held : session)
               }}
             >
-              <text selectable={false} fg={theme.textMuted}>{index() <= 9 ? index() : "·"}</text>
+              <text selectable={false} fg={ink(theme.textMuted)}>{index() <= 9 ? index() : "·"}</text>
               <Show
                 when={running()}
                 fallback={
                   <Show when={attention() || session.store.unseen === "done"}>
-                    <text selectable={false} fg={attention() ? theme.warning : theme.success}>●</text>
+                    <text selectable={false} fg={ink(attention() ? theme.warning : theme.success)}>●</text>
                   </Show>
                 }
               >
-                <Spinner color={attention() ? theme.warning : theme.textMuted} />
+                <Spinner color={ink(attention() ? theme.warning : theme.textMuted)} />
               </Show>
-              <text selectable={false} fg={focused() ? theme.text : theme.textMuted} attributes={focused() ? TextAttributes.BOLD : undefined} wrapMode="none">
+              <text selectable={false} fg={ink(focused() ? theme.text : theme.textMuted)} attributes={focused() ? TextAttributes.BOLD : undefined} wrapMode="none">
                 {label(session)}
               </text>
               {/* The ✕ cell always exists, so moving onto it never collapses the tab under the pointer. */}
               <text
-                fg={hovered() ? theme.error : theme.textMuted}
+                fg={ink(hovered() ? theme.error : theme.textMuted)}
                 onMouseOver={over}
                 onMouseUp={(event                             ) => {
                   event.stopPropagation()
@@ -127,6 +156,28 @@ export function TabBar() {
           )
         }}
       </For>
+      {/* The grabbed tab, drawn where the pointer holds it. */}
+      <Show when={dragging() && floatX() !== undefined}>
+        <box
+          position="absolute"
+          zIndex={20}
+          top={0}
+          left={floatLeft(dragging(), floatX()) - (bar?.x ?? 0)}
+          width={boxes.get(dragging())?.width}
+          height={1}
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={1}
+          gap={1}
+          backgroundColor={theme.backgroundElement}
+        >
+          <text selectable={false} fg={theme.primary}>{tabs().indexOf(dragging()) + 1 <= 9 ? tabs().indexOf(dragging()) + 1 : "·"}</text>
+          <text selectable={false} fg={theme.text} attributes={TextAttributes.BOLD} wrapMode="none">
+            {label(dragging())}
+          </text>
+          <text selectable={false} fg={theme.textMuted}>{" "}</text>
+        </box>
+      </Show>
       <Show when={hidden() > 0}>
         <text selectable={false} fg={theme.textMuted} onMouseUp={() => runCommand("session.list")}>
           {" "}+{hidden()} more

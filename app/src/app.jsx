@@ -1,10 +1,10 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
 import { TextAttributes } from "@opentui/core"
-import { authFile, harnessStatus, importFromOpencode, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
+import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
 import { billingLabel, catalog, CLAUDE_IDS, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
-import { lanAddress, phoneLink, phoneQr, phoneServerState, phoneSettings, phoneToken, setPhoneSetting, startPhoneServer, stopPhoneServer } from "./context/remote"
+import { desktopState, lanAddress, phoneLink, phoneQr, phoneServerState, phoneSettings, phoneToken, setPhoneSetting, setupDesktop, startPhoneServer, stopDesktop, stopPhoneServer } from "./context/remote"
 import { execFile } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { dropsBlocked, selectionWithPaths, textWithPaths } from "./context/attachments"
@@ -41,7 +41,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, pollPlanUsage, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -461,9 +461,10 @@ function DialogPauseAt(props) {
         config.pauseAt = Number(option.value)
         if (config.pauseNearLimit === false) config.pauseNearLimit = true
         saveConfig()
-        if (props.back) dialog.replace(() => <DialogSettings />, undefined, "large")
-        else dialog.clear()
         toast.show({ variant: "success", message: `Pausing at ${option.value}% of a plan limit` })
+        if (props.stacked) dialog.pop()
+        else if (props.back) dialog.replace(() => <DialogSettings />, undefined, "large")
+        else dialog.clear()
       }}
     />
   )
@@ -1461,6 +1462,14 @@ function DialogPhone() {
       { title: "Public address", value: "address", description: s.address || "none (the link uses the local address)", footer: "set", category: "Address" },
       { title: "HTTPS", value: "tls", description: s.tls === "off" ? "off (fine on a home network)" : "self-signed certificate (accept it once on the phone)", gutter: box(s.tls !== "off"), category: "Address" },
       { title: "Files to the phone", value: "files", description: "phones may download the files a chat attached, wrote or edited", gutter: box(s.files), category: "Phone" },
+      { title: "Remote desktop", value: "desktop.on", description: s.tls === "off" ? "screen, sound, mouse and keys on the phone (needs HTTPS)" : "screen, sound, mouse and keys on the phone, on demand", gutter: box(s.desktop), category: "Remote desktop" },
+      {
+        title: "Approve on this PC…",
+        value: "desktop",
+        description: desktopState().running ? `sharing now · ${desktopState().viewers} viewer${desktopState().viewers === 1 ? "" : "s"}` : "starts screen sharing once so KDE asks here, not when you're away",
+        category: "Remote desktop",
+        disabled: !s.enabled || !s.desktop,
+      },
       { title: "New pairing token", value: "token", description: "unpairs every phone", category: "Phone" },
     ]
   })
@@ -1482,6 +1491,17 @@ function DialogPhone() {
           setPhoneSetting("tls", s.tls === "off" ? "self-signed" : "off")
           restart()
         } else if (option.value === "files") setPhoneSetting("files", !s.files)
+        else if (option.value === "desktop.on") {
+          setPhoneSetting("desktop", !s.desktop)
+          if (s.desktop) stopDesktop(true)
+        } else if (option.value === "desktop") {
+          try {
+            setupDesktop()
+            toast.show({ variant: "info", title: "Remote desktop", message: "KDE asks which screens to share and to allow remote control: choose both screens and tick \"remember\". It stops by itself after a minute.", duration: 12000 })
+          } catch (error) {
+            toast.show({ variant: "error", title: "Remote desktop", message: String(error?.message ?? error), duration: 8000 })
+          }
+        }
         else if (option.value === "token") {
           phoneToken(true)
           toast.show({ variant: "info", message: "New token: pair your phones again", duration: 4000 })
@@ -1981,6 +2001,18 @@ function DialogSettings() {
     { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
     { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
+    {
+      key: "subagent.routing",
+      title: "Subagent routing",
+      get: () => subagentRouting().enabled,
+      set: (value) => {
+        config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: value }
+        // Routing needs subagents at all.
+        if (value && config.subagents === false) config.subagents = true
+        saveConfig()
+      },
+      restart: true,
+    },
     { key: "transcriptDetail", title: "Transcript detail", description: "low: each run of steps is one row · medium: every step · high: thoughts open too", get: () => true, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
     { key: "attachmentPreviews", title: "Attachment previews", description: "image thumbnails and file heads in the chat", get: flag("attachmentPreviews", true), set: write("attachmentPreviews") },
@@ -1989,6 +2021,16 @@ function DialogSettings() {
     { key: "settings.restore", title: "Restore saved settings…", description: "put a saved set of settings back", get: () => false, set: () => {} },
     { key: "settings.reset", title: "Reset to defaults", description: "every setting back to default (saved first; tabs, history and keys stay)", get: () => false, set: () => {} },
   ]
+  // Right-click (or ctrl+o) on a row: its own settings, where it has some.
+  const configure = (key) => {
+    const setting = settings.find((item) => item.key === key)
+    const back = () => setTick((value) => value + 1)
+    if (setting?.tier) return dialog.push(() => <DialogPriority tier={setting.tier} onClose={back} />)
+    if (key === "subagent.routing") return openRouting(back)
+    if (key === "fable.fallback") return dialog.push(() => <DialogFableFallback />)
+    if (key === "fable.upgrade") return dialog.push(() => <DialogFableUpgrade />)
+    if (key === "pauseAt") return dialog.push(() => <DialogPauseAt stacked />)
+  }
   const options = createMemo(() => {
     tick()
     return settings.map((setting) => ({
@@ -2035,6 +2077,7 @@ function DialogSettings() {
         }
         if (option.value === "fable.fallback") return dialog.replace(() => <DialogFableFallback />)
         if (option.value === "fable.upgrade") return dialog.replace(() => <DialogFableUpgrade />, undefined, "large")
+
         if (option.value === "settings.save") {
           dialog.replace(() => (
             <DialogPrompt
@@ -2093,20 +2136,24 @@ function DialogSettings() {
         if (!setting) return
         setting.set(!setting.get())
         setTick((value) => value + 1)
+        // Subagent routing turned on for the first time: open its setup right away.
+        if (setting.key === "subagent.routing" && setting.get() && !config.subagentRouting?.configured) {
+          config.subagentRouting = { ...config.subagentRouting, configured: true }
+          saveConfig()
+          openRouting()
+        }
         if (setting.restart) {
           // These change Claude Code's system prompt / tools: restart idle tabs so they apply now.
           for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
           toast.show({ variant: "info", message: "Applied to idle sessions; running ones pick it up when restarted", duration: 3000 })
         }
       }}
+      onRightClick={(option) => configure(option.value)}
       actions={[
         {
           keybind: "ctrl+o",
-          label: "prioritise (subagent tiers)",
-          run: (option) => {
-            const setting = settings.find((item) => item.key === option.value)
-            if (setting?.tier) dialog.push(() => <DialogPriority tier={setting.tier } onClose={() => setTick((value) => value + 1)} />)
-          },
+          label: "configure (or right-click)",
+          run: (option) => configure(option.value),
         },
       ]}
       footer={
@@ -2114,6 +2161,167 @@ function DialogSettings() {
           enter <span style={{ fg: theme.textMuted }}>toggle</span>
         </text>
       }
+    />
+  )
+}
+
+/** A routed slot's model and variant in a few words ("Sonnet 5.5 · high"). */
+function routeLabel(slot) {
+  const model =
+    slot.model === "same"
+      ? "session's model"
+      : (claudeModels().find((item) => item.value === slot.model)?.displayName ?? (splitModel(slot.model) ? `${splitModel(slot.model).model} (${providerName(slot.model)})` : slot.model))
+  return slot.effort ? `${model} · ${slot.effort}` : model
+}
+
+function saveRoute(slot, change) {
+  const [group, key] = slot.split(":")
+  const field = group === "kind" ? "kinds" : "levels"
+  const own = config.subagentRouting ?? {}
+  config.subagentRouting = { ...own, configured: true, [field]: { ...(own[field] ?? {}), [key]: { ...(own[field]?.[key] ?? {}), ...change } } }
+  saveConfig()
+}
+
+/**
+ * Subagent routing (right-click on its Settings row): which exact model and variant runs each delegated task. Task
+ * types first (each on/off), then the complexity levels used for everything else.
+ */
+let routingChanged = false
+
+/** Open the routing setup on top of the current dialog; idle tabs restart once it closes, if anything changed. */
+function openRouting(back) {
+  dialog.push(
+    () => <DialogSubagentRouting />,
+    () => {
+      back?.()
+      // Subagent types live in Claude Code's start options: idle tabs restart to pick up the change.
+      if (!routingChanged) return
+      routingChanged = false
+      for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+    },
+  )
+}
+
+function DialogSubagentRouting() {
+  const [tick, setTick] = createSignal(0)
+  const bump = () => {
+    routingChanged = true
+    setTick((value) => value + 1)
+  }
+  const options = createMemo(() => {
+    tick()
+    const rule = subagentRouting()
+    const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
+    return [
+      { title: "Subagent routing", value: "enabled", footer: rule.enabled ? "on" : "off", gutter: box(rule.enabled) },
+      ...ROUTE_KINDS.map((item) => ({
+        title: item.title,
+        value: `kind:${item.key}`,
+        category: "Task types (off: complexity decides)",
+        footer: rule.kinds[item.key].on ? routeLabel(rule.kinds[item.key]) : "off",
+        gutter: box(rule.kinds[item.key].on),
+      })),
+      ...ROUTE_LEVELS.map((item) => ({
+        title: item.title,
+        value: `level:${item.key}`,
+        category: "By complexity (everything else)",
+        footer: routeLabel(rule.levels[item.key]),
+        gutter: <text fg={theme.textMuted}>{" › "}</text>,
+      })),
+    ]
+  })
+  const pick = (value) => {
+    if (value === "enabled") return
+    dialog.push(() => <DialogRouteModel slot={value} onDone={bump} />)
+  }
+  return (
+    <DialogSelect
+      title="Subagent routing"
+      options={options()}
+      flatten
+      onSelect={(option) => {
+        if (option.value === "enabled") {
+          const on = !subagentRouting().enabled
+          config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: on }
+          if (on && config.subagents === false) config.subagents = true
+          saveConfig()
+          return bump()
+        }
+        if (option.value.startsWith("kind:")) {
+          saveRoute(option.value, { on: !subagentRouting().kinds[option.value.slice(5)].on })
+          return bump()
+        }
+        pick(option.value)
+      }}
+      onRightClick={(option) => pick(option.value)}
+      actions={[{ keybind: "ctrl+o", label: "model and variant", run: (option) => pick(option.value) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>on/off</span> · right-click <span style={{ fg: theme.textMuted }}>model</span>
+        </text>
+      }
+    />
+  )
+}
+
+/** Any model for one routed slot: the session's own, every Claude model, or a provider model (not harness ones). */
+function DialogRouteModel(props) {
+  const [tick, setTick] = createSignal(0)
+  onMount(() => void refreshProviders().then(() => setTick((value) => value + 1)))
+  const [group, key] = props.slot.split(":")
+  const current = () => subagentRouting()[group === "kind" ? "kinds" : "levels"][key]
+  const title = [...ROUTE_KINDS, ...ROUTE_LEVELS].find((item) => item.key === key)?.title ?? key
+  const options = createMemo(() => {
+    tick()
+    const favs = favorites()
+    const claude = claudeModels().map((model) => ({
+      title: model.displayName,
+      value: model.value,
+      category: model.older ? "Anthropic · older" : "Anthropic",
+      description: favs.includes(model.value) ? "favourite" : undefined,
+    }))
+    const external = providers.list.flatMap((provider) =>
+      provider.models
+        .filter((model) => !model.appOnly)
+        .map((model) => ({ value: `${provider.id}/${model.id}`, title: model.label ?? model.id, category: provider.name }))
+        .filter((item) => providerKind(item.value) !== "harness")
+        .map((item) => ({ ...item, description: favs.includes(item.value) ? "favourite" : undefined, footer: billingLabel(modelMeta(item.value), providerName(item.value)) })),
+    )
+    return [{ title: "Session's model", value: "same", category: "Session", description: "whatever model the tab runs" }, ...claude.filter((item) => item.category === "Anthropic"), ...external, ...claude.filter((item) => item.category !== "Anthropic")]
+  })
+  return (
+    <DialogSelect
+      title={`${title}: model`}
+      options={options()}
+      current={current().model}
+      onSelect={(option) => {
+        const levels = option.value === "same" ? variantsOf(store.model) : variantsOf(option.value)
+        if (!levels.length) {
+          saveRoute(props.slot, { model: option.value, effort: null })
+          props.onDone()
+          return dialog.pop()
+        }
+        dialog.pop()
+        dialog.push(() => <DialogRouteVariant slot={props.slot} model={option.value} title={`${title}: ${option.title}`} levels={levels} onDone={props.onDone} />)
+      }}
+    />
+  )
+}
+
+/** The variant (reasoning level) for a routed slot's model. */
+function DialogRouteVariant(props) {
+  const [group, key] = props.slot.split(":")
+  const now = subagentRouting()[group === "kind" ? "kinds" : "levels"][key]
+  return (
+    <DialogSelect
+      title={`${props.title} · variant`}
+      current={now.model === props.model ? (now.effort ?? "default") : undefined}
+      options={[{ title: "Default", value: "default", description: "the model's own default" }, ...props.levels.map((level) => ({ title: level, value: level }))]}
+      onSelect={(option) => {
+        saveRoute(props.slot, { model: props.model, effort: option.value === "default" ? null : option.value })
+        props.onDone()
+        dialog.pop()
+      }}
     />
   )
 }

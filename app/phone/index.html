@@ -16,7 +16,10 @@
   <body>
     <header>
       <div class="brand"><span class="dot" id="dot"></span><b>Agent Code</b> <span id="host" class="muted"></span></div>
-      <button id="settings-button" class="icon" aria-label="Settings">⚙</button>
+      <div class="row">
+        <button id="desktop-button" class="icon" aria-label="Remote desktop" title="The PC's screen">🖥</button>
+        <button id="settings-button" class="icon" aria-label="Settings">⚙</button>
+      </div>
     </header>
     <nav id="tabs"></nav>
     <main id="chat"><div class="empty muted" id="empty">Connecting…</div></main>
@@ -57,6 +60,47 @@
         <button data-close>Cancel</button>
       </div>
     </dialog>
+    <section id="desk" hidden>
+      <div id="desk-stage"><canvas id="desk-canvas"></canvas></div>
+      <div id="desk-status" class="desk-status" hidden></div>
+      <div id="desk-toast" hidden></div>
+      <div id="desk-game" hidden>
+        <div id="game-look"></div>
+        <div id="game-joy"><div id="game-knob"></div></div>
+        <div id="game-keys"></div>
+        <div class="game-tools">
+          <button id="game-edit">✎ Keys</button>
+          <span id="game-speed" hidden>Look <button id="game-slower">−</button> <b id="game-speed-value"></b> <button id="game-faster">+</button></span>
+        </div>
+      </div>
+      <button id="desk-zoom" class="desk-fab left" hidden aria-label="Zoom out">⤢</button>
+      <button id="desk-more" class="desk-fab" aria-label="Menu">⋯</button>
+      <nav id="desk-bar">
+        <button id="b-keys"><i>⌨</i>Keys</button>
+        <button id="b-voice"><i>🎙</i>Type</button>
+        <button id="b-mic"><i>🎤</i>Talk</button>
+        <button id="b-screens"><i>🖥</i>Screens</button>
+        <button id="b-windows"><i>▤</i>Windows</button>
+        <button id="b-apps"><i>▦</i>Apps</button>
+        <button id="b-files"><i>📁</i>Files</button>
+        <button id="b-game"><i>🎮</i>Game</button>
+        <button id="b-close"><i>✕</i>Close</button>
+      </nav>
+      <div id="desk-keys" hidden>
+        <button data-key="esc">Esc</button><button data-key="tab">Tab</button>
+        <button data-mod="ctrl">Ctrl</button><button data-mod="alt">Alt</button><button data-mod="super">⊞</button>
+        <button data-key="left">←</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="right">→</button>
+        <button data-key="home">Home</button><button data-key="end">End</button><button data-key="delete">Del</button>
+        <button data-key="backspace">⌫</button><button data-key="enter">⏎</button>
+      </div>
+      <textarea id="desk-input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Type on the PC"></textarea>
+      <div id="desk-sheet" hidden>
+        <div class="sheet-card">
+          <div class="sheet-head"><b id="sheet-title"></b><button id="sheet-close" class="icon" aria-label="Close">✕</button></div>
+          <div id="sheet-body"></div>
+        </div>
+      </div>
+    </section>
     <script src="app.js" type="module"></script>
   </body>
 </html>

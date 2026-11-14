@@ -408,7 +408,15 @@ export function DialogSelect   (props
                         }}
                         onMouseDrag={dragTo}
                         onMouseDragEnd={() => (dragValue = undefined)}
-                        onMouseUp={() => {
+                        onMouseUp={(event) => {
+                          // Right-click: the row's own settings, where the dialog has them.
+                          if (event?.button === 2 && props.onRightClick) {
+                            dragValue = undefined
+                            const i = flat().indexOf(option)
+                            if (i >= 0) setStore("selected", i)
+                            props.onRightClick(option)
+                            return
+                          }
                           // Released on another row: the held row moves there (drag events don't reach the rows).
                           if (props.onReorder && dragValue !== undefined && dragValue !== option.value) {
                             if (props.onReorder(dragValue, option.value) !== false) {

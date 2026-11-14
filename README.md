@@ -23,6 +23,9 @@ Agent Code drives Claude Code through the Claude Agent SDK and the other harness
   limit resets, a one-click 5-hour reset when Anthropic offers one, and each model's API and effective plan price.
 - **Memory that stays small** — Claude sees only an index of what it remembers and opens a memory when the
   work needs it; each session keeps its own open set, restored after compaction.
+- **Remote desktop on your phone** — on-demand screen and sound, mouse, keyboard, voice typing and a game
+  mode, from the same phone app (KDE Plasma on Wayland).
+- **Subagent routing** — fix the exact model and variant for each kind of delegated task and each complexity level.
 - **Extensible** — Claude Code mods (plugins with UI) are drawn in Agent Code; Agent Code has its own plugin API as well.
 - **33 themes**, subagent views, MCP servers, skills, voice input/output (optional), and much more.
 

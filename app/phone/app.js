@@ -1,6 +1,8 @@
 // Agent Code on a phone: shows the tabs and chats of Agent Code running on a computer, sends prompts and files, stops, pauses
 // and answers permission prompts. The computer does the work; this page only talks to Agent Code's phone server.
 
+import { openDesktop } from "./desktop.js"
+
 const $ = (id) => document.getElementById(id)
 
 // Phones paired before the rename kept their token under "occ.…": carry it over once, so they stay paired.
@@ -118,6 +120,7 @@ async function refreshState() {
   state.tabs = data.tabs
   state.serverFiles = data.files
   $("host").textContent = data.host
+  $("desktop-button").hidden = data.desktop?.available === false
   $("paired").textContent = data.host
   if (!state.tabs.some((tab) => tab.key === state.current)) state.current = state.tabs[0]?.key ?? ""
   renderTabs()
@@ -246,6 +249,7 @@ $("show-tools").onchange = (event) => {
   renderChat()
 }
 $("close-settings").onclick = () => $("settings").close()
+$("desktop-button").onclick = () => (state.token ? openDesktop(state.token) : showError("Pair this phone first"))
 $("unpair").onclick = () => {
   localStorage.removeItem("acode.token")
   location.reload()

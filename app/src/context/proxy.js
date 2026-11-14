@@ -147,7 +147,8 @@ async function routed(router        , route        , query                    , 
   try {
     body = raw ? JSON.parse(raw.toString("utf8")) : undefined
   } catch {}
-  const target = typeof body?.model === "string" ? await router.resolve(body.model) : undefined
+  // A routed subagent's model may carry its variant after "#": resolve the model without it.
+  const target = typeof body?.model === "string" ? await router.resolve(body.model.split("#")[0]) : undefined
   if (!target) {
     // A Claude model (or a non-model call): straight through to Anthropic with Claude Code's own login.
     const headers                         = {}

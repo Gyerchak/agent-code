@@ -29,6 +29,10 @@ export const HARNESSES = [
     args: ["--profile", "acp"],
     install: "npm i -g @deepseek-ai/dsh",
     env: { DEEPSEEK_API_KEY: "deepseek" },
+    // Telemetry hard off (dsh's own switch); Agent Code's instructions and MCP servers go to it too.
+    fixedEnv: { DSH_TELEMETRY_DISABLED: "1" },
+    instructions: true,
+    mcp: true,
   },
   {
     id: "codex",
@@ -46,7 +50,7 @@ export const harnessById = (id) => HARNESSES.find((harness) => harness.id === id
 export function harnessLaunch(harness, keyFor) {
   const command = findBinary(harness.bin)
   if (!command) return undefined
-  const env = {}
+  const env = { ...(harness.fixedEnv ?? {}) }
   for (const [name, provider] of Object.entries(harness.env)) {
     const key = keyFor?.(provider)
     if (key) env[name] = key

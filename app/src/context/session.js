@@ -1256,9 +1256,10 @@ function contextEnv(value        , sent         )                         {
 }
 
 /** `context`: the session the prompt is for ({ sessionId, session }), so a part can differ per session. */
-export function behaviourPrompt(extra           = [], context = {}) {
+export function behaviourPrompt(extra           = [], context = {}, skip = new Set()) {
   const parts           = []
-  for (const part of promptParts.values()) {
+  for (const [id, part] of promptParts) {
+    if (skip.has(id)) continue
     try {
       const text = part(context)?.trim()
       if (text) parts.push(text)
@@ -1266,7 +1267,7 @@ export function behaviourPrompt(extra           = [], context = {}) {
       log("prompt part failed", error)
     }
   }
-  if (config.planning) parts.push(PLANNING_PROMPT)
+  if (config.planning && !skip.has("planning")) parts.push(PLANNING_PROMPT)
   if (config.runTests === false) parts.push(NO_TESTS_PROMPT)
   if (config.askQuestions === false) parts.push(NO_QUESTIONS_PROMPT)
   parts.push(...extra)
@@ -1323,12 +1324,95 @@ function providerAgents(main        )                                           
   return { agents, lines }
 }
 
+// ---------------------------------------------------------------------------
+// Subagent routing (Settings → Subagent routing, right-click to set up): the user fixes the exact model and
+// variant of every delegated task, by kind of work and otherwise by complexity. Each slot becomes a subagent type;
+// a PreToolUse hook sends every delegation to one of them, so Claude can't pick another model.
+// ---------------------------------------------------------------------------
+
+/** Kinds of work that get their own subagent (each can be switched off; then complexity decides). */
+export const ROUTE_KINDS = [
+  { key: "browsing", title: "Browsing", agent: "browsing", use: "web searches, fetching and reading pages", model: "haiku", effort: "low" },
+  { key: "advanced-browsing", title: "Advanced browsing", agent: "advanced-browsing", use: "multi-step web research: comparing many sources, digging through docs, checking facts", model: "sonnet", effort: "medium" },
+  { key: "testing", title: "Testing", agent: "testing", use: "writing and running tests, checking that something works", model: "haiku", effort: "medium" },
+  { key: "bugfixing", title: "Bugfixing", agent: "bugfixing", use: "finding the cause of a bug and fixing it", model: "sonnet", effort: "high" },
+  { key: "optimisation", title: "Optimisation", agent: "optimisation", use: "making code faster, smaller or cheaper; profiling", model: "opus", effort: "high" },
+  { key: "orchestrator-code", title: "Code for the orchestrator", agent: "orchestrator-code", use: "writing code that you, the orchestrator, will review and integrate", model: "sonnet", effort: "high" },
+]
+
+/** Complexity levels: everything that isn't one of the kinds above (or all of it, with the kinds off). */
+export const ROUTE_LEVELS = [
+  { key: "simple", title: "Simple tasks", agent: "simple-task", use: "lookups, file searches, reading, summaries, mechanical edits", model: "haiku", effort: "low" },
+  { key: "average", title: "Average tasks", agent: "average-task", use: "ordinary implementation and analysis", model: "sonnet", effort: "medium" },
+  { key: "hard", title: "Hard tasks", agent: "hard-task", use: "tricky problems that need careful reasoning", model: "opus", effort: "high" },
+  { key: "complex", title: "Complex tasks", agent: "complex-task", use: "large multi-part work, architecture, deep debugging", model: "opus", effort: "xhigh" },
+  { key: "highest", title: "Highest intelligence tasks", agent: "highest-task", use: "the hardest problems, where the best possible answer matters most", model: "fable", effort: "max" },
+]
+
+/** Claude Code's own subagent types and the level they go to while routing is on (custom agents and forks stay). */
+const BUILTIN_ROUTES = { Explore: "simple-task", "claude-code-guide": "simple-task", "general-purpose": "average-task", claude: "average-task", Plan: "hard-task" }
+
+/** The routing settings with defaults filled in. A slot's model "same" is the session's own model. */
+export function subagentRouting() {
+  const own = config.subagentRouting ?? {}
+  const slot = (item, saved) => ({ model: saved?.model ?? item.model, effort: saved?.effort === undefined ? item.effort : saved.effort })
+  return {
+    enabled: own.enabled === true,
+    kinds: Object.fromEntries(ROUTE_KINDS.map((item) => [item.key, { on: own.kinds?.[item.key]?.on !== false, ...slot(item, own.kinds?.[item.key]) }])),
+    levels: Object.fromEntries(ROUTE_LEVELS.map((item) => [item.key, slot(item, own.levels?.[item.key])])),
+  }
+}
+
+/** Every slot in use: the kinds that are on, then all complexity levels. */
+function routeSlots(rule = subagentRouting()) {
+  return [
+    ...ROUTE_KINDS.filter((item) => rule.kinds[item.key].on).map((item) => ({ ...item, ...rule.kinds[item.key] })),
+    ...ROUTE_LEVELS.map((item) => ({ ...item, ...rule.levels[item.key] })),
+  ]
+}
+
+/** Whether routing needs Agent Code's router: a slot on another provider, or a Claude slot under a provider tab. */
+function routingNeedsRouter(main) {
+  const rule = subagentRouting()
+  if (!rule.enabled || config.subagents === false) return false
+  return routeSlots(rule).some((slot) => (slot.model === "same" ? false : splitModel(slot.model) ? true : !!splitModel(main)))
+}
+
+/** The routed subagent types for one Claude Code start, and the lines telling Claude when to use which. */
+function routingAgents(main, mainEffort) {
+  const rule = subagentRouting()
+  const agents = {}
+  const kinds = []
+  const levels = []
+  for (const slot of routeSlots(rule)) {
+    const external = slot.model !== "same" && !!splitModel(slot.model)
+    // A provider model carries its variant in the name ("<provider>/<model>#<variant>"); the router applies it.
+    const model = slot.model === "same" ? "inherit" : external && slot.effort ? `${slot.model}#${slot.effort}` : slot.model
+    const effort = external ? undefined : slot.model === "same" ? (slot.effort ?? mainEffort) : slot.effort
+    agents[slot.agent] = {
+      description: `Delegated ${slot.title.toLowerCase()}: ${slot.use}.`,
+      prompt: `You are a capable software engineering agent doing ${slot.title.toLowerCase()} (${slot.use}). Complete the task you are given using the available tools, then report the result concisely.`,
+      model,
+      ...(effort ? { effort } : {}),
+    }
+    ;(ROUTE_KINDS.some((item) => item.agent === slot.agent) ? kinds : levels).push(`- ${slot.agent}: ${slot.use}`)
+  }
+  return { agents, kinds, levels, names: new Set(Object.keys(agents)) }
+}
+
+const routingPrompt = ({ kinds, levels }) =>
+  `# Subagents (routed)
+Every task you delegate with the Agent tool goes to a subagent whose model and reasoning level the user has fixed. Always set subagent_type to the one that fits, and do not set model or effort.${kinds.length ? `\n\nBy kind of work:\n${kinds.join("\n")}` : ""}
+
+${kinds.length ? "Anything else, by complexity" : "By complexity"}:
+${levels.join("\n")}`
+
 const PICK_PROMPT =
   "When delegating to subagents (the Agent tool), choose each subagent's model and effort to fit the task: haiku with low effort for searches, file reading and mechanical edits; sonnet for ordinary implementation; opus with higher effort only for hard reasoning. You may set the Agent tool's model and effort parameters for this without being asked."
 const providerPrompt = (lines          ) =>
   `Subagents on other models are available as subagent_type values, by kind:\n${lines.join("\n")}\nUse them for routine delegated work (searches, reading, summaries, mechanical edits), the ones marked preferred first; keep Claude models for anything that needs careful judgment. They don't count against the user's Claude limits.`
 
-function subagentHooks(main              , effort                               )                        {
+function subagentHooks(main              , effort                               , routes)                        {
   return [
     {
       matcher: "Agent|Task",
@@ -1336,6 +1420,18 @@ function subagentHooks(main              , effort                               
         async (input     ) => {
           const policy = subagentPolicy()
           const next = { ...(input.tool_input ?? {}) }
+          // Routing: every delegation goes to one of the user's routed types, with exactly its model and variant.
+          if (routes?.size) {
+            const type = next.subagent_type || "general-purpose"
+            const target = routes.has(type) ? type : BUILTIN_ROUTES[type]
+            if (target) {
+              next.subagent_type = target
+              delete next.model
+              delete next.effort
+            }
+            if (JSON.stringify(next) === JSON.stringify(input.tool_input ?? {})) return {}
+            return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: next } }
+          }
           if (!policy.pick) {
             delete next.model
             delete next.effort
@@ -1380,6 +1476,35 @@ function credentialsChangedSince(time) {
 
 /** An error that means the Claude Code login has to be renewed. */
 const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expired|time limit and cannot be renewed|oauth token has expired|\b401\b/i
+
+/**
+ * A harness's own instructions home: AGENTS.md with Agent Code's prompt, plus the user's ~/.agents/AGENTS.md (the
+ * folder this replaces) when there is one. Returns the folder.
+ */
+function writeHarnessInstructions(id, text) {
+  const dir = path.join(stateDir, `${id}-agents`)
+  mkdirSync(dir, { recursive: true })
+  let own = ""
+  try {
+    own = readFileSync(path.join(os.homedir(), ".agents", "AGENTS.md"), "utf8").trim()
+  } catch {}
+  const body = [own, text ? `# From Agent Code\n\n${text}` : ""].filter(Boolean).join("\n\n")
+  writeFileSync(path.join(dir, "AGENTS.md"), body ? `${body}\n` : "")
+  return dir
+}
+
+/** Agent Code's MCP servers in ACP's form (stdio with an absolute command, or http); others are left out. */
+function acpMcpServers() {
+  const out = []
+  for (const [name, server] of Object.entries(acodeMcpServers())) {
+    const pairs = (record) => Object.entries(record ?? {}).map(([key, value]) => ({ name: key, value: String(value) }))
+    if ((server.type ?? "stdio") === "stdio" && server.command) {
+      const command = path.isAbsolute(server.command) ? server.command : findBinary(server.command)
+      if (command) out.push({ name, command, args: server.args ?? [], env: pairs(server.env) })
+    } else if (server.type === "http" && server.url) out.push({ type: "http", name, url: server.url, headers: pairs(server.headers) })
+  }
+  return out
+}
 
 export function storedEffort(model        )                          {
   if (!config.modelEffort) {
@@ -1559,14 +1684,18 @@ export function createSession(seed             ) {
     const external = splitModel(store.model)
     const sessionKey = options.sessionId ?? options.resume ?? store.sessionID
     // Mixing providers: Claude Code keeps its Claude login and every request goes through Agent Code's router.
-    const routed = policy.providers
+    const routing = policy.enabled && subagentRouting().enabled
+    const routed = routing ? routingNeedsRouter(store.model) || policy.providers : policy.providers
     const providerVars = routed ? await routerEnv(sessionKey, store.model) : external ? await providerEnv(store.model, sessionKey) : undefined
     if (gen !== generation) return
     if (routed && !providers.list.length) await refreshProviders()
     if (gen !== generation) return
-    const { agents, lines } = routed && policy.pick ? providerAgents(store.model) : { agents: {}, lines: []             }
+    // Routing replaces Claude's own pick and the provider tiers: the user's slots decide every subagent's model.
+    const routes = routing ? routingAgents(store.model, splitModel(store.model) ? undefined : store.effort) : undefined
+    const { agents, lines } = routes ? { agents: routes.agents, lines: [] } : routed && policy.pick ? providerAgents(store.model) : { agents: {}, lines: []             }
     const extra           = []
-    if (policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
+    if (routes) extra.push(routingPrompt(routes))
+    else if (policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
     if (lines.length) extra.push(providerPrompt(lines))
     const append = behaviourPrompt(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
     const disallowed = [
@@ -1594,7 +1723,7 @@ export function createSession(seed             ) {
         disallowedTools: disallowed.length ? disallowed : undefined,
         agents: Object.keys(agents).length ? agents : undefined,
         settings: extraSettings(store.model)       ,
-        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort)) : []), pauseHook()] },
+        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort), routes?.names) : []), pauseHook()] },
         // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
         mcpServers: { ...acodeMcpServers(), ...(own ? { [ACODE_MCP]: own.server } : {}) },
         plugins: modPlugins(),
@@ -1756,6 +1885,13 @@ export function createSession(seed             ) {
       })
       return
     }
+    // Harnesses that read AGENTS.md from a home folder (DeepSeek Harness) get Agent Code's instructions there: the
+    // user's working profile and switches, as Claude gets them (not the parts about Claude-only tools).
+    if (harness.instructions) {
+      const text = behaviourPrompt([], { sessionId: resume ?? store.sessionID, session: api }, new Set(["acode-memory", "acode-memory-tools", "planning"]))
+      launch.env.DSH_AGENTS_HOME = writeHarnessInstructions(harness.id, text)
+    }
+    const mcpServers = harness.mcp ? acpMcpServers() : []
     const client = new AcpClient(store.cwd, {
       update: (sessionId, update) => {
         // Subagent (child session) updates carry their own session id.
@@ -1793,7 +1929,7 @@ export function createSession(seed             ) {
           setStore("children", {})
         })
         try {
-          learn(await client.request("session/load", { sessionId: resume, cwd: store.cwd, mcpServers: [] }))
+          learn(await client.request("session/load", { sessionId: resume, cwd: store.cwd, mcpServers }))
         } catch (error) {
           log(`${harness.id} load error`, error)
           pushNotice(`Could not reopen the ${harness.name} conversation (${errorMessage(error)}); starting a new one.`, "warning")
@@ -1804,7 +1940,7 @@ export function createSession(seed             ) {
         }
       }
       if (!id) {
-        const created = await client.request("session/new", { cwd: store.cwd, mcpServers: [] })
+        const created = await client.request("session/new", { cwd: store.cwd, mcpServers })
         learn(created)
         id = created.sessionId
       }

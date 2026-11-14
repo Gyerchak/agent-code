@@ -93,6 +93,12 @@ export function modelVariants(value                    )                       {
 
 /** The variant chosen for a provider model (stored per model), if it is one of the model's own. */
 export function chosenVariant(value        )                     {
+  // A routed subagent carries its own variant: "<provider>/<model>#<variant>".
+  const hash = value.indexOf("#")
+  if (hash > 0) {
+    const forced = value.slice(hash + 1)
+    return spec(value.slice(0, hash)).levels.includes(forced) ? forced : undefined
+  }
   const variant = config.modelEffort?.[value]
   if (!variant || variant === "default") return undefined
   return spec(value).levels.includes(variant) ? variant : undefined
@@ -113,7 +119,7 @@ export function applyVariant(protocol                                    , reque
   if (!value || !splitModel(value)) return
   const variant = chosenVariant(value)
   if (!variant) return
-  const model = spec(value)
+  const model = spec(value.split("#")[0])
   const effort = model.efforts.includes(variant)
   const off = variant === "none" && (effort || model.toggle)
   if (protocol === "anthropic") {
