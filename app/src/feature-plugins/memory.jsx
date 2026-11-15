@@ -10,7 +10,7 @@ import path from "node:path"
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { config, saveConfig } from "../context/config"
 import { onSessionEvent, registerAutoAllow, registerPromptPart, registerSettingsPart, registerToolPart } from "../context/session"
-import { listMemories, memoryPrompt, memoryTools, openMemories, openMemoriesChanged, reopenText, sessionStore } from "./memorytools"
+import { indexInContext, listMemories, memoryPrompt, memoryTools, openMemories, openMemoriesChanged, reopenText, sessionStore } from "./memorytools"
 import { appendContext, store, tabs } from "../context/tabs"
 import { providerKind, splitModel } from "../context/providers"
 import { syntax, theme } from "../context/theme"
@@ -165,6 +165,9 @@ const learnOn = () => (version(), config.memoryLearn !== false)
 const LEARN_PROMPT = `# Learning from failures
 When something fails and you find out why (a command or tool errors, a model or API refuses, an assumption turns out wrong, a limit is hit), save it to your auto-memory before moving on: one feedback memory per lesson, stating what failed, why, and what to do next time. Update an existing memory instead of adding a near-duplicate. Skip one-off typos and anything already in the code or git history.`
 
+const LEARN_PROMPT_TOOLS = `# Learning from failures
+When something fails and you find out why (a command or tool errors, a model or API refuses, an assumption turns out wrong, a limit is hit), save it with memory_save before moving on: one feedback memory per lesson, stating what failed, why, and what to do next time. Update an existing memory instead of adding a near-duplicate. Skip one-off typos and anything already in the code or git history.`
+
 const age = (time        ) => {
   const minutes = Math.round((Date.now() - time) / 60000)
   if (minutes < 60) return `${Math.max(1, minutes)}m`
@@ -196,6 +199,13 @@ export function DialogMemory() {
       { title: "Show all stores", value: "stores", description: "browse the shared store and each model's own", category: "Memory" },
       { title: "Use memory", value: "use", description: "Claude reads and writes its memory", category: "Memory", gutter: check(useOn()) },
       { title: "Learn from failures", value: "learn", description: "save a lesson whenever something fails", category: "Memory", gutter: check(learnOn()) },
+      {
+        title: "Index in context",
+        value: "index",
+        description: "off: only a short note that memory exists; Claude looks it up when it could help",
+        category: "Memory",
+        gutter: check((version(), indexInContext())),
+      },
       ...(existsSync(OPENCODEBOX) && !list.some((memory) => memory.name === "opencodebox-memories")
         ? [{ title: "Link my OpenCodeBox memories", value: "link", description: "learned lessons + subscriptions, read when relevant", category: "Memory" }]
         : []),
@@ -244,6 +254,7 @@ export function DialogMemory() {
       onSelect={(option) => {
         if (option.value === "use") return setFlag("memoryUse", !useOn())
         if (option.value === "learn") return setFlag("memoryLearn", !learnOn())
+        if (option.value === "index") return setFlag("memoryIndex", indexInContext() ? "request" : "context")
         if (option.value === "link") return linkOpenCodeBox()
         if (option.value === "full") return setFullAccess(store.model, !hasFullMemory(store.model))
         if (option.value === "readall") return readAllMemory()
@@ -346,7 +357,11 @@ export function MemorySection() {
   const shown = createMemo(() => list().slice(0, 5))
   // In context: the index (names and a line each), plus the text of the memories this session has open.
   const tokens = createMemo(() => {
-    const index = own().box ? list().reduce((sum, memory) => sum + memory.name.length + memory.description.length + 12, 0) : memoryTokens(own().dir) * 3.5
+    const index = !indexInContext()
+      ? (memoryPrompt({ session: { store } }) ?? "").length
+      : own().box
+        ? list().reduce((sum, memory) => sum + memory.name.length + memory.description.length + 12, 0)
+        : memoryTokens(own().dir) * 3.5
     const opened = list().filter(isOpen).reduce((sum, memory) => sum + memory.size, 0)
     return { index: Math.ceil(index / 3.5), open: Math.ceil(opened / 3.5) }
   })
@@ -363,7 +378,7 @@ export function MemorySection() {
       </box>
       <Show when={useOn() && (tokens().index > 0 || tokens().open > 0)}>
         <text fg={theme.textMuted} wrapMode="none" truncate>
-          index ≈{tokens().index.toLocaleString()} tok{tokens().open ? ` · open ≈${tokens().open.toLocaleString()} tok` : ""}
+          {indexInContext() ? "index" : "note"} ≈{tokens().index.toLocaleString()} tok{tokens().open ? ` · open ≈${tokens().open.toLocaleString()} tok` : ""}
         </text>
       </Show>
       <Show when={list().length} fallback={<text fg={theme.textMuted}>{useOn() ? "nothing yet · click to add" : "memory is off"}</text>}>
@@ -411,14 +426,20 @@ export const memoryPlugin         = (api) => {
   api.lifecycle.onDispose(
     registerSettingsPart("acode-memory", (model) => {
       // An acode-box keeps its own memory/ folder (its CLAUDE.md protocol): Claude's auto-memory stays off there.
-      if (config.memoryUse === false || boxDir) return { autoMemoryEnabled: false }
+      // Without "index in context" (the default) Claude Code's own memory loading is off too: no MEMORY.md index and
+      // no long memory instructions in every request; the memory tools reach the same files on request.
+      if (config.memoryUse === false || boxDir || !indexInContext()) return { autoMemoryEnabled: false }
       // Non-Claude models remember into their own folder unless given full access.
       return hasFullMemory(model) ? undefined : { autoMemoryDirectory: modelMemoryDir(model) }
     }),
   )
-  api.lifecycle.onDispose(registerPromptPart("acode-memory", () => (config.memoryUse !== false && config.memoryLearn !== false && !boxDir ? LEARN_PROMPT : undefined)))
-  // Memory as tools: the index in the prompt, a memory's text only when a session opens it.
-  api.lifecycle.onDispose(registerPromptPart("acode-memory-tools", () => memoryPrompt()))
+  api.lifecycle.onDispose(
+    registerPromptPart("acode-memory", () =>
+      config.memoryUse !== false && config.memoryLearn !== false && !boxDir ? (indexInContext() ? LEARN_PROMPT : LEARN_PROMPT_TOOLS) : undefined,
+    ),
+  )
+  // Memory as tools: a short note in the prompt (or the index, if wanted), a memory's text only when opened.
+  api.lifecycle.onDispose(registerPromptPart("acode-memory-tools", (context) => memoryPrompt(context)))
   api.lifecycle.onDispose(registerToolPart("acode-memory", (session, sdk) => memoryTools(session, sdk)))
   // After a compaction the memories a session still has open come back (and only those).
   api.lifecycle.onDispose(

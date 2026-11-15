@@ -1903,6 +1903,10 @@ export function createSession(seed             ) {
     cost: 0,
     liveCost: 0,
     livePlanCost: 0,
+    thinkingMs: 0,
+    thinkingSince: undefined,
+    subThinkingMs: 0,
+    subThinkingOpen: [],
     subCost: 0,
     liveSubCost: 0,
     todos: [],
@@ -2116,6 +2120,7 @@ export function createSession(seed             ) {
     current = { q, input, generation: gen, shapedByModel: !!(orch || routes) }
     if (options.sessionId && !store.sessionID) setStore("sessionID", options.sessionId)
     primeSubagentRead()
+    loadThinking()
     if (goneNote && store.messages.length) appendContext(goneNote)
     void pump(q, gen)
     try {
@@ -3655,6 +3660,10 @@ export function createSession(seed             ) {
   }
 
   function finishTurn(info                     = {}) {
+    thinkingEnds()
+    subThinking.clear()
+    setStore("subThinkingOpen", [])
+    saveThinking()
     const turn = lastTurn()
     batch(() => {
       if (turn && !turn.end) {
@@ -4038,15 +4047,78 @@ export function createSession(seed             ) {
     }
     const now = childStreams.get(parent)
     if (!now) return
+    if (event.type === "content_block_start" && /thinking/.test(event.content_block?.type ?? "")) {
+      subThinking.set(`${parent}:${event.index}`, Date.now())
+      showSubThinking()
+      return
+    }
+    if (event.type === "content_block_stop" && subThinking.has(`${parent}:${event.index}`)) {
+      const start = subThinking.get(`${parent}:${event.index}`)
+      subThinking.delete(`${parent}:${event.index}`)
+      setStore("subThinkingMs", (value) => value + (Date.now() - start))
+      showSubThinking()
+      return
+    }
     if (event.type === "content_block_delta") {
       const delta = event.delta ?? {}
       now.chars += (delta.text?.length ?? 0) + (delta.thinking?.length ?? 0) + (delta.partial_json?.length ?? 0)
       noteSpend(now.id, now.model, { output_tokens: Math.round(now.chars / 4) }, true)
     } else if (event.type === "message_delta" && event.usage) noteSpend(now.id, now.model, event.usage, true)
-    else if (event.type === "message_stop") childStreams.delete(parent)
+    else if (event.type === "message_stop") {
+      childStreams.delete(parent)
+      // A block left open (an interrupted subagent) ends with its message.
+      for (const [key, start] of subThinking)
+        if (key.startsWith(`${parent}:`)) {
+          subThinking.delete(key)
+          setStore("subThinkingMs", (value) => value + (Date.now() - start))
+        }
+      showSubThinking()
+    }
+  }
+
+  // Thinking time, live (sidebar → Context): the main agent's blocks and, apart, the subagents' (those that stream;
+  // background subagents don't). Kept per session in the config, so it survives restarts.
+  const subThinking = new Map()
+  function showSubThinking() {
+    setStore("subThinkingOpen", [...subThinking.values()])
+  }
+  function thinkingStarts() {
+    if (store.thinkingSince === undefined) setStore("thinkingSince", Date.now())
+  }
+  function thinkingEnds() {
+    const since = store.thinkingSince
+    if (since === undefined) return
+    batch(() => {
+      setStore("thinkingMs", (value) => value + (Date.now() - since))
+      setStore("thinkingSince", undefined)
+    })
+  }
+  let thinkingSaved = ""
+  function saveThinking() {
+    const id = store.sessionID
+    if (!id || (!store.thinkingMs && !store.subThinkingMs)) return
+    const value = { main: Math.round(store.thinkingMs), sub: Math.round(store.subThinkingMs) }
+    const text = JSON.stringify(value)
+    if (text === thinkingSaved) return
+    thinkingSaved = text
+    const all = { ...(config.sessionThinking ?? {}), [id]: value }
+    const keys = Object.keys(all)
+    for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
+    config.sessionThinking = all
+    saveConfig()
+  }
+  function loadThinking() {
+    const saved = store.sessionID ? config.sessionThinking?.[store.sessionID] : undefined
+    thinkingSaved = saved ? JSON.stringify(saved) : ""
+    batch(() => {
+      setStore("thinkingMs", saved?.main ?? 0)
+      setStore("subThinkingMs", saved?.sub ?? 0)
+      setStore("thinkingSince", undefined)
+    })
   }
   // Subagents' own transcripts (<project>/<session>/subagents/*.jsonl): read as they grow, while anything runs.
   const subagentRead = new Map()
+  const subagentLastAt = new Map()
   function readSubagentSpend() {
     if (!store.sessionID || splitModel(store.model)) return
     const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", store.cwd.replace(/[^a-zA-Z0-9]/g, "-"), store.sessionID, "subagents")
@@ -4070,19 +4142,29 @@ export function createSession(seed             ) {
         const end = text.lastIndexOf("\n") + 1
         subagentRead.set(file, from + Buffer.byteLength(text.slice(0, end)))
         for (const line of text.slice(0, end).split("\n")) {
-          if (!line.includes('"usage"')) continue
+          if (!line.trim()) continue
           try {
             const entry = JSON.parse(line)
             const message = entry.message
             if (entry.type === "assistant" && message?.id && message.usage) noteSpend(message.id, message.model, message.usage, true)
+            // Subagents' thinking time: Claude Code writes each block when it is complete, so a thinking block took
+            // about the time since the entry before it (the prompt or a tool result).
+            const at = Date.parse(entry.timestamp ?? "")
+            if (!Number.isFinite(at)) continue
+            const before = subagentLastAt.get(file)
+            subagentLastAt.set(file, at)
+            const thought = entry.type === "assistant" && Array.isArray(message?.content) && message.content.some((block) => /thinking/.test(block?.type ?? ""))
+            if (thought && before && at > before) setStore("subThinkingMs", (value) => value + Math.min(at - before, 15 * 60_000))
           } catch {}
         }
       } catch {}
     }
+    saveThinking()
   }
   /** Start reading subagent transcripts from their current ends (what is there was counted before). */
   function primeSubagentRead() {
     subagentRead.clear()
+    subagentLastAt.clear()
     if (!store.sessionID) return
     const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", store.cwd.replace(/[^a-zA-Z0-9]/g, "-"), store.sessionID, "subagents")
     try {
@@ -4151,6 +4233,7 @@ export function createSession(seed             ) {
           updateTurn((turn) => {
             turn.retry = undefined
             turn.parts.push({ type: "reasoning", id, text: block.thinking ?? "", start: Date.now() })
+            thinkingStarts()
           })
         } else if (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") {
           streamParts.set(key, block.id)
@@ -4195,7 +4278,10 @@ export function createSession(seed             ) {
           const part = turn.parts.find((item) => item.id === id)
           if (!part) return
           if (part.type === "text") part.done = true
-          if (part.type === "reasoning") part.end = Date.now()
+          if (part.type === "reasoning") {
+            part.end = Date.now()
+            thinkingEnds()
+          }
           if (part.type === "tool") {
             const parsed = parseJson(part.raw)
             if (parsed) part.input = parsed

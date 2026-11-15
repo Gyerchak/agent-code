@@ -1,7 +1,7 @@
 import { TextAttributes } from "@opentui/core"
 import os from "node:os"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, For, Match, Show, Switch,          } from "solid-js"
+import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
 import { autoPauseFor, fableFallback, fableUpgrade, limits, liveWindow } from "../context/session"
@@ -60,9 +60,46 @@ export function resetsIn(at         ) {
 // Built-in sections (registered as built-in plugins in src/feature-plugins)
 // ---------------------------------------------------------------------------
 
+const span = (ms) => {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
+}
+
+/** The session's thinking time so far (live while it thinks), and the subagents' apart. */
+function ThinkingTime() {
+  const [now, setNow] = createSignal(Date.now())
+  const timer = setInterval(() => (store.thinkingSince !== undefined || store.subThinkingOpen?.length) && setNow(Date.now()), 1000)
+  onCleanup(() => clearInterval(timer))
+  const main = () => (store.thinkingMs ?? 0) + (store.thinkingSince !== undefined ? Math.max(0, now() - store.thinkingSince) : 0)
+  const sub = () => (store.subThinkingMs ?? 0) + (store.subThinkingOpen ?? []).reduce((sum, start) => sum + Math.max(0, now() - start), 0)
+  return (
+    <>
+      <Show when={main() >= 1000}>
+        <text fg={theme.textMuted}>
+          {span(main())} thinking{store.thinkingSince !== undefined ? " ·" : ""}
+          <Show when={store.thinkingSince !== undefined}>
+            <span style={{ fg: theme.warning }}> now</span>
+          </Show>
+        </text>
+      </Show>
+      <Show when={sub() >= 1000}>
+        <text fg={theme.textMuted}>
+          {span(sub())} subagents thinking
+          <Show when={store.subThinkingOpen?.length}>
+            <span style={{ fg: theme.warning }}> · now</span>
+          </Show>
+        </text>
+      </Show>
+    </>
+  )
+}
+
 export function ContextSection() {
   return (
-    <Show when={store.context || store.cost + (store.liveCost ?? 0) > 0}>
+    <Show when={store.context || store.cost + (store.liveCost ?? 0) > 0 || store.thinkingMs > 0 || store.subThinkingMs > 0}>
       <box>
         <text fg={theme.text}>
           <b>Context</b>
@@ -77,6 +114,7 @@ export function ContextSection() {
             </>
           )}
         </Show>
+        <ThinkingTime />
         <Show when={store.cost + (store.liveCost ?? 0) > 0}>
           <text fg={theme.textMuted}>
             {store.cost + (store.liveCost ?? 0) < 0.01 ? "<$0.01" : money.format(store.cost + (store.liveCost ?? 0))} spent

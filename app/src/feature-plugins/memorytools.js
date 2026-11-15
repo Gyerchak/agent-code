@@ -237,8 +237,17 @@ export function memoryTools(session, { tool, z }) {
 }
 
 /** What memory tells the model in the system prompt: how to use the tools (and, in a box, the index itself). */
-export function memoryPrompt() {
+/** Whether the memory index sits in the context (Claude Code's own MEMORY.md loading); off: only a short note. */
+export const indexInContext = () => config.memoryIndex === "context"
+
+export function memoryPrompt(context = {}) {
   if (config.memoryUse === false) return undefined
+  if (!indexInContext()) {
+    // Only that there is a memory and how to reach it; the index itself is what memory_list returns when asked.
+    const count = context.session ? listMemories(sessionStore(context.session.store)).length : undefined
+    return `# Memory
+You have a persistent memory from earlier sessions${count ? ` (${count} memories)` : ""}: the user, how they like work done, projects, past lessons. None of it is loaded. When something from earlier could help, look with mcp__acode__memory_search or memory_list and open what fits with memory_open (close it with memory_close when done). Save lasting, non-obvious facts with memory_save: one topic per memory, update rather than duplicate.`
+  }
   const index = boxDir ? boxIndex() : ""
   return `# Memory (Agent Code)
 Only the index of memories is in your context: names and one line each${boxDir ? " (listed below)" : " (MEMORY.md)"}. Do not read memory files in bulk. When the current task needs one, open it with mcp__acode__memory_open; find candidates with memory_list or memory_search. Close memories the session no longer needs with memory_close (only open ones are restored after a compaction). Save what is worth keeping for later sessions with memory_save instead of editing memory files by hand.${index ? `\n\nMemories in this box (memory/):\n${index}` : ""}`
