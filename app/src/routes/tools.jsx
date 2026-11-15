@@ -698,7 +698,7 @@ function Subagent(props                    ) {
       <InlineTool
         onClick={() => {
           // Like opencode: open the subagent's own transcript (parent/prev/next to navigate).
-          active().setStore("child", props.part.id)
+          active().openSubagent(props.part.id)
         }}
         icon={props.part.status === "completed" ? "✓" : "│"}
         spinner={running()}

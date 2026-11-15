@@ -27,6 +27,7 @@ import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
 import { modelVariants } from "./variants"
+import { sessionSpend, spendSnapshot } from "./spendhistory"
 import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, planPerPercent, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
@@ -857,6 +858,111 @@ export function setSessionAutoPause(sessionID, change) {
   saveConfig()
 }
 
+// ---------------------------------------------------------------------------
+// Stop after / Resume at (sidebar, above Pause): stop a tab (or every tab) at a time or when a plan window reaches
+// a level; resume paused tabs at a time or when a window resets. A tab's own rule comes first, then the one for every
+// tab. Both are one-shot: a rule is used up once it has acted.
+// ---------------------------------------------------------------------------
+
+const PLAN_WINDOWS = { fiveHour: "5-hour", week: "weekly", fable: "Fable" }
+const fableWindow = () => (limits.scoped ?? []).find((window) => /fable/i.test(window.name ?? ""))
+export const planWindowOf = (key) => (key === "fable" ? fableWindow() : limits[key])
+export const hasFableWindow = () => !!fableWindow()
+
+function ruleFor(kind, sessionID) {
+  const all = config[kind] ?? {}
+  const own = sessionID ? all.tabs?.[sessionID] : undefined
+  return own ? { ...own, own: true } : all.every ? { ...all.every, own: false } : undefined
+}
+export const stopRuleFor = (sessionID) => ruleFor("stopAfter", sessionID)
+export const resumeRuleFor = (sessionID) => ruleFor("resumeAt", sessionID)
+
+/** Set (or with `null`, clear) a stop or resume rule for one tab (its session id) or, with no id, for every tab. */
+export function setPlanRule(kind, sessionID, rule) {
+  const all = { tabs: {}, ...(config[kind] ?? {}) }
+  all.tabs = { ...(all.tabs ?? {}) }
+  if (sessionID) {
+    if (rule) all.tabs[sessionID] = rule
+    else delete all.tabs[sessionID]
+  } else if (rule) all.every = rule
+  else delete all.every
+  config[kind] = all
+  saveConfig()
+  setTimeout(checkPlanRules, 0)
+}
+
+/** "14:30", "5-hour 80%", "when the weekly limit resets". */
+export function describeRule(rule) {
+  if (!rule) return undefined
+  if (rule.time) return new Date(rule.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+  if (rule.window && rule.percent) return `${PLAN_WINDOWS[rule.window]} ${rule.percent}%`
+  if (rule.reset) return `${PLAN_WINDOWS[rule.reset]} reset`
+  return undefined
+}
+
+/** When a resume rule lets a tab go on (ms), if it is known yet. */
+function resumeTimeOf(rule) {
+  if (!rule) return undefined
+  if (rule.time) return rule.time
+  const window = rule.reset ? planWindowOf(rule.reset) : undefined
+  return window?.resetsAt ? window.resetsAt + 30_000 : undefined
+}
+
+function usedUp(kind, session, rule) {
+  // A tab's own rule goes with it; the one for every tab goes once every tab has had it.
+  if (rule.own) setPlanRule(kind, session.store.sessionID, null)
+  else {
+    const all = config[kind] ?? {}
+    if (all.every) {
+      const done = new Set([...(all.every.done ?? []), session.store.sessionID])
+      config[kind] = { ...all, every: { ...all.every, done: [...done] } }
+      saveConfig()
+    }
+  }
+}
+
+function checkPlanRules() {
+  const now = Date.now()
+  for (const session of allSessions) {
+    if (session.disposed || !session.store.sessionID) continue
+    const id = session.store.sessionID
+    const stop = stopRuleFor(id)
+    if (stop && !(stop.done ?? []).includes(id) && !session.store.pause) {
+      let hit = false
+      if (stop.time) hit = now >= stop.time
+      else if (stop.window && stop.percent && !splitModel(session.store.model)) {
+        const window = liveWindow(planWindowOf(stop.window), stop.window === "fable" ? "week" : stop.window)
+        hit = (window?.utilization ?? 0) >= stop.percent
+      }
+      if (hit) {
+        const resume = resumeRuleFor(id)
+        const until = resumeTimeOf(resume)
+        session.pause(until, "stop")
+        session.notice?.(`Stopped (Stop after: ${describeRule(stop)})${until ? `; resumes ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}.`, "info")
+        usedUp("stopAfter", session, stop)
+        if (resume && until) usedUp("resumeAt", session, resume)
+        continue
+      }
+    }
+    // A paused tab with no time to go on yet: the resume rule gives it one.
+    const pause = session.store.pause
+    const resume = resumeRuleFor(id)
+    if (pause && !pause.until && resume && !(resume.done ?? []).includes(id)) {
+      const until = resumeTimeOf(resume)
+      if (until) {
+        session.pause(until, pause.reason, pause.windows)
+        usedUp("resumeAt", session, resume)
+      }
+    }
+  }
+  // Rules for every tab that every open tab has had are finished.
+  for (const kind of ["stopAfter", "resumeAt"]) {
+    const every = config[kind]?.every
+    if (every?.done && [...allSessions].every((session) => session.disposed || every.done.includes(session.store.sessionID))) setPlanRule(kind, undefined, null)
+  }
+}
+setInterval(checkPlanRules, 10_000).unref?.()
+
 /** Tabs (by session id) with their own auto-pause setting. */
 export const autoPauseOverrides = () => Object.keys(config.sessionAutoPause ?? {})
 const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved to another model. Continue the work from where it stopped."
@@ -1120,6 +1226,12 @@ const resumingNow = new Map()
 
 /** Continue a tab whose wait is over, booting or reviving its process first (a bare send would be dropped). */
 async function fireAutoResume(session         ) {
+  // Paused meanwhile (by the user or Stop after): the continue waits for the pause to end instead of ending it.
+  if (session.store.pause && session.store.pause.reason !== "limit") {
+    setResumeAt(session, Date.now())
+    waitingResume.add(session)
+    return
+  }
   log("auto-resume fires", session.store.sessionID, session.store.model)
   resumingNow.set(session, { fired: Date.now(), ran: false })
   try {
@@ -1154,6 +1266,8 @@ function checkAutoResume() {
       if (Date.now() < session.store.resumeAt) continue
       // A turn is going (e.g. a background task reported in) or the process is booting: continue once it is free.
       if (session.store.status === "running" || session.store.booting) continue
+      // Paused by the user (or Stop after): auto-resume waits until the tab is resumed; it must not un-pause it.
+      if (session.store.pause && session.store.pause.reason !== "limit") continue
       // One at a time: wait while another tab continued by auto-resume is still working.
       for (const [other, state] of resumingNow) {
         if (other.store.status === "running") state.ran = true
@@ -1816,6 +1930,24 @@ function credentialsChangedSince(time) {
 /** An error that means the Claude Code login has to be renewed. */
 const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expired|time limit and cannot be renewed|oauth token has expired|\b401\b/i
 
+// Harness chats Agent Code keeps itself, for harnesses that can't replay a conversation (DeepSeek Harness).
+const acpHistoryDir = path.join(stateDir, "harness-chats")
+function readAcpHistory(sessionId) {
+  try {
+    return JSON.parse(readFileSync(path.join(acpHistoryDir, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "")}.json`), "utf8"))
+  } catch {
+    return undefined
+  }
+}
+function writeAcpHistory(sessionId, messages) {
+  try {
+    mkdirSync(acpHistoryDir, { recursive: true })
+    writeFileSync(path.join(acpHistoryDir, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "")}.json`), JSON.stringify(messages))
+  } catch (error) {
+    log("harness chat save", error)
+  }
+}
+
 /**
  * A harness's own instructions home: AGENTS.md with Agent Code's prompt, plus the user's ~/.agents/AGENTS.md (the
  * folder this replaces) when there is one. Returns the folder.
@@ -1903,6 +2035,8 @@ export function createSession(seed             ) {
     cost: 0,
     liveCost: 0,
     livePlanCost: 0,
+    historyCost: 0,
+    historySubCost: 0,
     thinkingMs: 0,
     thinkingSince: undefined,
     logParts: {},
@@ -2182,12 +2316,25 @@ export function createSession(seed             ) {
     }
   }
 
+  /** The chat of a harness that can't replay it, kept for the next time the tab opens. */
+  function saveAcpHistory() {
+    if (!oc?.id || !harnessById(oc.harness) || store.engine !== oc.harness) return
+    if (!store.messages.some((m) => m.type === "user")) return
+    writeAcpHistory(oc.id, JSON.parse(JSON.stringify(store.messages)))
+  }
+
   function stop() {
     if (oc) {
       generation++
       for (const [id, resolve] of pending) resolve({ behavior: "deny", message: "Session closed", toolUseID: id })
       pending.clear()
       cancelElicitations()
+      if (oc.caps?.close && oc.id) {
+        try {
+          void oc.client.request("session/close", { sessionId: oc.id }).catch(() => {})
+        } catch {}
+      }
+      saveAcpHistory()
       oc.client.close()
       oc = undefined
       ocQueue.length = 0
@@ -2298,7 +2445,22 @@ export function createSession(seed             ) {
       const info = hello?.agentInfo ?? hello?.agent_info
       if (info?.version) setStore("engineVersion", String(info.version))
       let id = resume
-      if (resume) {
+      const caps = hello?.agentCapabilities ?? {}
+      oc.caps.image = caps.promptCapabilities?.image !== false
+      oc.caps.close = !!caps.sessionCapabilities?.close
+      // DeepSeek Harness can't replay a conversation (no session/load) but can take it up again (session/resume):
+      // its context comes back on its side, and the chat shown is the copy Agent Code kept.
+      if (resume && !caps.loadSession && caps.sessionCapabilities?.resume) {
+        try {
+          learn(await client.request("session/resume", { sessionId: resume, cwd: store.cwd, mcpServers }))
+          const kept = readAcpHistory(resume)
+          if (kept && !store.messages.some((m) => m.type === "user")) setStore("messages", kept)
+        } catch (error) {
+          log(`${harness.id} resume error`, error)
+          pushNotice(`Could not reopen the ${harness.name} conversation (${errorMessage(error)}); starting a new one.`, "warning")
+          id = undefined
+        }
+      } else if (resume) {
         replaying = true
         batch(() => {
           setStore("messages", [])
@@ -2537,6 +2699,12 @@ export function createSession(seed             ) {
       case "current_mode_update":
         setStore("mode", update.currentModeId === "plan" ? "plan" : "default")
         return
+      case "config_option_update":
+        if (oc && update.configOptions) {
+          const result = { configOptions: update.configOptions }
+          oc.caps = { ...oc.caps, models: acpModels(result) ?? oc.caps.models, effort: acpEffort(result) ?? oc.caps.effort, modes: acpModes(result) ?? oc.caps.modes }
+        }
+        return
       case "session_info_update":
         if (update.title) setStore("title", update.title)
         return
@@ -2604,7 +2772,8 @@ export function createSession(seed             ) {
     const items = ocQueue.splice(0)
     const prompt        = []
     for (const item of items) {
-      for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
+      if (oc?.caps?.image === false && item.images.length) pushNotice(`${harnessById(oc.harness)?.name ?? "This harness"} can't take images with this model: they were left out.`, "warning")
+      else for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
       prompt.push(...attachmentAcp(item.attachments))
     }
     prompt.push({ type: "text", text: items.map((item) => item.text).join("\n\n") })
@@ -3228,6 +3397,18 @@ export function createSession(seed             ) {
       setStore("title", title)
       setStore("view", "session")
     })
+    // What the session cost before this window opened it (its subagents too): counted from its transcripts as they
+    // are now; whatever it spends from here on is counted live.
+    const snapshot = spendSnapshot(store.cwd, id)
+    void sessionSpend(store.cwd, id, snapshot)
+      .then((spent) => {
+        if (disposed || store.sessionID !== id) return
+        batch(() => {
+          setStore("historyCost", spent.main + spent.sub)
+          setStore("historySubCost", spent.sub)
+        })
+      })
+      .catch((error) => log("session spend", error))
     try {
       const history = await getSessionMessages(id, { dir: store.cwd })
       if (disposed) return false
@@ -3660,6 +3841,18 @@ export function createSession(seed             ) {
     return true
   }
 
+  /** Open a subagent in this tab's subagent view; one whose conversation isn't in memory comes from its saved log. */
+  function openSubagent(id) {
+    if (id && !store.children[id]?.length && store.sessionID) {
+      const log = subagentLogs(store.cwd, store.sessionID).find((item) => item.toolUseId === id)
+      if (log) return showSubagentLog(log)
+    }
+    batch(() => {
+      setStore("child", id)
+      if (id) setStore("view", "session")
+    })
+  }
+
   /** Show a subagent's saved log in this tab's subagent view (it replaces a live view only once that has ended). */
   function showSubagentLog(log) {
     const key = log.toolUseId ?? `agent:${log.agentId}`
@@ -3699,6 +3892,7 @@ export function createSession(seed             ) {
   }
 
   function finishTurn(info                     = {}) {
+    if (oc) setTimeout(saveAcpHistory, 0)
     thinkingEnds()
     subThinking.clear()
     setStore("subThinkingOpen", [])
@@ -4008,6 +4202,8 @@ export function createSession(seed             ) {
     setStore("livePlanCost", 0)
     setStore("liveSubCost", 0)
     setStore("subCost", 0)
+    setStore("historyCost", 0)
+    setStore("historySubCost", 0)
   }
   function priceOf(model, sub) {
     if (sub) {
@@ -4678,6 +4874,7 @@ export function createSession(seed             ) {
     relative,
     findToolPart,
     showSubagentLog,
+    openSubagent,
     pause,
     resume,
     loggedIn,

@@ -1,6 +1,7 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
+import { knownSessionSpend, scanAllSpend } from "./context/spendhistory"
 import { billingLabel, catalog, CLAUDE_IDS, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
@@ -41,7 +42,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, subagentLogs, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, describeRule, hasFableWindow, planWindowOf, resumeRuleFor, setPlanRule, stopRuleFor, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -505,6 +506,129 @@ function DialogAutoPause() {
       onSelect={(option) => apply(option, false)}
       side={{ label: "every tab", run: (option) => apply(option, true) }}
       actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => option.side !== false && apply(option, true) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
+        </text>
+      }
+    />
+  )
+}
+
+/** "HH:MM" or a number of minutes → a time (ms), or undefined. */
+function parseWhen(text) {
+  const value = text.trim()
+  const clock = value.match(/^(\d{1,2}):(\d{2})$/)
+  if (clock) {
+    const date = new Date()
+    date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
+    if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
+    return date.getTime()
+  }
+  if (/^\d+$/.test(value)) return Date.now() + Number(value) * 60_000
+  return undefined
+}
+
+const WINDOW_TITLES = { fiveHour: "5-hour limit", week: "weekly limit", fable: "Fable limit" }
+
+/**
+ * Stop after (sidebar, above Pause): stop this tab — or, with the "every tab" cell, every tab — at a time or when a
+ * plan window reaches a level. A tab's own rule comes first. Used up once it has stopped the tab.
+ */
+function DialogStopAfter() {
+  const sid = store.sessionID
+  const mine = stopRuleFor(sid)
+  const windows = ["fiveHour", "week", ...(hasFableWindow() ? ["fable"] : [])].filter((key) => planWindowOf(key))
+  const set = (rule, every) => {
+    setPlanRule("stopAfter", every ? undefined : sid, rule)
+    dialog.clear()
+    toast.show({ variant: "info", message: rule ? `Stop after ${describeRule(rule)} · ${every ? "every tab" : "this tab"}` : `Stop after: off · ${every ? "every tab" : "this tab"}` })
+  }
+  const choose = (option, every) => {
+    if (option.value === "off") return set(null, every)
+    if (option.value === "time")
+      return dialog.replace(() => (
+        <DialogPrompt
+          title={`Stop ${every ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
+          placeholder="e.g. 23:30 or 90"
+          onConfirm={(value) => {
+            const time = parseWhen(value)
+            if (!time) return toast.show({ variant: "warning", message: "Write a time like 23:30 or a number of minutes" })
+            set({ time }, every)
+          }}
+        />
+      ))
+    const key = option.value.slice(7)
+    const now = Math.round(planWindowOf(key)?.utilization ?? 0)
+    dialog.replace(() => (
+      <DialogSelect
+        title={`Stop ${every ? "every tab" : "this tab"} when the ${WINDOW_TITLES[key]} reaches`}
+        options={[50, 60, 70, 75, 80, 85, 90, 95, 98, 99].filter((value) => value > now).map((value) => ({ title: `${value}%`, value: String(value), description: `now ${now}%` }))}
+        onSelect={(item) => set({ window: key, percent: Number(item.value) }, every)}
+      />
+    ))
+  }
+  return (
+    <DialogSelect
+      title={`Stop after${mine ? ` · now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : ""}`}
+      options={[
+        { title: "At a time…", value: "time", description: "HH:MM, or a number of minutes" },
+        ...windows.map((key) => ({ title: `When the ${WINDOW_TITLES[key]} reaches…`, value: `window:${key}`, description: `now ${Math.round(planWindowOf(key)?.utilization ?? 0)}%` })),
+        { title: "Off", value: "off", description: "no stop rule" },
+      ]}
+      onSelect={(option) => choose(option, false)}
+      side={{ label: "every tab", run: (option) => choose(option, true) }}
+      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
+        </text>
+      }
+    />
+  )
+}
+
+/** Resume at (sidebar, above Pause): when paused tabs go on — at a time, or when a plan window resets. */
+function DialogResumeAt() {
+  const sid = store.sessionID
+  const mine = resumeRuleFor(sid)
+  const windows = ["fiveHour", "week", ...(hasFableWindow() ? ["fable"] : [])].filter((key) => planWindowOf(key)?.resetsAt)
+  const set = (rule, every) => {
+    setPlanRule("resumeAt", every ? undefined : sid, rule)
+    dialog.clear()
+    toast.show({ variant: "info", message: rule ? `Resume at ${describeRule(rule)} · ${every ? "every tab" : "this tab"}` : `Resume at: off · ${every ? "every tab" : "this tab"}` })
+  }
+  const choose = (option, every) => {
+    if (option.value === "off") return set(null, every)
+    if (option.value === "time")
+      return dialog.replace(() => (
+        <DialogPrompt
+          title={`Resume ${every ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
+          placeholder="e.g. 07:00 or 120"
+          onConfirm={(value) => {
+            const time = parseWhen(value)
+            if (!time) return toast.show({ variant: "warning", message: "Write a time like 07:00 or a number of minutes" })
+            set({ time }, every)
+          }}
+        />
+      ))
+    set({ reset: option.value.slice(6) }, every)
+  }
+  return (
+    <DialogSelect
+      title={`Resume at${mine ? ` · now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : ""}`}
+      options={[
+        { title: "At a time…", value: "time", description: "HH:MM, or a number of minutes" },
+        ...windows.map((key) => ({
+          title: `When the ${WINDOW_TITLES[key]} resets`,
+          value: `reset:${key}`,
+          footer: new Date(planWindowOf(key).resetsAt).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }),
+        })),
+        { title: "Off", value: "off", description: "paused tabs wait for you" },
+      ]}
+      onSelect={(option) => choose(option, false)}
+      side={{ label: "every tab", run: (option) => choose(option, true) }}
+      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
       footer={
         <text fg={theme.text}>
           enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
@@ -1090,50 +1214,6 @@ function dayCategory(ms        ) {
   return date.toDateString()
 }
 
-const minutesText = (ms) => {
-  const seconds = Math.round(ms / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  return minutes < 60 ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
-}
-
-/**
- * A session's subagent logs (Sessions → right-click a session): every subagent it ran, with what it was asked, its
- * type and model, how long it ran and thought, and its tool calls. Enter opens the log in the session's subagent view.
- */
-function DialogSubagentLogs(props) {
-  const logs = subagentLogs(props.cwd ?? store.cwd, props.sessionId)
-  const options = logs.map((log) => ({
-    title: log.description,
-    value: log.file,
-    description: [log.type, log.model.replace(/^claude-/, ""), log.background ? "background" : "", log.finished ? "" : "unfinished"].filter(Boolean).join(" · "),
-    category: dayCategory(log.start || Date.now()),
-    footer: [
-      log.start ? new Date(log.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "",
-      log.end > log.start ? minutesText(log.end - log.start) : "",
-      log.thinkingMs >= 1000 ? `${minutesText(log.thinkingMs)} thinking` : "",
-      `${log.tools} tool${log.tools === 1 ? "" : "s"}`,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-  }))
-  return (
-    <DialogSelect
-      title={`Subagents · ${String(props.title ?? props.sessionId).slice(0, 50)}`}
-      options={options}
-      emptyText="This session ran no subagents (or their logs are gone)"
-      onSelect={async (option) => {
-        const log = logs.find((item) => item.file === option.value)
-        if (!log) return
-        dialog.clear()
-        setRoute("session")
-        const tab = props.sessionId === store.sessionID ? active() : await openSession(props.sessionId)
-        tab?.showSubagentLog(log)
-      }}
-    />
-  )
-}
-
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** The folder a Claude Code session was started in, from its transcript (first line with a cwd), if it is anywhere. */
@@ -1161,7 +1241,12 @@ function DialogSessions() {
       title: (session.customTitle ?? session.summary ?? session.firstPrompt ?? session.sessionId).replace(/\s+/g, " "),
       value: session.sessionId,
       category: dayCategory(session.lastModified),
-      footer: (findTab(session.sessionId) ? "open · " : "") + relativeTime(session.lastModified),
+      footer: (() => {
+        // What the session has cost (its subagents included), as last counted.
+        const spent = knownSessionSpend(app.cwd, session.sessionId)
+        const money = spent ? ` · $${(spent.main + spent.sub).toFixed(2)}` : ""
+        return (findTab(session.sessionId) ? "open · " : "") + relativeTime(session.lastModified) + money
+      })(),
       // A session can be found by its id (or the start of it), as in opencode 2.3.
       keywords: session.sessionId,
     }))
@@ -1188,13 +1273,7 @@ function DialogSessions() {
         setRoute("session")
         void openSession(option.value, option.byId ? undefined : option.title)
       }}
-      onRightClick={(option) => !option.value.startsWith("elsewhere:") && dialog.push(() => <DialogSubagentLogs sessionId={option.value} title={option.title} cwd={app.cwd} />, undefined, "large")}
       actions={[
-        {
-          keybind: "ctrl+o",
-          label: "subagent logs (or right-click)",
-          run: (option) => !option.value.startsWith("elsewhere:") && dialog.push(() => <DialogSubagentLogs sessionId={option.value} title={option.title} cwd={app.cwd} />),
-        },
         {
           keybind: "ctrl+d",
           label: "delete",
@@ -1409,25 +1488,75 @@ function DialogMessage(props                       ) {
   )
 }
 
+/**
+ * Tasks of this tab by type (subagents, shells, terminals, monitors…), running first, finished below. The "Show"
+ * rows filter by type: Enter adds or removes a type, "only" (or right-click) shows that type alone.
+ */
 function DialogTasks() {
+  const [tick, setTick] = createSignal(0)
+  const shown = () => (tick(), configRevision(), config.taskKinds?.length ? config.taskKinds : undefined)
+  const setShown = (kinds) => {
+    config.taskKinds = kinds && kinds.length && kinds.length < TASK_KINDS.length ? kinds : undefined
+    saveConfig()
+    setTick((value) => value + 1)
+  }
   const options = createMemo(() => {
     const entries = taskEntries()
+    const present = TASK_KINDS.filter((kind) => entries.some((entry) => entry.kind === kind.id))
+    const filter = shown()
+    const visible = filter ? entries.filter((entry) => filter.includes(entry.kind)) : entries
     const order = (entry           ) => TASK_KINDS.findIndex((kind) => kind.id === entry.kind) * 2 + (entry.running ? 0 : 1)
-    return [...entries]
+    const rows = visible
       .sort((a, b) => order(a) - order(b))
       .map((entry) => ({
         title: entry.title,
         value: entry.key,
-        category: `${TASK_KINDS.find((kind) => kind.id === entry.kind) .title}${entry.running ? "" : " · finished"}`,
+        category: `${TASK_KINDS.find((kind) => kind.id === entry.kind).title}${entry.running ? " · running" : " · finished"}`,
         footer: entry.failed ? "failed" : entry.detail,
+        gutter: <text fg={entry.running ? theme.secondary : entry.failed ? theme.error : theme.textMuted}>{entry.running ? "●" : entry.failed ? "✗" : "✓"}</text>,
+        side: false,
       }))
+    // The type filter, only when there is more than one type to choose from.
+    const filters =
+      present.length > 1
+        ? [
+            ...present.map((kind) => {
+              const items = entries.filter((entry) => entry.kind === kind.id)
+              const on = !filter || filter.includes(kind.id)
+              const running = items.filter((entry) => entry.running).length
+              return {
+                title: kind.title,
+                value: `kind:${kind.id}`,
+                category: "Show",
+                footer: `${items.length}${running ? ` · ${running} running` : ""}`,
+                gutter: <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>,
+              }
+            }),
+            ...(filter ? [{ title: "All types", value: "kind:all", category: "Show", side: false, gutter: <text fg={theme.textMuted}>{" ↺ "}</text> }] : []),
+          ]
+        : []
+    return [...filters, ...rows]
   })
+  const only = (option) => {
+    if (!option.value.startsWith("kind:") || option.value === "kind:all") return
+    setShown([option.value.slice(5)])
+  }
   return (
     <DialogSelect
       title="Tasks"
+      memoryKey="tasks"
       options={options()}
       emptyText="No subagents, shells or other tasks in this session"
+      side={{ label: "only", run: only }}
       onSelect={(option) => {
+        if (option.value === "kind:all") return setShown(undefined)
+        if (option.value.startsWith("kind:")) {
+          const kind = option.value.slice(5)
+          const present = TASK_KINDS.filter((item) => taskEntries().some((entry) => entry.kind === item.id)).map((item) => item.id)
+          const now = shown() ?? present
+          const next = now.includes(kind) ? now.filter((item) => item !== kind) : [...now, kind]
+          return setShown(next.length ? next : undefined)
+        }
         dialog.clear()
         if (option.value.startsWith("agent:")) openChild(option.value.slice(6))
       }}
@@ -1853,6 +1982,39 @@ async function claudeStatus() {
  * this terminal (Anthropic may offer it only there), and Agent Code reads the usage again afterwards.
  */
 let appRenderer
+/**
+ * Code Mode (Claude Code 2.1.323+, experimental): Claude writes JavaScript that calls its tools, many calls per turn.
+ * Claude Code allows it only in its own interactive terminal (not under the Agent SDK Agent Code drives), on Opus 5.5+
+ * or Fable 5.2+, with Anthropic's own switch on for the account. So this hands the conversation to an interactive
+ * `claude --resume` with CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 in this terminal and takes it back when it exits.
+ */
+async function openCodeMode() {
+  const tab = active()
+  const id = store.sessionID
+  const claude = findBinary("claude")
+  if (!claude) return toast.show({ variant: "warning", message: "Claude Code (claude) isn't installed on this PATH" })
+  if (!id || !store.messages.some((m) => m.type === "user"))
+    return toast.show({ variant: "info", message: "Send a first message here, then continue it in Code Mode" })
+  if (store.status === "running") return toast.show({ variant: "warning", message: "Wait for the turn to end (or interrupt it) first" })
+  const strong = /opus|fable/i.test(store.modelId ?? store.model)
+  if (!strong) toast.show({ variant: "warning", message: "Code Mode works only with Opus 5.5+ or Fable 5.2+: switch the model in Claude Code with /model", duration: 6000 })
+  // One process at a time on a conversation: this tab's goes quiet while Claude Code has it.
+  tab.stop()
+  const args = ["--resume", id, ...(CLAUDE_ALIAS.test(store.model) ? ["--model", store.model] : [])]
+  await appRenderer.suspend()
+  try {
+    process.stdout.write(`\n\x1b[1mClaude Code · Code Mode\x1b[0m  (claude ${args.join(" ")})\nCtrl+O shows the JavaScript it runs. /exit comes back to Agent Code.\n\n`)
+    spawnSync(claude, args, { stdio: "inherit", cwd: store.cwd, env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_CODE_MODE: "1" }, ...spawnOptions(claude) })
+  } finally {
+    await appRenderer.resume()
+  }
+  // What happened there is in the transcript: show it here and go on from it.
+  await tab.load(id, store.title)
+  toast.show({ variant: "info", message: "Back from Code Mode. If Claude Code didn't offer it, Anthropic hasn't switched it on for this account yet.", duration: 7000 })
+}
+
+const CLAUDE_ALIAS = /^(opus|sonnet|haiku|fable)$|^claude-/
+
 export async function resetLimit() {
   if (limits.offer) {
     const message = await useLimitReset(false)
@@ -2032,10 +2194,8 @@ function DialogPause() {
     }
     pauseFor(option.value === "manual" ? undefined : option.value === "reset" ? fiveHour + 30_000 : at(Number(option.value)), all)
   }
+  // Pausing comes first (the cursor starts there); resuming other paused tabs is the last row.
   const options = [
-    ...(paused.length
-      ? [{ title: active().store.pause ? "Resume this tab" : "Resume", value: "resume", description: `${paused.length} tab${paused.length === 1 ? "" : "s"} paused`, category: "Paused" }]
-      : []),
     { title: "Until I resume", value: "manual", description: "click the bar, /resume or ctrl+x p again" },
     { title: "15 minutes", value: "15" },
     { title: "30 minutes", value: "30" },
@@ -2043,6 +2203,9 @@ function DialogPause() {
     { title: "2 hours", value: "120" },
     ...(fiveHour ? [{ title: "Until the 5-hour limit resets", value: "reset", footer: new Date(fiveHour + 30_000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }] : []),
     { title: "Until a time…", value: "time", description: "HH:MM, or a number of minutes" },
+    ...(paused.length
+      ? [{ title: active().store.pause ? "Resume this tab" : `Resume the paused tab${paused.length === 1 ? "" : "s"}`, value: "resume", description: `${paused.length} paused`, category: "Paused" }]
+      : []),
   ]
   return (
     <DialogSelect
@@ -3138,6 +3301,34 @@ export function App() {
         toast.show({ variant: "info", message: after.on ? `Auto-pause on for this tab: pausing at ${after.at}% of a plan limit` : "Auto-pause off for this tab" })
       },
     },
+    { id: "plan.stopafter", title: "Stop after… (a time or a limit level)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
+    { id: "plan.resumeat", title: "Resume at… (a time or a limit reset)", category: "Session", slash: "resumeat", run: () => dialog.replace(() => <DialogResumeAt />, undefined, "large") },
+    {
+      id: "orchestrator.toggle",
+      title: orchestrator().enabled ? "Turn off orchestrator mode" : "Turn on orchestrator mode",
+      category: "Session",
+      run: () => {
+        const on = !orchestrator().enabled
+        saveOrchestrator({ enabled: on })
+        for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+        toast.show({ variant: "info", message: on ? "Orchestrator mode on" : "Orchestrator mode off" })
+      },
+    },
+    { id: "orchestrator.settings", title: "Orchestrator mode settings", category: "Session", run: () => openOrchestrator() },
+    {
+      id: "routing.toggle",
+      title: subagentRouting().enabled ? "Turn off subagent routing" : "Turn on subagent routing",
+      category: "Session",
+      run: () => {
+        const on = !subagentRouting().enabled
+        config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: on }
+        if (on && config.subagents === false) config.subagents = true
+        saveConfig()
+        for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+        toast.show({ variant: "info", message: on ? "Subagent routing on" : "Subagent routing off" })
+      },
+    },
+    { id: "routing.settings", title: "Subagent routing settings", category: "Session", run: () => openRouting() },
     { id: "pause.limit.threshold", title: "Auto-pause settings (this tab, every tab)", category: "Session", run: () => dialog.replace(() => <DialogAutoPause />, undefined, "large") },
     {
       id: "auto.resume.toggle",
@@ -3190,12 +3381,12 @@ export function App() {
     { id: "chat.select_all", title: "Select all (copy the whole chat)", category: "Session", run: () => selectAll(renderer) },
     { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
     {
-      id: "session.subagents",
-      title: "Subagent logs of this session",
+      id: "session.codemode",
+      title: "Continue in Claude Code with Code Mode",
       category: "Session",
-      slash: "subagents",
-      enabled: () => !!store.sessionID,
-      run: () => dialog.replace(() => <DialogSubagentLogs sessionId={store.sessionID} title={store.title} cwd={store.cwd} />, undefined, "large"),
+      slash: "codemode",
+      enabled: () => !store.engine && !splitModel(store.model),
+      run: () => void openCodeMode(),
     },
     { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
     { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },

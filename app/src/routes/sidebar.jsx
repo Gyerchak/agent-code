@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { autoPauseFor, fableFallback, fableUpgrade, limits, liveWindow } from "../context/session"
+import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, resumeRuleFor, stopRuleFor, subagentRouting } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -99,7 +99,7 @@ function ThinkingTime() {
 
 export function ContextSection() {
   return (
-    <Show when={store.context || store.cost + (store.liveCost ?? 0) > 0 || store.thinkingMs > 0 || store.subThinkingMs > 0}>
+    <Show when={store.context || (store.historyCost ?? 0) + store.cost + (store.liveCost ?? 0) > 0 || store.thinkingMs > 0 || store.subThinkingMs > 0}>
       <box>
         <text fg={theme.text}>
           <b>Context</b>
@@ -115,13 +115,13 @@ export function ContextSection() {
           )}
         </Show>
         <ThinkingTime />
-        <Show when={store.cost + (store.liveCost ?? 0) > 0}>
+        <Show when={(store.historyCost ?? 0) + store.cost + (store.liveCost ?? 0) > 0}>
           <text fg={theme.textMuted}>
-            {store.cost + (store.liveCost ?? 0) < 0.01 ? "<$0.01" : money.format(store.cost + (store.liveCost ?? 0))} spent
-            <Show when={(store.subCost ?? 0) + (store.liveSubCost ?? 0) > 0}>
+            {(store.historyCost ?? 0) + store.cost + (store.liveCost ?? 0) < 0.01 ? "<$0.01" : money.format((store.historyCost ?? 0) + store.cost + (store.liveCost ?? 0))} spent
+            <Show when={(store.historySubCost ?? 0) + (store.subCost ?? 0) + (store.liveSubCost ?? 0) > 0}>
               <span style={{ fg: theme.textMuted }}>
                 {" "}
-                · subagents {(store.subCost ?? 0) + (store.liveSubCost ?? 0) < 0.01 ? "<$0.01" : `≈${money.format((store.subCost ?? 0) + (store.liveSubCost ?? 0))}`}
+                · subagents {(store.historySubCost ?? 0) + (store.subCost ?? 0) + (store.liveSubCost ?? 0) < 0.01 ? "<$0.01" : `≈${money.format((store.historySubCost ?? 0) + (store.subCost ?? 0) + (store.liveSubCost ?? 0))}`}
               </span>
             </Show>
           </text>
@@ -569,6 +569,55 @@ export function FableReturnToggle() {
   )
 }
 
+/** Orchestrator mode: the main chat plans and delegates; right click: its settings. */
+export function OrchestratorToggle() {
+  const on = () => (configRevision(), orchestrator().enabled)
+  return <SwitchRow on={on()} label={on() ? "Orchestrator mode on" : "Orchestrator mode off"} toggle="orchestrator.toggle" settings="orchestrator.settings" />
+}
+
+/** Subagent routing: exact models per kind of task; right click: its settings. */
+export function RoutingToggle() {
+  const on = () => (configRevision(), subagentRouting().enabled)
+  return <SwitchRow on={on()} label={on() ? "Subagent routing on" : "Subagent routing off"} toggle="routing.toggle" settings="routing.settings" />
+}
+
+/** A plan-rule row above Pause ("Stop after", "Resume at"): what is set for this tab, a click to change it. */
+function RuleRow(props) {
+  const [hover, setHover] = createSignal(false)
+  const rule = () => (configRevision(), props.rule(store.sessionID))
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => runCommand(props.command)}
+    >
+      <text fg={rule() ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: rule() ? theme.warning : theme.textMuted }}>{props.icon}</span>
+        {`  ${props.label}${rule() ? ` ${describeRule(rule())}` : ": off"}`}
+        <Show when={rule()}>
+          <span style={{ fg: theme.textMuted }}>{rule().own ? " · this tab" : " · every tab"}</span>
+        </Show>
+        <Show when={hover()}>
+          <span style={{ fg: theme.textMuted }}> (click: set)</span>
+        </Show>
+      </text>
+    </box>
+  )
+}
+
+/** Stop after a time or a limit level (this tab, or every tab). */
+export function StopAfterRow() {
+  return <RuleRow icon="⏹" label="Stop after" rule={stopRuleFor} command="plan.stopafter" />
+}
+
+/** When paused tabs go on: a time, or a limit's reset. */
+export function ResumeAtRow() {
+  return <RuleRow icon="⏵" label="Resume at" rule={resumeRuleFor} command="plan.resumeat" />
+}
+
 /** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
 export function PhoneRow() {
   const [hover, setHover] = createSignal(false)
@@ -609,11 +658,15 @@ export function SidebarFooter() {
   return (
     <>
       <box flexShrink={0}>
+        <StopAfterRow />
+        <ResumeAtRow />
         <PauseBar />
         <AutoPauseToggle />
         <AutoResumeToggle />
         <FableFallbackToggle />
         <FableReturnToggle />
+        <OrchestratorToggle />
+        <RoutingToggle />
         <PhoneRow />
       </box>
       <text fg={theme.textMuted} wrapMode="none" truncate>

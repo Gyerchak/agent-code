@@ -141,6 +141,8 @@ const sharedDir =
   process.env.ACODE_SHARED_STATE ||
   (process.env.ACODE_BOX_DIR ? path.join(process.env.ACODE_MAIN_STATE || path.join(os.homedir(), ".local", "state"), "agent-code") : stateDir)
 const sharedFile = path.join(sharedDir, "plan-usage.json")
+/** The state folder every Agent Code window shares (an acode-box gets the main one). */
+export const sharedStateDir = sharedDir
 
 function readShared()         {
   try {

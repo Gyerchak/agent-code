@@ -59,8 +59,8 @@ If `TOOLS.md` exists, it is the inventory of what this machine can run. Read it 
 
 ## How to learn from `knowladge/`
 
-1. **Orient first.** Read `knowladge/INDEX.md`. The memory index (one line per `memory/` file) is
-   already in your context; open what the task needs with `memory_open`, search with `memory_search`.
+1. **Orient first.** Read `knowladge/INDEX.md`. Memory is not loaded: look up what the task needs with
+   `memory_search` (or list `memory/` with `memory_list`) and open it with `memory_open`.
 2. **Open the specific source** — only what the task needs; name the exact file (and page/section).
 3. **Study actively.** Explain, solve, compute, compile, check results.
 4. **Write it to memory** (protocol below) with the **source file path**.
@@ -71,8 +71,8 @@ If `TOOLS.md` exists, it is the inventory of what this machine can run. Read it 
 Memory is context source #1: **memory → session history → the sources**. Claude Code's own
 auto-memory is OFF in this box; `memory/` is the only memory.
 
-**Read** with the memory tools, only what the task needs: the index is in your context; `memory_search`
-finds lines, `memory_open` loads a file into this session (it stays open, and comes back after a compaction,
+**Read** with the memory tools, only what the task needs (nothing is loaded up front): `memory_list` lists
+the files, `memory_search` finds lines, `memory_open` loads a file into this session (it stays open, and comes back after a compaction,
 until `memory_close`). Close what the session no longer needs.
 
 **Write** proactively (do NOT wait to be asked) with `memory_save` (it adds the

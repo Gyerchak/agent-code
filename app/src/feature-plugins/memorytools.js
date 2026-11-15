@@ -171,18 +171,20 @@ export function memoryTools(session, { tool, z }) {
     ),
     tool(
       "memory_search",
-      "Search the text of every memory for words; returns the matching memories with their matching lines (not the whole text).",
-      { query: z.string().describe("Words to look for (all of them, any order, case-insensitive)") },
+      "Search every memory for words (any of them; memories with more of them first); returns the matching memories with their matching lines, not the whole text.",
+      { query: z.string().describe("Words to look for (case-insensitive)") },
       async ({ query }) => {
-        const words = query.toLowerCase().split(/\s+/).filter(Boolean)
-        const hits = []
+        const words = query.toLowerCase().split(/\s+/).filter((word) => word.length > 1)
+        // Any of the words counts; memories with more of them come first (one search instead of several narrow ones).
+        const scored = []
         for (const memory of listMemories(store())) {
           const all = `${memory.name}\n${memory.description}\n${memory.body}`.toLowerCase()
-          if (!words.every((word) => all.includes(word))) continue
-          const lines = memory.body.split("\n").filter((line) => words.some((word) => line.toLowerCase().includes(word))).slice(0, 3)
-          hits.push(`- ${path.basename(memory.file, ".md")} — ${memory.description}${lines.length ? `\n  ${lines.map((line) => line.trim().slice(0, 180)).join("\n  ")}` : ""}`)
-          if (hits.length >= 20) break
+          const found = words.filter((word) => all.includes(word))
+          if (!found.length) continue
+          const lines = memory.body.split("\n").filter((line) => found.some((word) => line.toLowerCase().includes(word))).slice(0, 3)
+          scored.push({ score: found.length, text: `- ${path.basename(memory.file, ".md")} — ${memory.description}${lines.length ? `\n  ${lines.map((line) => line.trim().slice(0, 180)).join("\n  ")}` : ""}` })
         }
+        const hits = scored.sort((a, b) => b.score - a.score).slice(0, 20).map((item) => item.text)
         return text(hits.length ? hits.join("\n") : `Nothing in memory matches "${query}".`)
       },
       { alwaysLoad: true },

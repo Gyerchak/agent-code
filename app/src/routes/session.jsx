@@ -5,12 +5,7 @@ import { actions, refs, SIDEBAR_DOCK_WIDTH, setSidebarOpen, showScrollbar, showT
 import { shortcut } from "../context/keymap"
 import { dialog } from "../ui/dialog"
 import { active, store } from "../context/tabs"
-import {
-  agentIndex,
-  isSubagentTool,
-  prettyModel,
-  agentName,
-} from "../context/session"
+import { agentIndex, isSubagentTool, prettyModel, agentName, subagentLogs } from "../context/session"
 import { agentColor, alpha, mutedSyntax, syntax, theme } from "../context/theme"
 import { Prompt } from "../component/prompt"
 import { Spinner } from "../component/spinner"
@@ -81,13 +76,26 @@ export function taskEntries()              {
     detail: isRunning(part) ? part.childTitle?.slice(0, 30) : part.children ? `${part.children} tools` : undefined,
     part: part.id,
   }))
+  // Background shells, monitors and workflows from the conversation itself, so they stay listed once finished.
+  const toolTasks = new Set()
+  for (const message of store.messages) {
+    if (message.type !== "assistant") continue
+    for (const part of message.parts) {
+      if (part.type !== "tool") continue
+      const kind = part.name === "Bash" && (part.input?.run_in_background || part.background) ? "shell" : part.name === "Monitor" ? "monitor" : /workflow/i.test(part.name) ? "workflow" : undefined
+      if (!kind) continue
+      toolTasks.add(part.id)
+      const running = part.status === "running" || part.status === "pending" || !!part.background
+      const title = kind === "shell" ? `$ ${String(part.input?.command ?? "").split("\n")[0]}` : String(part.input?.description ?? part.input?.name ?? part.name)
+      out.push({ kind, key: `tool:${part.id}`, title: title.slice(0, 120), running, failed: part.status === "error", detail: part.input?.description && kind === "shell" ? String(part.input.description).slice(0, 30) : undefined })
+    }
+  }
   for (const [id, task] of Object.entries(store.tasks)) {
-    if (task.toolUseId && agents.some((part) => part.id === task.toolUseId)) continue
+    if (task.toolUseId && (agents.some((part) => part.id === task.toolUseId) || toolTasks.has(task.toolUseId))) continue
     out.push({ kind: kindOf(task.type), key: `task:${id}`, title: task.description, running: true, detail: task.type, task: id })
   }
   for (const message of store.messages)
-    if (message.type === "shell" && message.running)
-      out.push({ kind: "terminal", key: `shell:${message.id}`, title: `! ${message.command}`, running: true })
+    if (message.type === "shell") out.push({ kind: "terminal", key: `shell:${message.id}`, title: `! ${message.command}`, running: !!message.running })
   return out
 }
 
@@ -128,9 +136,7 @@ export function subagentResult(output        ) {
 }
 
 export function openChild(id                    ) {
-  const session = active()
-  session.setStore("child", id)
-  if (id) session.setStore("view", "session")
+  active().openSubagent(id)
 }
 
 export function cycleChild(direction        ) {

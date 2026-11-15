@@ -161,6 +161,8 @@ autostartPhoneServer()
 // Prices, plan type and OpenCode Go meters (prices daily, Go meters every 5 minutes).
 void refreshCatalog()
 setInterval(() => void refreshCatalog(), 5 * 60_000).unref()
+// Every session's cost so far (subagents included), brought up to date in the background once a day.
+setTimeout(() => void import("./context/spendhistory").then((module) => module.scanAllSpend()), 60_000).unref?.()
 // Provider list: model variants, local-model status and billing labels read it before any picker opens.
 void refreshProviders().catch((error) => log("providers error", error))
 

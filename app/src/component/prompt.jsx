@@ -641,7 +641,7 @@ export function Prompt(props                                         ) {
   // Claude Code prices every token at Claude rates, which is meaningless for other providers.
   // Live: what Claude Code has counted, plus the estimate for the turn that is running (subagents included).
   const cost = createMemo(() => {
-    const total = store.cost + (store.liveCost ?? 0)
+    const total = (store.historyCost ?? 0) + store.cost + (store.liveCost ?? 0)
     return total > 0 && !splitModel(store.model) ? (total < 0.01 ? "<$0.01" : money.format(total)) : undefined
   })
 
