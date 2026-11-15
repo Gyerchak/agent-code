@@ -1905,6 +1905,7 @@ export function createSession(seed             ) {
     livePlanCost: 0,
     thinkingMs: 0,
     thinkingSince: undefined,
+    logParts: {},
     subThinkingMs: 0,
     subThinkingOpen: [],
     subCost: 0,
@@ -3659,6 +3660,44 @@ export function createSession(seed             ) {
     return true
   }
 
+  /** Show a subagent's saved log in this tab's subagent view (it replaces a live view only once that has ended). */
+  function showSubagentLog(log) {
+    const key = log.toolUseId ?? `agent:${log.agentId}`
+    const live = Object.values(store.tasks ?? {}).some((task) => task.toolUseId === key)
+    if (!live || !store.children[key]?.length) {
+      const entries = []
+      try {
+        for (const line of readFileSync(log.file, "utf8").split("\n")) {
+          if (!line.trim()) continue
+          try {
+            const entry = JSON.parse(line)
+            if (entry.type === "user" || entry.type === "assistant") entries.push(entry)
+          } catch {}
+        }
+      } catch (error) {
+        pushNotice(`Could not read the subagent log: ${errorMessage(error)}`, "warning")
+        return
+      }
+      setStore("children", key, convertHistory(entries))
+    }
+    // A stand-in for the subagent's tool row when the conversation no longer has it (compacted, or older).
+    if (!findToolPart(key))
+      setStore("logParts", key, {
+        type: "tool",
+        id: key,
+        name: "Agent",
+        input: { description: log.description, subagent_type: log.type },
+        status: log.finished ? "completed" : "running",
+        children: log.tools,
+        start: log.start,
+        end: log.end,
+      })
+    batch(() => {
+      setStore("child", key)
+      setStore("view", "session")
+    })
+  }
+
   function finishTurn(info                     = {}) {
     thinkingEnds()
     subThinking.clear()
@@ -4638,6 +4677,7 @@ export function createSession(seed             ) {
     replyElicitation,
     relative,
     findToolPart,
+    showSubagentLog,
     pause,
     resume,
     loggedIn,
@@ -4720,6 +4760,82 @@ function syntheticText(msg     )         {
     .map((block     ) => String(block.text ?? ""))
     .join("\n")
     .trim()
+}
+
+/**
+ * The subagent logs Claude Code keeps for a session (<project>/<session>/subagents/agent-<id>.jsonl, with a .meta.json
+ * beside each): what each was asked, its type and model, when it ran, how many replies and tool calls, and roughly
+ * how long it thought. Newest first.
+ */
+export function subagentLogs(cwd, sessionId) {
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"), sessionId, "subagents")
+  let names
+  try {
+    names = readdirSync(dir).filter((name) => /^agent-.*\.jsonl$/.test(name))
+  } catch {
+    return []
+  }
+  const out = []
+  for (const name of names) {
+    const file = path.join(dir, name)
+    let meta = {}
+    try {
+      meta = JSON.parse(readFileSync(file.replace(/\.jsonl$/, ".meta.json"), "utf8"))
+    } catch {}
+    let start = 0
+    let end = 0
+    let prompt = ""
+    let model = ""
+    let thinkingMs = 0
+    let last = 0
+    const replies = new Set()
+    const tools = new Set()
+    try {
+      for (const line of readFileSync(file, "utf8").split("\n")) {
+        if (!line.trim()) continue
+        let entry
+        try {
+          entry = JSON.parse(line)
+        } catch {
+          continue
+        }
+        const at = Date.parse(entry.timestamp ?? "")
+        if (Number.isFinite(at)) {
+          if (!start) start = at
+          end = at
+        }
+        const content = entry.message?.content
+        if (entry.type === "user" && !prompt) prompt = typeof content === "string" ? content : (content?.find?.((block) => block.type === "text")?.text ?? "")
+        if (entry.type === "assistant") {
+          if (entry.message?.id) replies.add(entry.message.id)
+          if (entry.message?.model && entry.message.model !== "<synthetic>") model = entry.message.model
+          for (const block of Array.isArray(content) ? content : []) {
+            if (block.type === "tool_use") tools.add(block.id)
+            if (/thinking/.test(block.type ?? "") && last && at > last) thinkingMs += Math.min(at - last, 15 * 60_000)
+          }
+        }
+        if (Number.isFinite(at)) last = at
+      }
+    } catch {
+      continue
+    }
+    out.push({
+      file,
+      agentId: meta.agentId ?? name.replace(/^agent-|\.jsonl$/g, ""),
+      toolUseId: meta.toolUseId,
+      description: meta.description || prompt.replace(/\s+/g, " ").slice(0, 80) || "Subagent",
+      type: meta.agentType ?? "general-purpose",
+      model: meta.pickedEffortModel ?? model ?? meta.model ?? "",
+      background: meta.requestShape === "background",
+      finished: meta.finished !== false,
+      start,
+      end,
+      replies: replies.size,
+      tools: tools.size,
+      thinkingMs,
+    })
+  }
+  return out.sort((a, b) => b.start - a.start)
 }
 
 function convertHistory(history                                                )            {

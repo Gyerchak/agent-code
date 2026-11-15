@@ -41,7 +41,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, subagentLogs, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -1090,6 +1090,50 @@ function dayCategory(ms        ) {
   return date.toDateString()
 }
 
+const minutesText = (ms) => {
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return minutes < 60 ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
+}
+
+/**
+ * A session's subagent logs (Sessions → right-click a session): every subagent it ran, with what it was asked, its
+ * type and model, how long it ran and thought, and its tool calls. Enter opens the log in the session's subagent view.
+ */
+function DialogSubagentLogs(props) {
+  const logs = subagentLogs(props.cwd ?? store.cwd, props.sessionId)
+  const options = logs.map((log) => ({
+    title: log.description,
+    value: log.file,
+    description: [log.type, log.model.replace(/^claude-/, ""), log.background ? "background" : "", log.finished ? "" : "unfinished"].filter(Boolean).join(" · "),
+    category: dayCategory(log.start || Date.now()),
+    footer: [
+      log.start ? new Date(log.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "",
+      log.end > log.start ? minutesText(log.end - log.start) : "",
+      log.thinkingMs >= 1000 ? `${minutesText(log.thinkingMs)} thinking` : "",
+      `${log.tools} tool${log.tools === 1 ? "" : "s"}`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  }))
+  return (
+    <DialogSelect
+      title={`Subagents · ${String(props.title ?? props.sessionId).slice(0, 50)}`}
+      options={options}
+      emptyText="This session ran no subagents (or their logs are gone)"
+      onSelect={async (option) => {
+        const log = logs.find((item) => item.file === option.value)
+        if (!log) return
+        dialog.clear()
+        setRoute("session")
+        const tab = props.sessionId === store.sessionID ? active() : await openSession(props.sessionId)
+        tab?.showSubagentLog(log)
+      }}
+    />
+  )
+}
+
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** The folder a Claude Code session was started in, from its transcript (first line with a cwd), if it is anywhere. */
@@ -1144,7 +1188,13 @@ function DialogSessions() {
         setRoute("session")
         void openSession(option.value, option.byId ? undefined : option.title)
       }}
+      onRightClick={(option) => !option.value.startsWith("elsewhere:") && dialog.push(() => <DialogSubagentLogs sessionId={option.value} title={option.title} cwd={app.cwd} />, undefined, "large")}
       actions={[
+        {
+          keybind: "ctrl+o",
+          label: "subagent logs (or right-click)",
+          run: (option) => !option.value.startsWith("elsewhere:") && dialog.push(() => <DialogSubagentLogs sessionId={option.value} title={option.title} cwd={app.cwd} />),
+        },
         {
           keybind: "ctrl+d",
           label: "delete",
@@ -3139,6 +3189,14 @@ export function App() {
     { id: "fable.upgrade.settings", title: "Back to Fable settings", category: "Session", run: () => dialog.replace(() => <DialogFableUpgrade />, undefined, "large") },
     { id: "chat.select_all", title: "Select all (copy the whole chat)", category: "Session", run: () => selectAll(renderer) },
     { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
+    {
+      id: "session.subagents",
+      title: "Subagent logs of this session",
+      category: "Session",
+      slash: "subagents",
+      enabled: () => !!store.sessionID,
+      run: () => dialog.replace(() => <DialogSubagentLogs sessionId={store.sessionID} title={store.title} cwd={store.cwd} />, undefined, "large"),
+    },
     { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
     { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },
     { id: "session.find.previous", title: "Find previous", category: "Session", palette: false, run: () => findAgain(-1) },

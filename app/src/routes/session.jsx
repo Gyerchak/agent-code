@@ -154,7 +154,8 @@ export function Session() {
   const sidebarVisible = createMemo(() => sidebarShown(dimensions().width))
   const [awayFromBottom, setAwayFromBottom] = createSignal(false)
   let scroll
-  const childPart = createMemo(() => (store.child ? active().findToolPart(store.child) : undefined))
+  // A subagent opened from its saved log may have no row in the conversation any more: its stand-in then.
+  const childPart = createMemo(() => (store.child ? (active().findToolPart(store.child) ?? store.logParts?.[store.child]) : undefined))
   const transcript = createMemo(() => (store.child ? (store.children[store.child] ?? []) : store.messages))
   // Only the newest messages are drawn (see TRANSCRIPT_WINDOW); scrolling to the top draws more.
   const [shown, setShown] = createSignal(TRANSCRIPT_WINDOW)
