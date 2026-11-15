@@ -17,6 +17,7 @@ import { GoalStatus } from "../component/goal"
 import { Sidebar, SIDEBAR_WIDTH } from "./sidebar"
 import { ElicitationPrompt, PermissionPrompt, QuestionPrompt } from "./permission"
 import { Slot } from "../plugin/slots"
+import { CodeModeView } from "../component/codeterm"
 
 export function duration(ms        ) {
   if (ms < 1000) return `${ms}ms`
@@ -213,7 +214,27 @@ export function Session() {
 
   return (
     <box flexDirection="row" flexGrow={1} minHeight={0}>
-      <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={dimensions().width < 44 ? 1 : 2} paddingRight={dimensions().width < 44 ? 1 : 2}>
+      <Show when={store.codeMode}>
+        <CodeModeView
+          session={active()}
+          onExit={(id) => {
+            const tab = active()
+            tab.setStore("codeMode", false)
+            // What happened in Code Mode is in the transcript: show it here.
+            const conversation = id ?? tab.store.sessionID
+            if (conversation) void tab.load(conversation, tab.store.title, false)
+          }}
+        />
+      </Show>
+      {/* The chat (its prompt included) is gone while Code Mode has the tab, so nothing else takes the keys. */}
+      <Show when={!store.codeMode}>
+      <box
+        flexGrow={1}
+        minHeight={0}
+        paddingBottom={1}
+        paddingLeft={dimensions().width < 44 ? 1 : 2}
+        paddingRight={dimensions().width < 44 ? 1 : 2}
+      >
         <box flexGrow={1} minHeight={0} position="relative">
           <scrollbox
             ref={(r                     ) => {
@@ -313,6 +334,7 @@ export function Session() {
           </Switch>
         </box>
       </box>
+      </Show>
       <Show when={modPanesVisible() && wide() && dimensions().width >= 120}>
         <box flexShrink={0} width={MOD_PANE_WIDTH} paddingBottom={1}>
           <ModPanes placement="dock" columns={MOD_PANE_WIDTH} />
@@ -734,8 +756,38 @@ function ActivityRow(props) {
   )
 }
 
+/** A reply's steps as Code Mode-style JavaScript: Code steps as written, other tool calls as the call they were. */
+export function stepsAsCode(parts) {
+  const lines = []
+  const short = (value) => {
+    const text = JSON.stringify(value, (key, item) => (typeof item === "string" && item.length > 240 ? item.slice(0, 237) + "…" : item))
+    return text && text.length > 400 ? text.slice(0, 397) + "…" : text
+  }
+  for (const part of parts) {
+    if (part.type === "reasoning") {
+      const first = part.text.trim().split("\n")[0]
+      if (first) lines.push(`// thinking: ${first.slice(0, 110)}`)
+    } else if (part.type === "tool") {
+      if (/^(REPL|Eval)$/.test(part.name)) {
+        const code = typeof part.input?.code === "string" ? part.input.code : Object.values(part.input ?? {}).find((value) => typeof value === "string") ?? ""
+        lines.push("// Code (Code Mode)", code.trimEnd())
+      } else {
+        const name = part.name.replace(/^mcp__(.+?)__/, "$1.")
+        lines.push(`await ${name}(${short(part.input ?? {})})`)
+      }
+      const output = String(part.output ?? part.error ?? "").trim().split("\n")[0]
+      if (part.status === "error") lines.push(`// ✗ ${output.slice(0, 110)}`)
+      else if (output) lines.push(`// → ${output.slice(0, 110)}`)
+    }
+  }
+  return lines.join("\n")
+}
+
 function AssistantFooter(props                               ) {
   const dimensions = useTerminalDimensions()
+  // "</>": this reply's steps as code (Code Mode's own code, or the calls as Code Mode would write them).
+  const [codeOpen, setCodeOpen] = createSignal(false)
+  const hasSteps = createMemo(() => props.message.parts.some((part) => part.type === "tool"))
   const elapsed = createMemo(() => (props.message.end && props.message.start ? props.message.end - props.message.start : 0))
   const name = () => agentName(props.message.agent)
   // tok/s over the time tokens were actually streaming (tools and waiting excluded), like opencode's Zen meter.
@@ -753,7 +805,17 @@ function AssistantFooter(props                               ) {
           <text fg={theme.error}>Error: {props.message.error}</text>
         </box>
       </Show>
-      <box paddingLeft={3}>
+      <Show when={codeOpen()}>
+        <box marginBottom={1}>
+          <PartView part={{ type: "text", id: `${props.message.id}:code`, text: "```js\n" + stepsAsCode(props.message.parts) + "\n```", done: true }} message={props.message} />
+        </box>
+      </Show>
+      <box paddingLeft={3} flexDirection="row" gap={1}>
+        <Show when={hasSteps()}>
+          <text fg={codeOpen() ? theme.primary : theme.textMuted} flexShrink={0} onMouseUp={() => setCodeOpen((open) => !open)}>
+            {"</>"}
+          </text>
+        </Show>
         <text>
           <span style={{ fg: props.message.error ? theme.textMuted : agentColor(agentIndex(props.message.agent)) }}>{name()}</span>
           <Show when={dimensions().width >= 28 && props.message.model}>

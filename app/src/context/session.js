@@ -2040,6 +2040,7 @@ export function createSession(seed             ) {
     thinkingMs: 0,
     thinkingSince: undefined,
     logParts: {},
+    codeMode: false,
     subThinkingMs: 0,
     subThinkingOpen: [],
     subCost: 0,
@@ -2135,6 +2136,16 @@ export function createSession(seed             ) {
   async function start(options               = {}) {
     stop()
     if (disposed) return
+    const pinned = options.resume ?? store.sessionID
+    if (pinned && config.codeModeSessions?.[pinned] && !store.engine) {
+      batch(() => {
+        setStore("booting", false)
+        setStore("dormant", true)
+      })
+      if (!store.messages.some((m) => m.type === "notice" && /Code Mode/.test(m.text)))
+        pushNotice("This conversation runs in Code Mode: Claude Code continues it only there. /codemode opens it.", "info")
+      return
+    }
     const gen = ++generation
     const input = new InputQueue()
     startPlanPoll()
@@ -2256,6 +2267,7 @@ export function createSession(seed             ) {
     if (options.sessionId && !store.sessionID) setStore("sessionID", options.sessionId)
     primeSubagentRead()
     loadThinking()
+    restorePause()
     if (goneNote && store.messages.length) appendContext(goneNote)
     void pump(q, gen)
     try {
@@ -2920,6 +2932,7 @@ export function createSession(seed             ) {
     const stopped = !!oc && store.status === "running"
     setStore("pause", { until, reason, windows, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
     if (until) pauseTimer = setTimeout(() => resume(), Math.max(1000, until - Date.now()))
+    rememberPause()
     if (stopped) void interrupt()
     emit("pause", { until, reason })
   }
@@ -2930,6 +2943,7 @@ export function createSession(seed             ) {
     const was = store.pause
     if (!was) return
     setStore("pause", undefined)
+    rememberPause()
     // Resumed by hand before the reset: the user chose to go on up to 100 % of these windows.
     if (was.reason === "limit" && (!was.until || Date.now() < was.until - 30_000)) {
       for (const w of was.windows ?? []) waivePause(w)
@@ -2938,6 +2952,33 @@ export function createSession(seed             ) {
     for (const release of pauseWaiters.splice(0)) release()
     emit("pause", { resumed: true })
     if (was.interrupted && oc) send("Continue where you stopped.")
+  }
+
+  // A pause outlives Agent Code: kept per session in the config, put back when the session opens again.
+  function rememberPause() {
+    const id = store.sessionID
+    if (!id) return
+    const all = { ...(config.sessionPauses ?? {}) }
+    const p = store.pause
+    if (p) all[id] = { until: p.until, reason: p.reason, windows: p.windows, since: p.since, interrupted: !!p.interrupted }
+    else delete all[id]
+    config.sessionPauses = all
+    saveConfig()
+  }
+  function restorePause() {
+    const id = store.sessionID
+    const saved = id ? config.sessionPauses?.[id] : undefined
+    if (!saved || store.pause) return
+    // Its time ran out while Agent Code was closed: the pause is over.
+    if (saved.until && saved.until <= Date.now()) {
+      const all = { ...(config.sessionPauses ?? {}) }
+      delete all[id]
+      config.sessionPauses = all
+      saveConfig()
+      return
+    }
+    setStore("pause", { ...saved, holding: false })
+    if (saved.until) pauseTimer = setTimeout(() => resume(), Math.max(1000, saved.until - Date.now()))
   }
 
   function waitWhilePaused(signal) {
@@ -3383,6 +3424,7 @@ export function createSession(seed             ) {
         if (harnessModel(store.model)?.harness.id !== engine) setStore("model", "opencode-zen/big-pickle")
         setStore("effort", sessionEffort(id, store.model))
       })
+      restorePause()
       // A tab restored in the background starts its harness (and replays its history) when it is opened.
       if (!boot) {
         setStore("dormant", true)
@@ -3397,6 +3439,7 @@ export function createSession(seed             ) {
       setStore("title", title)
       setStore("view", "session")
     })
+    restorePause()
     // What the session cost before this window opened it (its subagents too): counted from its transcripts as they
     // are now; whatever it spends from here on is counted live.
     const snapshot = spendSnapshot(store.cwd, id)

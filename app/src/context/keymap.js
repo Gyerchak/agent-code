@@ -279,7 +279,22 @@ function activeLayers() {
   return out
 }
 
+// A view that wants the keys for itself (Code Mode's terminal): it returns true when it handled a key as Agent Code's,
+// "terminal" when the key is its own (Agent Code stays out), false to let Agent Code have it.
+let keyCapture
+export function setKeyCapture(fn) {
+  keyCapture = fn
+}
+
 export function dispatchKey(event          ) {
+  if (keyCapture) {
+    const claimed = keyCapture(event)
+    if (claimed === true) {
+      event.preventDefault()
+      return
+    }
+    if (claimed === "terminal") return
+  }
   // Escape handling differs between terminals; keep a trace to diagnose double-fires.
   if (event.name === "escape")
     log("key escape", JSON.stringify({ seq: event.sequence, raw: (event       ).raw, type: (event       ).eventType, repeated: (event       ).repeated, source: (event       ).source }))

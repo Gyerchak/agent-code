@@ -222,6 +222,9 @@ export function ToolView(props                    ) {
       <Match when={name() === "Bash"}>
         <Shell part={props.part} />
       </Match>
+      <Match when={name() === "REPL" || name() === "Eval"}>
+        <CodeStep part={props.part} />
+      </Match>
       <Match when={name() === "Read"}>
         <Read part={props.part} />
       </Match>
@@ -317,6 +320,35 @@ function memorySummary(name, input) {
   if (typeof input.query === "string") return `"${input.query}"`
   if (typeof input.name === "string") return input.name
   return ""
+}
+
+/** Code Mode's step: the JavaScript Claude wrote (its tool calls inside), folded to one line until clicked. */
+function CodeStep(props) {
+  const [open, setOpen] = createSignal(false)
+  const code = () => (typeof props.part.input?.code === "string" ? props.part.input.code : Object.values(props.part.input ?? {}).find((value) => typeof value === "string") ?? "")
+  const lines = () => code().split("\n").length
+  return (
+    <>
+      <InlineTool
+        icon={props.part.status === "error" ? "✗" : "</>"}
+        pending="Code"
+        complete={props.part.status === "completed"}
+        spinner={props.part.status === "running"}
+        part={props.part}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {`Code · ${lines()} line${lines() === 1 ? "" : "s"} of JavaScript${open() ? "" : " (click to show)"}`}
+      </InlineTool>
+      <Show when={open()}>
+        <box paddingLeft={3 + INLINE_TOOL_ICON_WIDTH}>
+          <code filetype="javascript" content={code()} syntaxStyle={syntax()} />
+          <Show when={props.part.output?.trim()}>
+            <text fg={theme.textMuted}>{props.part.output.trim().slice(0, 2000)}</text>
+          </Show>
+        </box>
+      </Show>
+    </>
+  )
 }
 
 function GenericTool(props                    ) {

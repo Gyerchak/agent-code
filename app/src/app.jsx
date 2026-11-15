@@ -1988,29 +1988,16 @@ let appRenderer
  * or Fable 5.2+, with Anthropic's own switch on for the account. So this hands the conversation to an interactive
  * `claude --resume` with CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 in this terminal and takes it back when it exits.
  */
-async function openCodeMode() {
+function openCodeMode() {
   const tab = active()
-  const id = store.sessionID
-  const claude = findBinary("claude")
-  if (!claude) return toast.show({ variant: "warning", message: "Claude Code (claude) isn't installed on this PATH" })
-  if (!id || !store.messages.some((m) => m.type === "user"))
-    return toast.show({ variant: "info", message: "Send a first message here, then continue it in Code Mode" })
+  if (store.codeMode) return
   if (store.status === "running") return toast.show({ variant: "warning", message: "Wait for the turn to end (or interrupt it) first" })
-  const strong = /opus|fable/i.test(store.modelId ?? store.model)
-  if (!strong) toast.show({ variant: "warning", message: "Code Mode works only with Opus 5.5+ or Fable 5.2+: switch the model in Claude Code with /model", duration: 6000 })
-  // One process at a time on a conversation: this tab's goes quiet while Claude Code has it.
+  if (!/opus|fable/i.test(`${store.modelId ?? ""} ${store.model}`))
+    toast.show({ variant: "info", message: "Code Mode needs Opus 5.5+ or Fable 5.2+: it opens on Opus", duration: 5000 })
+  // One process at a time on a conversation: the chat's goes quiet while Code Mode has it.
   tab.stop()
-  const args = ["--resume", id, ...(CLAUDE_ALIAS.test(store.model) ? ["--model", store.model] : [])]
-  await appRenderer.suspend()
-  try {
-    process.stdout.write(`\n\x1b[1mClaude Code · Code Mode\x1b[0m  (claude ${args.join(" ")})\nCtrl+O shows the JavaScript it runs. /exit comes back to Agent Code.\n\n`)
-    spawnSync(claude, args, { stdio: "inherit", cwd: store.cwd, env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_CODE_MODE: "1" }, ...spawnOptions(claude) })
-  } finally {
-    await appRenderer.resume()
-  }
-  // What happened there is in the transcript: show it here and go on from it.
-  await tab.load(id, store.title)
-  toast.show({ variant: "info", message: "Back from Code Mode. If Claude Code didn't offer it, Anthropic hasn't switched it on for this account yet.", duration: 7000 })
+  tab.setStore("codeMode", true)
+  tab.setStore("view", "session")
 }
 
 const CLAUDE_ALIAS = /^(opus|sonnet|haiku|fable)$|^claude-/
@@ -3382,7 +3369,7 @@ export function App() {
     { id: "session.resume", title: "Resume", category: "Session", slash: "resume", enabled: () => !!store.pause, run: () => active().resume() },
     {
       id: "session.codemode",
-      title: "Continue in Claude Code with Code Mode",
+      title: "Code Mode (Claude Code's own terminal, in this tab)",
       category: "Session",
       slash: "codemode",
       enabled: () => !store.engine && !splitModel(store.model),
