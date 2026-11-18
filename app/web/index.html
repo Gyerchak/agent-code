@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Agent Code</title>
+    <link rel="icon" href="icon.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <!-- Chats sidebar (collapsible, like chat.deepseek.com's) -->
+      <aside id="left" class="left">
+        <div class="left-head">
+          <div class="brand"><span class="brand-mark">&gt;_</span> Agent Code</div>
+          <button class="icon" id="collapse-left" title="Hide the chats (Ctrl+B)">⟨</button>
+        </div>
+        <button class="new-chat" id="new-chat"><span>＋</span> New chat</button>
+        <div class="section-title">Open tabs</div>
+        <div id="tabs" class="list"></div>
+        <div class="section-title">Chats</div>
+        <input id="search" class="search" placeholder="Search chats" />
+        <div id="sessions" class="list grow"></div>
+        <div class="left-foot">
+          <button class="user" id="user-button" title="Users">
+            <span class="avatar" id="avatar">M</span>
+            <span class="user-name" id="user-name">main</span>
+          </button>
+          <button class="icon" id="open-terminal" title="Terminal view: everything the terminal app has (Ctrl+`)">⌨</button>
+          <button class="icon" id="open-settings" title="Settings">⚙</button>
+        </div>
+      </aside>
+      <button id="expand-left" class="expand expand-left" title="Show the chats (Ctrl+B)">⟩</button>
+
+      <!-- Chat -->
+      <main class="main">
+        <header class="top">
+          <div class="title" id="title">New chat</div>
+          <div class="top-right">
+            <span class="engine" id="engine"></span>
+            <button class="icon" id="toggle-right" title="Show or hide the side panel (Ctrl+.)">▤</button>
+          </div>
+        </header>
+        <section id="chat" class="chat">
+          <div id="empty" class="empty">
+            <div class="hello"><span class="brand-mark big">&gt;_</span><h1>How can I help you today?</h1></div>
+          </div>
+          <div id="messages" class="messages"></div>
+        </section>
+        <footer class="composer-wrap" id="composer-wrap">
+          <div id="permissions"></div>
+          <div class="composer">
+            <div id="files" class="files"></div>
+            <textarea id="input" rows="1" placeholder="Message Agent Code"></textarea>
+            <div class="composer-row">
+              <div class="chips">
+                <select id="mode" class="chip" title="Mode (Tab in the terminal app)"></select>
+                <select id="model" class="chip wide" title="Model"></select>
+                <select id="effort" class="chip" title="Variant (reasoning)"></select>
+              </div>
+              <div class="actions">
+                <label class="icon attach" title="Attach files"><input type="file" id="attach" multiple hidden />📎</label>
+                <button id="send" class="send" title="Send (Enter; Shift+Enter: new line)">↑</button>
+              </div>
+            </div>
+          </div>
+          <div class="hint" id="hint">Agent Code runs on this computer · Enter sends · Shift+Enter new line</div>
+        </footer>
+      </main>
+
+      <!-- Agent Code's panels -->
+      <aside id="right" class="right">
+        <div class="panel">
+          <div class="panel-title">Context</div>
+          <div id="context" class="facts"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Usage</div>
+          <div id="usage" class="facts"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Tasks</div>
+          <div id="tasks" class="facts"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Tab</div>
+          <div class="row-buttons">
+            <button id="stop">Stop</button>
+            <button id="restart">Restart engine</button>
+            <button id="close-tab">Close tab</button>
+          </div>
+        </div>
+      </aside>
+      <button id="expand-right" class="expand expand-right" title="Show the side panel">⟨</button>
+    </div>
+
+    <!-- Terminal view: the program's own screen, live -->
+    <div id="terminal" class="overlay hidden">
+      <div class="overlay-head">
+        <span>Terminal view · everything the terminal app has (keys and mouse go to it)</span>
+        <button class="icon" id="close-terminal" title="Back to the chat (Esc twice)">✕</button>
+      </div>
+      <div id="screen" class="screen" tabindex="0"></div>
+    </div>
+
+    <!-- Settings -->
+    <div id="settings" class="overlay hidden">
+      <div class="sheet">
+        <div class="overlay-head"><span>Settings</span><button class="icon" id="close-settings">✕</button></div>
+        <div id="settings-list" class="settings-list"></div>
+        <div class="sheet-section">
+          <div class="panel-title">Users</div>
+          <p class="muted">Each user is a setup of its own (settings, keys, tabs, chats). "main" is your usual Agent Code.</p>
+          <div id="users" class="users"></div>
+          <div class="row-buttons">
+            <input id="new-user" placeholder="New user name" />
+            <button id="add-user">Create and switch</button>
+            <button id="reset-user" class="danger">Factory reset this user's settings</button>
+          </div>
+        </div>
+        <div class="sheet-section">
+          <div class="panel-title">acode-box</div>
+          <p class="muted">A box: a folder with its own memory, knowledge and rules (the same as the acode-box command).</p>
+          <div class="row-buttons">
+            <input id="box-dir" placeholder="Folder (empty: this one)" />
+            <button id="make-box">Make a box here</button>
+          </div>
+          <pre id="box-out" class="muted small"></pre>
+        </div>
+        <div class="sheet-section">
+          <p class="muted">Everything else (models, providers, MCP, mods, phone, agents…) is in the terminal view: ⌨ → /settings, /models, /connect…</p>
+          <div class="row-buttons"><button id="quit" class="danger">Quit Agent Code</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import http from "node:http"
 import https from "node:https"
 import os from "node:os"
@@ -899,4 +899,320 @@ async function desktopApi(request, response, url, parts) {
     }
   }
   return json(response, 404, { error: "unknown" })
+}
+
+// ---------------------------------------------------------------------------
+// The web app (acode-web): Agent Code itself runs without a terminal (ACODE_HEADLESS=1, drawing into memory) and this
+// server, on 127.0.0.1 only, gives the browser app its pages (web/), the same API the phone uses, and what a desktop
+// app needs on top: the session list, models, modes and settings, users, and the program's own screen as a live
+// "terminal view" (frames out; keys and mouse in), so everything the terminal has is reachable from the browser.
+// ---------------------------------------------------------------------------
+
+const webDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web")
+let webToken
+let screen
+let webServer
+
+/** Switches the web settings page shows (the plain on/off ones; the rest live in the terminal view's Settings). */
+const WEB_SETTINGS = [
+  { key: "chatByDefault", title: "New chats start in Chat mode", fallback: true },
+  { key: "autoAllow", title: "Allow everything (no permission prompts)", fallback: false },
+  { key: "askQuestions", title: "Clarifying questions", fallback: true, restart: true },
+  { key: "runTests", title: "Run tests", fallback: true, restart: true },
+  { key: "preferTools", title: "Prefer installed tools", fallback: true, restart: true },
+  { key: "installTools", title: "Install tools", fallback: false, restart: true },
+  { key: "planning", title: "Planning checklist", fallback: false, restart: true },
+  { key: "subagents", title: "Subagents", fallback: true, restart: true },
+  { key: "memoryUse", title: "Memory", fallback: true, restart: true },
+  { key: "autoResume", title: "Auto-resume after a limit", fallback: true },
+  { key: "pauseNearLimit", title: "Pause before a limit", fallback: true },
+  { key: "smallSessions", title: "Small sessions (auto-compact)", fallback: true },
+]
+
+function webMessages(session) {
+  return session.store.messages.slice(-300).map((message) => {
+    if (message.type === "user")
+      return { type: "user", id: message.id, text: message.text, queued: !!message.queued, unsent: !!message.unsent, attachments: (message.attachments ?? []).map((item) => ({ name: item.name, kind: item.kind })) }
+    if (message.type === "assistant")
+      return {
+        type: "assistant",
+        id: message.id,
+        model: message.model,
+        agent: message.agent,
+        effort: message.effort,
+        done: message.end !== undefined,
+        ms: message.end && message.start ? message.end - message.start : 0,
+        error: message.error,
+        parts: message.parts.map((part) => {
+          if (part.type === "text") return { type: "text", text: part.text }
+          if (part.type === "reasoning") return { type: "reasoning", text: part.text.slice(0, 4000), done: part.end !== undefined, ms: part.end && part.start ? part.end - part.start : 0 }
+          return {
+            type: "tool",
+            id: part.id,
+            name: part.name,
+            title: toolTitle(part),
+            status: part.status,
+            input: JSON.stringify(part.input ?? {}).slice(0, 1500),
+            output: (part.error ?? part.output ?? "").slice(0, 4000),
+          }
+        }),
+      }
+    if (message.type === "notice") return { type: "notice", id: message.id, text: message.text, variant: message.variant }
+    if (message.type === "shell") return { type: "notice", id: message.id, text: `$ ${message.command}\n${(message.output ?? "").slice(-1500)}`, variant: "command" }
+    return { type: "notice", id: message.id, text: "" }
+  })
+}
+
+function webTab(session, full) {
+  const s = session.store
+  return {
+    ...tabSummary(session),
+    sessionId: s.sessionID,
+    modelValue: s.model,
+    effort: s.effort,
+    agent: session.currentAgent().id,
+    ready: s.ready,
+    fatal: s.fatal,
+    context: s.context,
+    cost: (s.historyCost ?? 0) + s.cost + (s.liveCost ?? 0),
+    subCost: (s.historySubCost ?? 0) + (s.subCost ?? 0) + (s.liveSubCost ?? 0),
+    thinkingMs: s.thinkingMs ?? 0,
+    subThinkingMs: s.subThinkingMs ?? 0,
+    tasks: Object.values(s.tasks ?? {}).map((task) => ({ description: task.description, type: task.type })),
+    ...(full
+      ? {
+          messages: webMessages(session),
+          permissions: s.permissions.map((item) => ({ id: item.id, tool: item.tool, title: item.title ?? item.displayName ?? item.tool, detail: toolTitle({ input: item.input }) })),
+          efforts: s.models?.find((model) => model.value === s.model)?.supportedEffortLevels ?? [],
+        }
+      : {}),
+  }
+}
+
+async function webModels() {
+  const { claudeModelList } = await import("./session")
+  const { providers, providerKind } = await import("./providers")
+  const claude = claudeModelList()
+    .filter((model) => model.value !== "default")
+    .map((model) => ({ value: model.value, label: model.displayName.replace(/\s*\(.*\)$/, ""), group: "Anthropic" }))
+  const others = providers.list.flatMap((provider) => provider.models.filter((model) => !model.appOnly || providerKind(`${provider.id}/${model.id}`) === "zen").map((model) => ({ value: `${provider.id}/${model.id}`, label: model.label ?? model.id, group: provider.name })))
+  return [...claude, ...others]
+}
+
+function webUsers() {
+  const root = process.env.ACODE_WEB_USERS
+  let names = []
+  try {
+    names = readdirSync(root).filter((name) => statSync(path.join(root, name)).isDirectory())
+  } catch {}
+  return { current: process.env.ACODE_WEB_USER || "main", list: ["main", ...names.filter((name) => name !== "main")] }
+}
+
+/** Tell the launcher what to do next (another user, a restart) and leave: it starts Agent Code again. */
+function webRelaunch(next) {
+  try {
+    writeFileSync(process.env.ACODE_WEB_CONTROL, JSON.stringify(next))
+  } catch (error) {
+    log("web control", error)
+  }
+  setTimeout(() => process.kill(process.pid, "SIGTERM"), 150)
+}
+
+const rgb = (color) => {
+  const [r, g, b, a] = color.toInts()
+  return a === 0 ? "" : ((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")
+}
+
+let frameText = ""
+let frameId = 0
+function webScreen() {
+  const frame = screen.captureSpans()
+  const lines = frame.lines.map((line) => line.spans.map((span) => [span.text, rgb(span.fg), rgb(span.bg), span.attributes]))
+  const text = JSON.stringify(lines)
+  if (text !== frameText) {
+    frameText = text
+    frameId++
+  }
+  return { id: frameId, cols: frame.cols, rows: frame.rows, cursor: frame.cursor, lines }
+}
+
+async function webApi(request, response, url, parts) {
+  const { app, closeTab, focusTab, openSession, refreshSessions, active } = await import("./tabs")
+  const what = parts[2]
+  if (request.method === "GET") {
+    if (what === "boot") {
+      const { agentList, limits } = await import("./session")
+      return json(response, 200, {
+        version: acodeVersion(),
+        cwd: app.cwd,
+        host: os.hostname(),
+        users: webUsers(),
+        agents: agentList().map((agent) => ({ id: agent.id, name: agent.name })),
+        models: await webModels(),
+        settings: WEB_SETTINGS.map((item) => ({ key: item.key, title: item.title, value: config[item.key] ?? item.fallback })),
+        limits: { fiveHour: limits.fiveHour, week: limits.week, scoped: limits.scoped },
+        tabs: tabs().map((session) => webTab(session, false)),
+        active: active()?.key,
+        defaultModel: config.model ?? "haiku",
+        box: !!process.env.ACODE_BOX_DIR,
+      })
+    }
+    if (what === "sessions") {
+      await refreshSessions()
+      const { knownSessionSpend } = await import("./spendhistory")
+      return json(
+        response,
+        200,
+        app.sessions.slice(0, 300).map((item) => {
+          const spent = knownSessionSpend(app.cwd, item.sessionId)
+          return {
+            id: item.sessionId,
+            title: (item.customTitle ?? item.summary ?? item.firstPrompt ?? item.sessionId).replace(/\s+/g, " ").slice(0, 120),
+            time: item.lastModified,
+            open: tabs().find((session) => session.store.sessionID === item.sessionId)?.key,
+            cost: spent ? spent.main + spent.sub : undefined,
+          }
+        }),
+      )
+    }
+    if (what === "tab") {
+      const session = findSession(parts[3])
+      return session ? json(response, 200, webTab(session, true)) : json(response, 404, { error: "no such tab" })
+    }
+    if (what === "screen") {
+      const now = webScreen()
+      return json(response, 200, Number(url.searchParams.get("have")) === now.id ? { id: now.id, same: true } : now)
+    }
+    return json(response, 404, { error: "unknown" })
+  }
+  const body = await readBody(request)
+  const session = body.key ? findSession(body.key) : undefined
+  switch (what) {
+    case "new": {
+      // A new chat's tab, on the model and mode picked in the page.
+      const { newSession } = await import("./tabs")
+      const made = await newSession()
+      if (body.model && body.model !== made.store.model) await made.setModel(String(body.model))
+      if (body.agent) made.setAgent(String(body.agent))
+      return json(response, 200, { key: made.key })
+    }
+    case "open": {
+      const opened = await openSession(String(body.id))
+      return json(response, 200, { key: opened?.key })
+    }
+    case "focus":
+      if (session) focusTab(session)
+      return json(response, 200, { ok: !!session })
+    case "close":
+      if (session) closeTab(session)
+      return json(response, 200, { ok: !!session })
+    case "model":
+      if (session) await session.setModel(String(body.model))
+      return json(response, 200, { ok: !!session })
+    case "effort":
+      if (session) await session.setEffort(body.effort || undefined)
+      return json(response, 200, { ok: !!session })
+    case "agent":
+      if (session) session.setAgent(String(body.agent))
+      return json(response, 200, { ok: !!session })
+    case "restart":
+      if (session) await session.restart(true)
+      return json(response, 200, { ok: !!session })
+    case "setting": {
+      const item = WEB_SETTINGS.find((entry) => entry.key === body.name)
+      if (!item) return json(response, 400, { error: "unknown setting" })
+      config[item.key] = !!body.value
+      saveConfig()
+      if (item.restart) for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+      return json(response, 200, { ok: true })
+    }
+    case "key": {
+      if (typeof body.text === "string" && body.text) await screen.mockInput.typeText(body.text)
+      else if (body.key) screen.mockInput.pressKey(String(body.key), { ctrl: !!body.ctrl, shift: !!body.shift, meta: !!body.alt })
+      return json(response, 200, { ok: true })
+    }
+    case "mouse": {
+      const x = Math.max(0, Number(body.x) | 0)
+      const y = Math.max(0, Number(body.y) | 0)
+      if (body.type === "scroll") await screen.mockMouse.scroll(x, y, body.direction === "up" ? "up" : "down")
+      else await screen.mockMouse.emitMouseEvent(["down", "up", "move", "drag"].includes(body.type) ? body.type : "move", x, y, Number(body.button) || 0)
+      return json(response, 200, { ok: true })
+    }
+    case "resize":
+      screen.resize(Math.max(60, Math.min(400, Number(body.cols) | 0)), Math.max(20, Math.min(150, Number(body.rows) | 0)))
+      return json(response, 200, { ok: true })
+    case "user": {
+      const name = String(body.name ?? "").trim().replace(/[^\p{L}\p{N} _.-]/gu, "").slice(0, 40)
+      if (body.action === "reset") {
+        const { resetSettings } = await import("./config")
+        resetSettings()
+        return json(response, 200, { ok: true, restart: true }), webRelaunch({ user: webUsers().current })
+      }
+      if (!name) return json(response, 400, { error: "a name is needed" })
+      json(response, 200, { ok: true })
+      return webRelaunch({ user: name, create: body.action === "new" })
+    }
+    case "box": {
+      // A new acode-box in the given folder (the same as the acode-box command).
+      const where = path.resolve(String(body.dir || app.cwd))
+      const tool = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-box")
+      const result = spawnSync(tool, [], { cwd: where, encoding: "utf8", timeout: 60_000 })
+      return json(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(-1500), dir: path.join(where, "acode-box") })
+    }
+    case "quit":
+      json(response, 200, { ok: true })
+      return webRelaunch({ quit: true })
+  }
+  return json(response, 404, { error: "unknown" })
+}
+
+async function handleWeb(request, response) {
+  const url = new URL(request.url ?? "/", "http://acode")
+  try {
+    if (url.pathname.startsWith("/api/")) {
+      const given = (request.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || url.searchParams.get("t") || ""
+      const a = Buffer.from(given)
+      const b = Buffer.from(webToken)
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return json(response, 401, { error: "wrong token" })
+      const parts = url.pathname.split("/").filter(Boolean)
+      if (parts[1] === "web") return await webApi(request, response, url, parts)
+      return await handleApi(request, response, url)
+    }
+    const name = url.pathname === "/" ? "index.html" : path.normalize(url.pathname).replace(/^[/\\]+/, "")
+    const file = path.join(webDir, name)
+    if (!file.startsWith(webDir) || !existsSync(file) || !statSync(file).isFile()) {
+      response.writeHead(404)
+      return response.end()
+    }
+    response.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" })
+    createReadStream(file).pipe(response)
+  } catch (error) {
+    log("web server error", error)
+    if (!response.headersSent) json(response, 500, { error: String(error?.message ?? error) })
+  }
+}
+
+/** Start the web app's server (headless Agent Code only): 127.0.0.1, the port and token the launcher chose. */
+export function startWebServer(memory) {
+  screen = memory
+  webToken = process.env.ACODE_WEB_TOKEN || randomBytes(18).toString("base64url")
+  const port = Number(process.env.ACODE_WEB_PORT) || 7790
+  listenToSessions()
+  // Nothing draws by itself without a terminal: a few frames a second keep layout, scrolling and the view current.
+  let drawing = false
+  setInterval(() => {
+    if (drawing) return
+    drawing = true
+    memory.renderOnce().catch(() => {}).finally(() => (drawing = false))
+  }, 120).unref?.()
+  webServer = http.createServer(handleWeb)
+  return new Promise((resolve, reject) => {
+    webServer.once("error", reject)
+    webServer.listen(port, "127.0.0.1", () => {
+      log("web server", `http://127.0.0.1:${port}/`)
+      // The launcher waits for this line.
+      console.error(`ACODE_WEB_READY ${port}`)
+      resolve(port)
+    })
+  })
 }

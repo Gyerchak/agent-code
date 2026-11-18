@@ -106,8 +106,8 @@ done
 
 case "$MODE" in
   doctor) doctor; exit 0 ;;
-  run|launch) ;;
-  *) echo "usage: acode-box.sh [run [continue] | doctor]" >&2; exit 2 ;;
+  run|launch|web) ;;
+  *) echo "usage: acode-box.sh [run [continue] | web | doctor]" >&2; exit 2 ;;
 esac
 
 if [ -z "$ACODE_BIN" ]; then
@@ -115,23 +115,23 @@ if [ -z "$ACODE_BIN" ]; then
   exit 1
 fi
 
-# One instance per box: a second start says so (and `run continue` takes over).
+# Several windows per box work like a browser's: a second start opens a new window with a new tab (Agent Code
+# shares the tabs between them, apart from the main Agent Code's). `run continue` still takes over the first one.
 if [ -f "$LOCKFILE" ]; then
   LOCK_PID="$(cat "$LOCKFILE" 2>/dev/null || true)"
   if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null && [ "$LOCK_PID" != "$$" ]; then
-    if [ "$ARG2" != "continue" ]; then
-      echo "$BOX_NAME is already open (PID $LOCK_PID). Use that window, or: acode-box.sh run continue"
-      command -v notify-send >/dev/null 2>&1 && notify-send -a acode-box "$BOX_NAME is already open" "Use the existing window." || true
-      sleep 3
-      exit 0
+    if [ "$ARG2" = "continue" ]; then
+      kill "$LOCK_PID" 2>/dev/null || true
+      sleep 1
+      rm -f "$LOCKFILE"
+    else
+      log "another window of $BOX_NAME is open (PID $LOCK_PID): opening a second one"
     fi
-    kill "$LOCK_PID" 2>/dev/null || true
-    sleep 1
+  else
+    rm -f "$LOCKFILE"
   fi
-  rm -f "$LOCKFILE"
 fi
-echo $$ > "$LOCKFILE"
-LOCK_TAKEN=1
+[ -f "$LOCKFILE" ] || { echo $$ > "$LOCKFILE"; LOCK_TAKEN=1; }
 log "start (acode: $ACODE_BIN)"
 
 prepare_env
@@ -173,6 +173,11 @@ export ACODE_BOX_SCRATCH="$SCRATCH_DIR"
 export ACODE_MAIN_CONFIG="$ACODE_CONFIG"
 
 cd "$BOX_DIR"
+# The box in the web app (acode-web): the same box settings, sessions and memory, in a browser window.
+if [ "$MODE" = web ]; then
+  use_settings
+  exec "$(dirname "$ACODE_BIN")/acode-web" "$BOX_DIR" "${ACODE_ARGS[@]}"
+fi
 printf '\033]0;%s\007\033]2;%s\007' "$BOX_NAME" "$BOX_NAME"
 
 # plain acode reopens the box's last tabs (else the most recent session); exit code 75 = restart

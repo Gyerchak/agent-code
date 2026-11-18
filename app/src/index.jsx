@@ -20,7 +20,7 @@ import { builtins } from "./feature-plugins/builtins"
 import { provideHostModules } from "./plugin/loader"
 import { registerBuiltin, reportSlotError, startPlugins, stopPlugins } from "./plugin/runtime"
 import { setupSlots } from "./plugin/slots"
-import { autostartPhoneServer, stopPhoneServer } from "./context/remote"
+import { autostartPhoneServer, stopPhoneServer, startWebServer } from "./context/remote"
 
 function parseArgs(argv          ) {
   const args                                                                                                                     = {}
@@ -78,17 +78,37 @@ initTabs()
 // Plugins import these and must get Agent Code's instances (one Solid runtime, one renderer).
 provideHostModules({ "solid-js": solid, "solid-js/store": solidStore, "@opentui/solid": opentuiSolid, "@opentui/core": opentuiCore })
 
-const renderer = await createCliRenderer({
-  externalOutputMode: "passthrough",
-  targetFps: 60,
-  gatherStats: false,
-  exitOnCtrlC: false,
-  useKittyKeyboard: {},
-  autoFocus: false,
-  openConsoleOnError: false,
-  useMouse: true,
-  backgroundColor: theme.background,
-})
+// The web app (acode-web) runs this same program without a terminal: it draws into memory, and the browser gets
+// the chats through the web server (and, for everything else, this screen as a live "terminal view").
+const headless = process.env.ACODE_HEADLESS === "1"
+let memory
+if (headless) {
+  const { createTestRenderer } = await import("@opentui/core/testing")
+  memory = await createTestRenderer({
+    width: Number(process.env.ACODE_WEB_COLS) || 150,
+    height: Number(process.env.ACODE_WEB_ROWS) || 46,
+    kittyKeyboard: true,
+    nativeSceneVerify: false,
+    exitOnCtrlC: false,
+    autoFocus: false,
+    openConsoleOnError: false,
+    useMouse: true,
+    backgroundColor: theme.background,
+  })
+}
+const renderer = memory
+  ? memory.renderer
+  : await createCliRenderer({
+      externalOutputMode: "passthrough",
+      targetFps: 60,
+      gatherStats: false,
+      exitOnCtrlC: false,
+      useKittyKeyboard: {},
+      autoFocus: false,
+      openConsoleOnError: false,
+      useMouse: true,
+      backgroundColor: theme.background,
+    })
 
 setSyntaxOwner((renderer       ).nativeScene)
 setupSlots(renderer, { theme }, reportSlotError)
@@ -111,7 +131,7 @@ async function shutdown(code = 0) {
   // The terminal may already be gone (window closed): nothing left to restore or print to.
   try {
     renderer.destroy()
-    if (sessionID && hasMessages) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  acode -r ${sessionID}\n\n`)
+    if (sessionID && hasMessages && !headless) process.stdout.write(`\n  \x1b[2mContinue\x1b[0m  acode -r ${sessionID}\n\n`)
   } catch {}
 }
 setExitHandler((code) => void shutdown(code ?? 0))
@@ -127,6 +147,7 @@ process.on("unhandledRejection", (error) => log("unhandled", error))
 // The terminal's own background takes the theme's colour (OSC 11), so the strip a terminal leaves around the cell
 // grid (window size not a multiple of the cell size, padding) looks filled instead of showing another colour.
 const paintTerminal = () => {
+  if (headless) return
   try {
     const [r, g, b] = theme.background.toInts()
     process.stdout.write(`\x1b]11;#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("")}\x07`)
@@ -134,6 +155,7 @@ const paintTerminal = () => {
 }
 createRoot(() => solid.createEffect(paintTerminal))
 process.on("exit", () => {
+  if (headless) return
   try {
     process.stdout.write("\x1b]111\x07")
   } catch {}
@@ -160,6 +182,11 @@ void startPlugins(renderer).catch((error) => log("plugins error", error))
 
 // The phone server (/phone), when it is switched on.
 autostartPhoneServer()
+// The web app's own server (acode-web starts Agent Code with these).
+if (headless) void startWebServer(memory).catch((error) => {
+  log("web server", error)
+  process.exit(1)
+})
 
 // Prices, plan type and OpenCode Go meters (prices daily, Go meters every 5 minutes).
 void refreshCatalog()

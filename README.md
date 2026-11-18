@@ -9,6 +9,12 @@ built on the same renderer (OpenTUI + Solid). The agents underneath are the real
 Agent Code drives Claude Code through the Claude Agent SDK and the other harnesses through the
 [Agent Client Protocol](https://agentclientprotocol.com).
 
+Agent Code comes in two forms that share everything (sessions, settings, keys, memory): the **terminal app**
+(`acode`) and the **web app** (`acode-web`), a desktop app in a browser window whose look mixes Agent Code's
+terminal theme with the layout of [chat.deepseek.com](https://chat.deepseek.com) (a chats sidebar you fold away, a
+centred chat, a rounded message box), without any sign-in: it runs on your computer and talks to nothing but the
+agents you use. It is not affiliated with DeepSeek; the likeness is only the layout.
+
 ## Highlights
 
 - **Several harnesses, one window** — Claude Code, opencode, DeepSeek Harness and Codex as engines; pick any
@@ -28,6 +34,11 @@ Agent Code drives Claude Code through the Claude Agent SDK and the other harness
 - **Orchestrator mode** — the main chat plans and delegates to subagents it picks itself, within limits you set
   (reasoning levels, models, providers).
 - **Subagent routing** — fix the exact model and variant for each kind of delegated task and each complexity level.
+- **Chat mode** — new chats start as a plain conversation (no tools unless you ask); Tab switches to Build or Plan.
+- **One conversation across engines** — switch a tab from Claude to opencode, DeepSeek or Codex and back: the
+  chat stays one, and each new model gets the conversation so far. Unsent messages and drafts survive restarts.
+- **Windows like a browser's** — a second `acode` opens a new window whose tabs continue the numbering; closing
+  one hands its tabs to the other; drag a tab off the strip to give it its own window.
 - **Extensible** — Claude Code mods (plugins with UI) are drawn in Agent Code; Agent Code has its own plugin API as well.
 - **33 themes**, subagent views, MCP servers, skills, voice input/output (optional), and much more.
 
@@ -51,6 +62,50 @@ irm https://raw.githubusercontent.com/Gyerchak/agent-code/main/install.ps1 | iex
 Or download this repository and run `install.sh` (Linux/macOS) or double-click `install.cmd` (Windows).
 The installer copies Agent Code to `~/.local/share/acode` (Windows: `%LOCALAPPDATA%\acode`), builds it and adds the
 `acode` command to your PATH.
+
+### Web app (`acode-web`)
+
+The installers set it up too: they ask for the browser engine (**Chromium-based**: Chromium, Chrome, Brave, Edge,
+Vivaldi; or **Firefox**), offer to install the browser if it is missing, and add a launcher (Linux: app menu,
+macOS: `~/Applications/Agent Code.app`, Windows: Start menu). Run it with:
+
+```sh
+acode-web                     # this folder, the saved engine
+acode-web ~/project --engine firefox
+acode-web --user work         # another user: a setup of its own (settings, keys, tabs, chats)
+```
+
+The window has the chats on the left (fold them with ⟨ or Ctrl+B), the chat in the middle, Agent Code's panels on
+the right (context, usage, tasks; Ctrl+.), and a **terminal view** (⌨ or Ctrl+`) that shows Agent Code's own screen
+live, so every option of the terminal app is there too. Settings has the switches, the **users** (switch, create,
+factory reset) and **New acode-box**. Closing the window ends Agent Code.
+
+### Everything it needs, by system
+
+Node.js 26+ is the one hard requirement; a browser for the web app; the rest is optional.
+
+| System | Node.js 26 | Browser for the web app | Optional extras |
+| --- | --- | --- | --- |
+| Arch, CachyOS, Manjaro | `sudo pacman -S nodejs npm` (or nvm) | `sudo pacman -S chromium` / `firefox` | `sudo pacman -S git qrencode openssl python-gobject gst-plugins-good wl-clipboard ydotool` |
+| Debian, Ubuntu, Mint, Pop!_OS | nvm: `curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh \| bash && nvm install 26` | `sudo apt install chromium` (Ubuntu: `sudo snap install chromium`) / `firefox` | `sudo apt install git qrencode openssl python3-gi gstreamer1.0-plugins-good wl-clipboard ydotool` |
+| Fedora | `sudo dnf install nodejs` (or nvm) | `sudo dnf install chromium` / `firefox` | `sudo dnf install git qrencode openssl python3-gobject gstreamer1-plugins-good wl-clipboard ydotool` |
+| openSUSE | `sudo zypper install nodejs26` (or nvm) | `sudo zypper install chromium` / `MozillaFirefox` | `sudo zypper install git qrencode openssl python3-gobject gstreamer-plugins-good wl-clipboard ydotool` |
+| Void | `sudo xbps-install nodejs` (or nvm) | `sudo xbps-install chromium` / `firefox` | `sudo xbps-install git qrencode openssl python3-gobject gst-plugins-good1 wl-clipboard ydotool` |
+| Alpine | `sudo apk add nodejs npm` | `sudo apk add chromium` / `firefox` | `sudo apk add git libqrencode-tools openssl py3-gobject3 gst-plugins-good wl-clipboard` |
+| Gentoo | `sudo emerge net-libs/nodejs` | `sudo emerge www-client/chromium` / `www-client/firefox-bin` | `sudo emerge dev-vcs/git media-gfx/qrencode dev-python/pygobject` |
+| NixOS | `nix-shell -p nodejs_26` | `nix-shell -p chromium` / `firefox` | `nix-shell -p git qrencode openssl` |
+| Any Linux (Flatpak) | nvm | `flatpak install flathub org.chromium.Chromium` / `org.mozilla.firefox` | — |
+| macOS | `brew install node` | `brew install --cask chromium` / `firefox` (or Chrome, Brave, Edge) | `brew install git qrencode openssl` |
+| Windows | `winget install OpenJS.NodeJS` | Edge is built in; `winget install Google.Chrome` / `Mozilla.Firefox` | `winget install Git.Git` |
+
+Agents (any of them; Claude Code for the Claude models):
+
+```sh
+npm i -g @anthropic-ai/claude-code && claude      # log in once
+npm i -g opencode-ai                              # optional
+npm i -g @deepseek-ai/dsh                         # optional (a DeepSeek key in /connect)
+npm i -g @openai/codex @agentclientprotocol/codex-acp   # optional
+```
 
 ### Optional harnesses
 

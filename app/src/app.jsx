@@ -3002,7 +3002,12 @@ export function App() {
     on(
       () => store.title,
       // The window is named after the harness, nothing else.
-      () => renderer.setTerminalTitle(APP_NAME),
+      () => {
+        // No terminal to name when Agent Code runs for the web app.
+        try {
+          renderer.setTerminalTitle(APP_NAME)
+        } catch {}
+      },
     ),
   )
 

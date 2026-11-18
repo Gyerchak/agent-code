@@ -68,10 +68,36 @@ if (-not ($userPath -split ";" | Where-Object { $_ -eq $BinDir })) {
 }
 Say "Installed: $BinDir\acode.cmd"
 
+# 5. The web app (acode-web): Agent Code in a browser window. $env:ACODE_BROWSER = chromium | firefox | none.
+Set-Content -Encoding ASCII -Path (Join-Path $BinDir "acode-web.cmd") -Value "@echo off`r`nnode `"$app\web\launch.mjs`" %*"
+$engine = $env:ACODE_BROWSER
+if (-not $engine) {
+  $answer = Read-Host "Web app browser engine: [1] Chromium-based (Edge/Chrome)  [2] Firefox  [3] skip  (Enter = 1)"
+  $engine = switch ($answer) { "2" { "firefox" } "3" { "none" } default { "chromium" } }
+}
+if ($engine -eq "firefox" -and -not (Get-Command firefox -ErrorAction SilentlyContinue) -and -not (Test-Path "$env:ProgramFiles\Mozilla Firefox\firefox.exe")) {
+  $yes = Read-Host "Firefox isn't installed. Install it now with winget? [y/N]"
+  if ($yes -match "^y") { winget install --id Mozilla.Firefox -e } else { Warn "Later: winget install --id Mozilla.Firefox -e" }
+}
+if ($engine -ne "none") {
+  $conf = Join-Path $env:APPDATA "agent-code"
+  New-Item -ItemType Directory -Force -Path $conf | Out-Null
+  $webJson = Join-Path $conf "web.json"
+  if (-not (Test-Path $webJson)) { Set-Content -Path $webJson -Value "{ `"engine`": `"$engine`" }" }
+  # A Start menu shortcut (Edge is on every Windows, so Chromium-based always has a browser).
+  $shell = New-Object -ComObject WScript.Shell
+  $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Programs")) "Agent Code.lnk"))
+  $lnk.TargetPath = (Join-Path $BinDir "acode-web.cmd")
+  $lnk.WorkingDirectory = $env:USERPROFILE
+  $lnk.WindowStyle = 7
+  $lnk.Save()
+  Say "Web app: acode-web (Start menu: Agent Code; engine: $engine)"
+}
+
 # 5. The engines.
 if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
   Warn "Claude Code is not installed. For the Claude Code engine: npm i -g @anthropic-ai/claude-code, then run claude once to log in."
 }
 Write-Host "Optional harnesses: opencode (npm i -g opencode-ai), DeepSeek Harness (npm i -g @deepseek-ai/dsh),"
 Write-Host "Codex (npm i -g @openai/codex @agentclientprotocol/codex-acp)."
-Say "Done. Start with: acode"
+Say "Done. Start with: acode   (terminal)   or   acode-web   (app window)"

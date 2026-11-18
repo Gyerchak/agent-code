@@ -867,6 +867,7 @@ export function Prompt(props                                         ) {
                 const value = input.plainText
                 setStore("text", value)
                 draft.text = value
+                session.saveDraft?.(value)
                 if (draft.pastes.size) markPastes()
                 void updateAutocomplete()
               }}

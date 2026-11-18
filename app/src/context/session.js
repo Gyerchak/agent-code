@@ -1937,8 +1937,31 @@ function subagentHooks(main              , effort                               
 /** The harness a stored conversation belongs to (by the model it was saved with), or undefined for Claude Code. */
 export function harnessSession(id                    ) {
   if (!id) return undefined
+  const made = config.sessionEngines?.[id]
+  if (made) return made === "claude" ? undefined : made
   if (id.startsWith("ses_")) return "opencode"
+  // Older sessions have no record: one Claude Code wrote a transcript for is Claude Code's, whatever its model now.
+  if (claudeTranscriptExists(id)) return undefined
   return harnessModel(config.sessionModels?.[id])?.harness.id
+}
+
+/** Remember which engine made a session ("claude" or a harness id): only that engine can reopen it. */
+function rememberSessionEngine(id, engine) {
+  if (!id || config.sessionEngines?.[id] === engine) return
+  const all = { ...(config.sessionEngines ?? {}), [id]: engine }
+  const keys = Object.keys(all)
+  for (const old of keys.slice(0, Math.max(0, keys.length - 600))) delete all[old]
+  config.sessionEngines = all
+  saveConfig()
+}
+
+function claudeTranscriptExists(id) {
+  try {
+    const root = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects")
+    return readdirSync(root).some((project) => existsSync(path.join(root, project, `${id}.jsonl`)))
+  } catch {
+    return false
+  }
 }
 
 /** Whether Claude Code's credentials were written after `time` (a login since). */
@@ -1953,8 +1976,53 @@ function credentialsChangedSince(time) {
 /** An error that means the Claude Code login has to be renewed. */
 const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expired|time limit and cannot be renewed|oauth token has expired|\b401\b/i
 
-// Harness chats Agent Code keeps itself, for harnesses that can't replay a conversation (DeepSeek Harness).
+// One tab is one conversation, whatever engine runs it. Switching engine (Claude Code ↔ opencode, DeepSeek Harness,
+// Codex) starts a session of that engine; Agent Code keeps the earlier part (a copy of its messages) and the chain of
+// sessions (config.sessionChains[latest] = earlier ones, oldest first), shows them all in the tab, and gives the
+// new engine the conversation so far with the first message. Copies also serve harnesses that can't replay.
 const acpHistoryDir = path.join(stateDir, "harness-chats")
+
+/** What the user typed, without Agent Code's notes in front of it (the earlier conversation, a mode's rule). */
+export function cleanUserText(text) {
+  let value = String(text ?? "")
+  value = value.replace(/^\[Agent Code\] This conversation went on with [\s\S]*?\[End of the earlier conversation\.\]\s*/, "")
+  value = value.replace(/^(\[Mode "[^"]*": [^\n]*\]\s*)+/, "")
+  return value
+}
+
+/** The sessions before this one in the tab's conversation, oldest first. */
+export const sessionChain = (id) => (id ? (config.sessionChains?.[id] ?? []) : [])
+function linkSessions(previous, next) {
+  if (!previous || !next || previous === next) return
+  const all = { ...(config.sessionChains ?? {}) }
+  all[next] = [...(all[previous] ?? []), previous].filter((id, index, list) => list.indexOf(id) === index && id !== next)
+  config.sessionChains = all
+  saveConfig()
+}
+
+/** The conversation so far as plain text for a model that wasn't in it (newest part kept when it is long). */
+function conversationText(messages, limit = 60_000) {
+  const lines = []
+  for (const message of messages) {
+    if (message.fromChain === "marker") continue
+    if (message.type === "user" && !message.unsent) lines.push(`User: ${message.text}`)
+    else if (message.type === "assistant") {
+      const text = message.parts
+        .map((part) => {
+          if (part.type === "text") return part.text
+          if (part.type === "tool") return `[used ${part.name}${part.input?.file_path ? ` on ${part.input.file_path}` : part.input?.command ? `: ${String(part.input.command).split("\n")[0].slice(0, 120)}` : ""}]`
+          return ""
+        })
+        .filter(Boolean)
+        .join("\n")
+      if (text.trim()) lines.push(`Assistant: ${text}`)
+    }
+  }
+  let text = lines.join("\n\n")
+  if (text.length > limit) text = `[…earlier part left out…]\n\n${text.slice(-limit)}`
+  return text
+}
+
 function readAcpHistory(sessionId) {
   try {
     return JSON.parse(readFileSync(path.join(acpHistoryDir, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "")}.json`), "utf8"))
@@ -1963,6 +2031,7 @@ function readAcpHistory(sessionId) {
   }
 }
 function writeAcpHistory(sessionId, messages) {
+  if (!sessionId) return
   try {
     mkdirSync(acpHistoryDir, { recursive: true })
     writeFileSync(path.join(acpHistoryDir, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "")}.json`), JSON.stringify(messages))
@@ -2082,6 +2151,28 @@ export function createSession(seed             ) {
     pause: undefined,
   })
 
+  // What is typed in the prompt and not sent yet survives a restart too (per session, written a second after typing).
+  let draftTimer
+  function saveDraft(text) {
+    clearTimeout(draftTimer)
+    draftTimer = setTimeout(() => {
+      const id = store.sessionID
+      if (!id) return
+      const all = { ...(config.sessionDrafts ?? {}) }
+      if (text.trim()) all[id] = text
+      else if (!(id in all)) return
+      else delete all[id]
+      const keys = Object.keys(all)
+      for (const old of keys.slice(0, Math.max(0, keys.length - 200))) delete all[old]
+      config.sessionDrafts = all
+      saveConfig()
+    }, 1000)
+    draftTimer.unref?.()
+  }
+  function restoreDraft(id) {
+    const saved = config.sessionDrafts?.[id]
+    if (saved && !draft.text) draft.text = saved
+  }
   /** Prompt draft that survives switching tabs. */
   const draft = {
     text: "",
@@ -2104,6 +2195,7 @@ export function createSession(seed             ) {
     store,
     setStore,
     draft,
+    saveDraft,
     get disposed() {
       return disposed
     },
@@ -2128,6 +2220,42 @@ export function createSession(seed             ) {
 
   // The tab's own mode (kept per session); it holds while the permission mode is still the one it set.
   let modeNote
+  // The conversation so far, for an engine that takes over the tab (sent once, with the first message to it).
+  let carryNote
+  /** The tab moves to another engine: keep this part, remember what to tell the next one. */
+  function handOver(toName) {
+    const previous = store.sessionID
+    const own = store.messages.filter((m) => !m.fromChain)
+    if (!previous || !own.some((m) => m.type === "user" && !m.unsent)) return undefined
+    writeAcpHistory(previous, JSON.parse(JSON.stringify(own)))
+    const text = conversationText(store.messages)
+    carryNote = text
+      ? `[Agent Code] This conversation went on with ${toName} from here. Agent Code (the app this chat runs in) switched the model mid-conversation; this is the real earlier part of the same conversation with the same user, from Agent Code's own record. Treat it as what was said before, and answer the user's message that follows.\n\n${text}\n\n[End of the earlier conversation.]`
+      : undefined
+    return previous
+  }
+  /** The earlier parts of this tab's conversation (other engines' sessions), in front of what this one shows. */
+  async function prependChain(id) {
+    const chain = sessionChain(id)
+    if (!chain.length || store.messages.some((m) => m.fromChain)) return
+    const before = []
+    for (const earlier of chain) {
+      let messages = readAcpHistory(earlier)
+      if (!messages && !harnessSession(earlier)) {
+        try {
+          messages = convertHistory(await getSessionMessages(earlier, { dir: store.cwd }))
+        } catch {}
+      }
+      if (!messages?.length) continue
+      before.push(...messages.map((m) => ({ ...m, fromChain: true })))
+      before.push({ type: "notice", id: `chain:${earlier}`, text: `Continued with ${store.engine ? (harnessById(store.engine)?.name ?? store.engine) : "Claude Code"} · the model has this conversation`, variant: "info", fromChain: "marker" })
+    }
+    if (before.length && store.sessionID === id) {
+      setStore("messages", (list) => [...before, ...list])
+      const first = before.find((m) => m.type === "user")
+      if (first && (!store.title || /^\[Agent Code\]|^\[Mode /.test(store.title))) setStore("title", first.text.split("\n")[0].slice(0, 80))
+    }
+  }
   // Whether a mode's instruction is in the conversation (or about to be): leaving that mode then says so.
   let instructed = false
   /** A new conversation starts in the default mode (Chat): its instruction goes with the first message. */
@@ -2223,13 +2351,15 @@ export function createSession(seed             ) {
     // Its session ids are UUIDs; anything else (an opencode "ses_…" id) made it exit with "Invalid session ID".
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     if (store.engine || harnessSession(options.resume) || (options.resume && !uuid.test(options.resume)) || (options.sessionId && !uuid.test(options.sessionId))) {
-      if (store.messages.some((m) => m.type === "user")) pushNotice("Continuing in Claude Code: earlier messages are not in this model's context.", "info")
+      const previous = handOver("Claude Code")
+      if (previous) pushNotice("Continuing in Claude Code: the earlier conversation goes with your next message.", "info")
       batch(() => {
         setStore("engine", undefined)
         setStore("sessionID", undefined)
         setStore("revert", undefined)
       })
       options = { sessionId: randomUUID() }
+      linkSessions(previous, options.sessionId)
     }
     const policy = subagentPolicy()
     const external = splitModel(store.model)
@@ -2329,6 +2459,7 @@ export function createSession(seed             ) {
         setStore("commands", reconcile(init.commands ?? []))
         if (!external) rememberClaudeModels(init.models ?? [])
         rememberSessionModel(store.sessionID, store.model)
+        rememberSessionEngine(store.sessionID, "claude")
         setStore("models", reconcile(external ? claudeModels : (init.models ?? [])))
         setStore("agents", reconcile(init.agents ?? []))
         if (init.account) setStore("account", init.account)
@@ -2466,8 +2597,8 @@ export function createSession(seed             ) {
     // A conversation of this harness (by the model it was saved with; opencode's own ids start "ses_").
     const own = (id         ) => !!id && (harnessSession(id) === harness.id || (store.engine === harness.id && id === store.sessionID))
     const resume = [options.resume, store.sessionID].find(own)
-    if (store.engine !== harness.id && store.messages.some((m) => m.type === "user"))
-      pushNotice(`Continuing in ${harness.name}: earlier messages are not in this model's context.`, "info")
+    const previous = store.engine !== harness.id ? handOver(harness.name) : undefined
+    if (previous) pushNotice(`Continuing in ${harness.name}: the earlier conversation goes with your next message.`, "info")
     setStore("engine", harness.id)
     const launch = harnessLaunch(harness, apiKeyFor)
     if (!launch) {
@@ -2548,12 +2679,21 @@ export function createSession(seed             ) {
         } finally {
           replaying = false
           closeReplayTurn()
+          // Replayed prompts arrive in pieces: the notes Agent Code put in front of them come off once whole.
+          setStore("messages", (list) => list.map((m) => (m.type === "user" && /^\[(Agent Code|Mode )/.test(m.text) ? { ...m, text: cleanUserText(m.text) } : m)))
+          if (/^\[(Agent Code|Mode )/.test(store.title ?? "")) setStore("title", store.messages.find((m) => m.type === "user")?.text.split("\n")[0].slice(0, 80))
         }
+      }
+      if (resume && id === resume) {
+        await prependChain(resume)
+        restoreUnsent(resume)
+        restoreDraft(resume)
       }
       if (!id) {
         const created = await within(client.request("session/new", { cwd: store.cwd, mcpServers }), 90, "session/new")
         learn(created)
         id = created.sessionId
+        linkSessions(previous, id)
       }
       if (gen !== generation) return
       oc.id = id
@@ -2569,6 +2709,7 @@ export function createSession(seed             ) {
         setStore("booting", false)
       })
       rememberSessionModel(id, store.model)
+      rememberSessionEngine(id, harness.id)
       if (resume === id && harness.id === "opencode") void loadOpencodeInfo()
       if (unsent.length) setTimeout(flushUnsent, 0)
     } catch (error) {
@@ -2856,7 +2997,9 @@ export function createSession(seed             ) {
       else for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
       prompt.push(...attachmentAcp(item.attachments))
     }
-    prompt.push({ type: "text", text: (modeNote ? `${modeNote}\n\n` : "") + items.map((item) => item.text).join("\n\n") })
+    if (carryNote) prompt.push({ type: "text", text: carryNote })
+    prompt.push({ type: "text", text: [modeNote, items.map((item) => item.text).join("\n\n")].filter(Boolean).join("\n\n") })
+    carryNote = undefined
     modeNote = undefined
     rememberAgentMode()
     const gen = generation
@@ -2932,6 +3075,28 @@ export function createSession(seed             ) {
     emit("attention", { kind: "login" })
   }
 
+  /** Messages not sent yet are kept per session (text, pastes, attached files by path): a restart doesn't lose them. */
+  function saveUnsent() {
+    const id = store.sessionID
+    if (!id) return
+    const all = { ...(config.sessionUnsent ?? {}) }
+    if (unsent.length)
+      all[id] = unsent.map((item) => ({ id: item.id, text: item.text, pastes: item.extra?.pastes, attachments: (item.extra?.attachments ?? []).filter((file) => file.path).map(({ data, ...rest }) => rest) }))
+    else delete all[id]
+    config.sessionUnsent = all
+    saveConfig()
+  }
+  function restoreUnsent(id) {
+    const saved = config.sessionUnsent?.[id]
+    if (!saved?.length || unsent.length) return
+    for (const item of saved) {
+      unsent.push({ id: item.id, text: item.text, extra: { pastes: item.pastes, attachments: item.attachments ?? [] } })
+      setStore("messages", (list) => [...list, { type: "user", id: item.id, text: item.text, files: [], unsent: true, pastes: item.pastes, time: Date.now() }])
+    }
+    // Sent as soon as the engine is up.
+    if (current && store.ready) setTimeout(flushUnsent, 0)
+  }
+
   /** Bring a harness tab's process back (after it died, hung or failed to start), keeping the conversation. */
   let reviving = false
   async function reviveHarness() {
@@ -2971,6 +3136,7 @@ export function createSession(seed             ) {
       if (!store.title) setStore("title", text.split("\n")[0].slice(0, 80))
     })
     unsent.push({ id, text, extra })
+    saveUnsent()
     emit("sent", { id })
     if (harness) return
     // Logged in again outside Agent Code (claude auth login in a terminal): the credentials changed, so go on.
@@ -2990,6 +3156,7 @@ export function createSession(seed             ) {
   function flushUnsent() {
     if ((!current && !(oc && store.ready)) || store.fatal || store.authRequired || !unsent.length) return
     const items = unsent.splice(0)
+    saveUnsent()
     setStore("messages", (list) => list.filter((m) => !(m.type === "user" && m.unsent)))
     for (const item of items) send(item.text, item.extra)
   }
@@ -3183,7 +3350,10 @@ export function createSession(seed             ) {
     content.push(...attachmentBlocks(extra.attachments ?? []))
     // A mode's instruction goes to the model once, with the first prompt after switching to it.
     lastWork = Date.now()
-    const forModel = modeNote ? `${modeNote}\n\n${text}` : text
+    // The earlier conversation goes as a block of its own, before the message.
+    if (carryNote) content.push({ type: "text", text: carryNote })
+    const forModel = [modeNote, text].filter(Boolean).join("\n\n")
+    carryNote = undefined
     modeNote = undefined
     rememberAgentMode()
     content.push({ type: "text", text: forModel })
@@ -3297,7 +3467,8 @@ export function createSession(seed             ) {
     const effortChanged = effort !== store.effort
     // A restart below starts the new process with it; otherwise it is applied after the switch.
     setStore("effort", effort)
-    rememberSessionModel(store.sessionID, value)
+    // Same engine: the session's model is this one now. Another engine: that engine's own new session gets it.
+    if (!!harnessModel(value) === !!harnessModel(previous) && harnessModel(value)?.harness.id === harnessModel(previous)?.harness.id) rememberSessionModel(store.sessionID, value)
     // Another provider means another endpoint: the Claude Code process has to restart.
     if (crossing && previous !== value) {
       // Mid-turn the process can't be swapped: do it as soon as the turn ends.
@@ -3594,6 +3765,9 @@ export function createSession(seed             ) {
       log("history error", error)
       if (!boot) return false
     }
+    await prependChain(id)
+    restoreUnsent(id)
+    restoreDraft(id)
     if (!title && !store.title) {
       const first = store.messages.find((m)                   => m.type === "user")
       if (first) setStore("title", first.text.split("\n")[0].slice(0, 80))
@@ -5272,7 +5446,7 @@ function convertHistory(history                                                )
       if (text.startsWith("<local-command-caveat>")) continue
       if (turn) turn.end = turn.end ?? turn.start
       turn = undefined
-      out.push({ type: "user", id: entry.uuid, text, files: [], attachments: attachments.length ? attachments : undefined })
+      out.push({ type: "user", id: entry.uuid, text: cleanUserText(text), files: [], attachments: attachments.length ? attachments : undefined })
       continue
     }
     if (entry.type === "assistant") {

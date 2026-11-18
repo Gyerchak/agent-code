@@ -1,0 +1,19 @@
+#!/bin/sh
+# acode-web — Agent Code as a desktop app in a browser window (Chromium-based or Firefox). See web/launch.mjs.
+DIR="$(dirname "$(readlink -f "$0")")/.."
+major() { "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null; }
+NODE=""
+for candidate in ${ACODE_NODE:-} "$(command -v node 2>/dev/null)" $(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/v*/bin/node 2>/dev/null | sort -rV) /usr/local/bin/node /usr/bin/node; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+  v="$(major "$candidate")"
+  if [ -n "$v" ] && [ "$v" -ge 26 ] 2>/dev/null; then NODE="$candidate"; break; fi
+done
+if [ -z "$NODE" ]; then
+  echo "acode-web needs Node.js 26 or newer (e.g. nvm install 26), or point ACODE_NODE at a node binary." >&2
+  exit 1
+fi
+if [ ! -f "$DIR/dist/index.js" ] || [ -n "$(find "$DIR/src" -type f -newer "$DIR/dist/index.js" 2>/dev/null | head -n 1)" ]; then
+  echo "acode-web: building…" >&2
+  ( cd "$DIR" && PATH="$(dirname "$NODE"):$PATH" && { [ -d node_modules ] || npm ci >&2; } && npm run build >&2 ) || echo "acode-web: the build failed (run npm ci && npm run build in $DIR)." >&2
+fi
+exec "$NODE" "$DIR/web/launch.mjs" "$@"

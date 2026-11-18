@@ -73,10 +73,79 @@ fi
 bold "Installed: $BIN_DIR/acode"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "Add $BIN_DIR to your PATH (e.g. in ~/.profile): export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 
-# 5. The engines.
+# 5. The web app (acode-web): a desktop app in a browser window, Chromium-based or Firefox.
+#    ACODE_BROWSER=chromium|firefox|none picks (default: ask when a terminal is attached, else what is installed).
+ln -sf "$HOME_DIR/app/bin/acode-web" "$BIN_DIR/acode-web"
+have_chromium() { for b in chromium chromium-browser google-chrome-stable google-chrome brave brave-browser microsoft-edge-stable vivaldi-stable; do command -v "$b" >/dev/null 2>&1 && return 0; done; [ -d "/Applications/Google Chrome.app" ] || [ -d "/Applications/Chromium.app" ] || [ -d "/Applications/Brave Browser.app" ]; }
+have_firefox() { command -v firefox >/dev/null 2>&1 || command -v librewolf >/dev/null 2>&1 || [ -d "/Applications/Firefox.app" ]; }
+ENGINE="${ACODE_BROWSER:-}"
+if [ -z "$ENGINE" ] && [ -t 0 ] || { [ -z "$ENGINE" ] && [ -r /dev/tty ]; }; then
+  printf 'Web app browser engine: [1] Chromium-based  [2] Firefox  [3] skip  (Enter = 1): '
+  read -r answer < /dev/tty || answer=""
+  case "$answer" in 2) ENGINE=firefox ;; 3) ENGINE=none ;; *) ENGINE=chromium ;; esac
+fi
+[ -n "$ENGINE" ] || { if have_chromium; then ENGINE=chromium; elif have_firefox; then ENGINE=firefox; else ENGINE=chromium; fi; }
+install_browser() {
+  # $1 = chromium | firefox. Uses the system's package manager (asks for your password); prints the command if none fits.
+  if [ "$(uname)" = "Darwin" ]; then
+    if command -v brew >/dev/null 2>&1; then brew install --cask "$( [ "$1" = firefox ] && echo firefox || echo chromium )"; else warn "Install Homebrew (https://brew.sh) or get the browser from its website."; fi
+    return
+  fi
+  pkg=""
+  if command -v pacman >/dev/null 2>&1; then pkg="sudo pacman -S --needed $( [ "$1" = firefox ] && echo firefox || echo chromium )"
+  elif command -v apt-get >/dev/null 2>&1; then pkg="sudo apt-get install -y $( [ "$1" = firefox ] && echo firefox || echo chromium )"
+  elif command -v dnf >/dev/null 2>&1; then pkg="sudo dnf install -y $( [ "$1" = firefox ] && echo firefox || echo chromium )"
+  elif command -v zypper >/dev/null 2>&1; then pkg="sudo zypper install -y $( [ "$1" = firefox ] && echo MozillaFirefox || echo chromium )"
+  elif command -v xbps-install >/dev/null 2>&1; then pkg="sudo xbps-install -y $( [ "$1" = firefox ] && echo firefox || echo chromium )"
+  elif command -v apk >/dev/null 2>&1; then pkg="sudo apk add $( [ "$1" = firefox ] && echo firefox || echo chromium )"
+  elif command -v emerge >/dev/null 2>&1; then pkg="sudo emerge $( [ "$1" = firefox ] && echo www-client/firefox-bin || echo www-client/chromium )"
+  elif command -v flatpak >/dev/null 2>&1; then pkg="flatpak install -y flathub $( [ "$1" = firefox ] && echo org.mozilla.firefox || echo org.chromium.Chromium )"
+  fi
+  if [ -z "$pkg" ]; then warn "Install a browser with your package manager, then run acode-web."; return; fi
+  if [ -r /dev/tty ]; then
+    printf 'Install it now with: %s ?  [y/N] ' "$pkg"
+    read -r yes < /dev/tty || yes=""
+    case "$yes" in y|Y|yes) sh -c "$pkg" ;; *) echo "Later: $pkg" ;; esac
+  else echo "Install it with: $pkg"; fi
+}
+if [ "$ENGINE" = chromium ] && ! have_chromium; then install_browser chromium; fi
+if [ "$ENGINE" = firefox ] && ! have_firefox; then install_browser firefox; fi
+if [ "$ENGINE" != none ]; then
+  CONF="${XDG_CONFIG_HOME:-$HOME/.config}/agent-code"
+  mkdir -p "$CONF"
+  [ -f "$CONF/web.json" ] || printf '{ "engine": "%s" }\n' "$ENGINE" > "$CONF/web.json"
+  if [ "$(uname)" = "Linux" ]; then
+    # A launcher entry, so it starts like any app (menu, dock, search).
+    APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$APPS"
+    cp "$HOME_DIR/app/web/icon.svg" "${XDG_DATA_HOME:-$HOME/.local/share}/icons/agent-code.svg" 2>/dev/null || { mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/icons"; cp "$HOME_DIR/app/web/icon.svg" "${XDG_DATA_HOME:-$HOME/.local/share}/icons/agent-code.svg"; }
+    cat > "$APPS/agent-code-web.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Agent Code
+Comment=Every coding agent in one app (Claude Code, opencode, DeepSeek Harness, Codex)
+Exec=$BIN_DIR/acode-web %F
+Icon=${XDG_DATA_HOME:-$HOME/.local/share}/icons/agent-code.svg
+Terminal=false
+Categories=Development;
+StartupWMClass=agent-code
+DESKTOP
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" >/dev/null 2>&1 || true
+  elif [ "$(uname)" = "Darwin" ]; then
+    # A small app bundle in ~/Applications that runs acode-web.
+    APP="$HOME/Applications/Agent Code.app/Contents/MacOS"
+    mkdir -p "$APP"
+    printf '#!/bin/sh\nexec "%s/acode-web" "$HOME"\n' "$BIN_DIR" > "$APP/Agent Code"
+    chmod +x "$APP/Agent Code"
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>Agent Code</string><key>CFBundleName</key><string>Agent Code</string><key>CFBundleIdentifier</key><string>dev.agentcode.web</string></dict></plist>\n' > "$HOME/Applications/Agent Code.app/Contents/Info.plist"
+  fi
+  bold "Web app: acode-web  (engine: $ENGINE; change it with acode-web --engine chromium|firefox)"
+fi
+
+# 6. The engines.
 if ! command -v claude >/dev/null 2>&1; then
   warn "Claude Code is not installed. For the Claude Code engine: npm i -g @anthropic-ai/claude-code, then run claude once to log in."
 fi
 echo "Optional harnesses: opencode (npm i -g opencode-ai), DeepSeek Harness (npm i -g @deepseek-ai/dsh),"
 echo "Codex (npm i -g @openai/codex @agentclientprotocol/codex-acp)."
-bold "Done. Start with: acode"
+bold "Done. Start with: acode   (terminal)   or   acode-web   (app window)"
