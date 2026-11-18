@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto"
 import { config, saveConfig } from "./config"
 import { opencodeApi } from "./acp"
 import { log } from "./log"
+import { allWindowTabs, publishTabs } from "./windows"
 import { createSession, DEFAULT_MODEL, onSessionEvent, storedEffort, storeEffort,                                 } from "./session"
 
 // ---------------------------------------------------------------------------
@@ -253,6 +254,66 @@ export function closeTab(session = active()) {
   persistTabs()
 }
 
+/** Let a tab go to another window: it leaves this one without ending its conversation (no "closed tab" entry). */
+export function releaseTab(session) {
+  const list = tabs()
+  const index = list.indexOf(session)
+  if (index < 0) return
+  session.dispose()
+  const rest = list.filter((tab) => tab !== session)
+  if (!rest.length) {
+    const fresh = makeSession(session)
+    batch(() => {
+      setTabs([fresh])
+      setActiveTab(fresh)
+    })
+    void fresh.start({ sessionId: randomUUID() })
+  } else {
+    batch(() => {
+      setTabs(rest)
+      if (activeTab() === session) setActiveTab(rest[Math.min(index, rest.length - 1)])
+    })
+    const next = activeTab()
+    if (next?.store.dormant) void next.ensureStarted()
+  }
+  // Now, not debounced: the window that takes the tab must not see it listed here too.
+  clearTimeout(persistTimer)
+  writeTabs()
+}
+
+/** Tabs from another window (it closed, or sent them): open them here, asleep until looked at, in their order. */
+export async function adoptTabs(list, where = "after") {
+  const fresh = list.filter((item) => item?.id && !findTab(item.id))
+  if (!fresh.length) return
+  const loaded = await Promise.all(
+    fresh.map(async (item) => {
+      const session = makeSession()
+      const ok = await session.load(item.id, item.title, false).catch((error) => {
+        log("adopt error", item.id, error)
+        return false
+      })
+      if (ok) return session
+      session.dispose()
+      return undefined
+    }),
+  )
+  const added = loaded.filter(Boolean)
+  if (!added.length) return
+  const current = tabs()
+  // A lone empty tab makes way for them.
+  const keep = current.length === 1 && isPristine(current[0]) ? [] : current
+  batch(() => {
+    setTabs(where === "before" ? [...added, ...keep] : [...keep, ...added])
+    if (!keep.length) setActiveTab(added[0])
+  })
+  if (!keep.length) {
+    current[0].dispose()
+    if (added[0].store.dormant) void added[0].ensureStarted()
+  }
+  persistTabs()
+  emitTab("adopted", added[0])
+}
+
 export function moveTab(session         , direction        ) {
   const list = [...tabs()]
   const index = list.indexOf(session)
@@ -307,10 +368,12 @@ export function flushTabs() {
 function writeTabs() {
   persistTimer = undefined
   {
-    const open = tabs()
+    const mine = tabs()
       // A dormant tab of another harness has no transcript until it is opened: it is still a saved tab.
       .filter((tab) => tab.store.sessionID && (tab.store.dormant || tab.store.messages.some((m) => m.type === "user")))
-      .map((tab) => tab.store.sessionID )
+    // Other windows on this folder see this window's tabs; what is saved for the next start is every window's.
+    publishTabs(mine.map((tab) => ({ id: tab.store.sessionID, title: tab.store.title })))
+    const open = allWindowTabs()
     const focused = activeTab()?.store.sessionID
     config.tabs = { ...(config.tabs ?? {}), [app.cwd]: { open, active: focused && open.includes(focused) ? focused : undefined } }
     if (!open.length) delete config.tabs[app.cwd]

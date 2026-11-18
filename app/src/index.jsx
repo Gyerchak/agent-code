@@ -9,11 +9,12 @@ import { statSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { App } from "./app"
 import { refreshCatalog } from "./context/catalog"
+import { closeWindow, registerWindow, watchWindows } from "./context/windows"
 import { refreshProviders } from "./context/providers"
 import { setExitHandler } from "./context/app"
 import { log } from "./context/log"
 import { flushConfig } from "./context/config"
-import { active, app, continueLast, flushTabs, initTabs, disposeAll, openSession, refreshSessions, restoreTabs, setApp, startFresh } from "./context/tabs"
+import { active, adoptTabs, app, continueLast, flushTabs, initTabs, disposeAll, openSession, refreshSessions, restoreTabs, setApp, startFresh } from "./context/tabs"
 import { setSyntaxOwner, theme } from "./context/theme"
 import { builtins } from "./feature-plugins/builtins"
 import { provideHostModules } from "./plugin/loader"
@@ -100,6 +101,8 @@ async function shutdown(code = 0) {
   const sessionID = active().store.sessionID
   const hasMessages = active().store.messages.length > 0
   flushTabs()
+  // The tabs go to the window that stays (if there is one).
+  closeWindow()
   flushConfig()
   stopPhoneServer()
   void stopPlugins().catch(() => {})
@@ -167,7 +170,19 @@ setTimeout(() => void import("./context/spendhistory").then((module) => module.s
 void refreshProviders().catch((error) => log("providers error", error))
 
 createRoot(async () => {
-  if (args.continue) {
+  // Another window already runs on this folder: the saved tabs are its; this one starts with what it was asked
+  // for (a session, a prompt) or a new empty tab, and its tab numbers go on from the other window's.
+  const others = registerWindow(process.cwd())
+  watchWindows((list, where) => void adoptTabs(list, where))
+  if (others.length) {
+    if (typeof args.resume === "string") await openSession(args.resume)
+    else await startFresh()
+    if (args.resume === true) {
+      await refreshSessions()
+      const { runCommand } = await import("./context/keymap")
+      runCommand("session.list")
+    }
+  } else if (args.continue) {
     await continueLast()
     await restoreTabs({ focus: active().store.sessionID, keepActive: true })
   } else if (typeof args.resume === "string") {

@@ -3,6 +3,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Show } from "solid-js"
 import { runCommand, shortcut } from "../context/keymap"
 import { active, closeTab, focusTab, moveTabTo, tabs } from "../context/tabs"
+import { tabOffset } from "../context/windows"
 import { theme } from "../context/theme"
 import { Spinner } from "./spinner"
 
@@ -61,7 +62,11 @@ export function TabBar() {
     }
     if (target !== from) moveTabTo(session, target)
   }
-  const drop = () => {
+  // A tab dragged well below the strip and let go there leaves for a window of its own (as in a browser).
+  let pulled
+  const drop = (event) => {
+    const held = dragging()
+    if (held && dragged && typeof event?.y === "number" && event.y - (bar?.y ?? 0) >= 4) pulled = held
     setDragging(undefined)
     setFloatX(undefined)
   }
@@ -81,7 +86,8 @@ export function TabBar() {
     <box ref={(r) => (bar = r)} height={1} flexShrink={0} flexDirection="row" backgroundColor={theme.backgroundPanel} paddingLeft={1} paddingRight={1}>
       <For each={visible()}>
         {(session) => {
-          const index = () => tabs().indexOf(session) + 1
+          // Numbers go on from the windows opened before this one (1 2 there, 3 4 5 here).
+          const index = () => tabs().indexOf(session) + 1 + tabOffset()
           const focused = () => active() === session
           const running = () => session.store.status === "running" || session.store.booting
           const hovered = () => hover() === session.key
@@ -118,6 +124,16 @@ export function TabBar() {
                 setTimeout(() => lastOver < seq && hover() === session.key && setHover(undefined), 40)
               }}
               onMouseUp={() => {
+                if (pulled) {
+                  const tab = pulled
+                  pulled = undefined
+                  dragged = false
+                  if (!tab.disposed) {
+                    focusTab(tab)
+                    runCommand("tab.detach")
+                  }
+                  return
+                }
                 const held = dragging()
                 drop()
                 // Released on another tab: the held tab goes there (and stays the one in front).
@@ -179,7 +195,7 @@ export function TabBar() {
           gap={1}
           backgroundColor={theme.backgroundElement}
         >
-          <text selectable={false} fg={theme.primary}>{tabs().indexOf(dragging()) + 1 <= 9 ? tabs().indexOf(dragging()) + 1 : "·"}</text>
+          <text selectable={false} fg={theme.primary}>{tabs().indexOf(dragging()) + 1 + tabOffset() <= 9 ? tabs().indexOf(dragging()) + 1 + tabOffset() : "·"}</text>
           <text selectable={false} fg={theme.text} attributes={TextAttributes.BOLD} wrapMode="none">
             {label(dragging())}
           </text>

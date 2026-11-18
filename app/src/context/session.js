@@ -478,8 +478,23 @@ function claudeExecutable() {
 
 /** Build and Plan plus the user's own modes (config.agentModes: a name, a permission mode, an instruction). */
 export function agentList() {
-  return [...AGENTS, ...(config.agentModes ?? []).filter((mode) => mode?.id && mode.name && !AGENTS.some((agent) => agent.id === mode.id))]
+  const own = (config.agentModes ?? []).filter((mode) => mode?.id && mode.name && !AGENTS.some((agent) => agent.id === mode.id))
+  // Chat is built in (the user's own mode of that id replaces it).
+  return [...AGENTS, ...(own.some((mode) => mode.id === CHAT_MODE.id) ? [] : [CHAT_MODE]), ...own]
 }
+
+/**
+ * Chat: the tab behaves as a plain chat (answers from what it knows and the conversation, no tools unless asked).
+ * New chats start in it unless Settings → "New chats start in Chat mode" is off.
+ */
+export const CHAT_MODE = {
+  id: "chat",
+  name: "Chat",
+  mode: "default",
+  prompt:
+    "This is a plain conversation. Answer directly, like a chat assistant, from what you know and what is in this conversation. Do not use tools (no reading or changing files, no commands, no web, no subagents) unless the user asks for that in so many words. If something would need tools, say so in a line and let the user decide; they can switch to Build mode.",
+}
+export const defaultAgentMode = () => (config.chatByDefault === false ? undefined : CHAT_MODE.id)
 
 export function agentIndex(id        ) {
   return Math.max(0, agentList().findIndex((agent) => agent.id === id))
@@ -2113,6 +2128,16 @@ export function createSession(seed             ) {
 
   // The tab's own mode (kept per session); it holds while the permission mode is still the one it set.
   let modeNote
+  // Whether a mode's instruction is in the conversation (or about to be): leaving that mode then says so.
+  let instructed = false
+  /** A new conversation starts in the default mode (Chat): its instruction goes with the first message. */
+  function applyDefaultMode() {
+    const id = defaultAgentMode()
+    const agent = id ? agentList().find((item) => item.id === id) : undefined
+    setStore("agentMode", agent?.id)
+    modeNote = agent?.prompt?.trim() ? `[Mode "${agent.name}": ${agent.prompt.trim()}]` : undefined
+    instructed = !!modeNote
+  }
   function currentAgent()        {
     const id = store.agentMode ?? (store.sessionID ? config.sessionAgentMode?.[store.sessionID] : undefined)
     const own = id ? agentList().find((agent) => agent.id === id) : undefined
@@ -2120,12 +2145,23 @@ export function createSession(seed             ) {
     return store.mode === "plan" ? AGENTS[1] : AGENTS[0]
   }
 
+  /** The tab's mode is the session's from its first message on (a new chat's default mode included). */
+  function rememberAgentMode() {
+    const id = store.sessionID
+    if (!id || (config.sessionAgentMode?.[id] ?? undefined) === (store.agentMode ?? undefined)) return
+    const all = { ...(config.sessionAgentMode ?? {}) }
+    if (store.agentMode) all[id] = store.agentMode
+    else delete all[id]
+    config.sessionAgentMode = all
+    saveConfig()
+  }
+
   /** Switch to a mode: its permission mode now, its instruction with the next prompt. */
   function setAgent(id) {
     const agent = agentList().find((item) => item.id === id)
     if (!agent) return
     const custom = !AGENTS.includes(agent)
-    setStore("agentMode", custom ? agent.id : undefined)
+    // The saved mode first: what shows the mode reads it when the tab has none of its own.
     if (store.sessionID) {
       const all = { ...(config.sessionAgentMode ?? {}) }
       if (custom) all[store.sessionID] = agent.id
@@ -2133,7 +2169,15 @@ export function createSession(seed             ) {
       config.sessionAgentMode = all
       saveConfig()
     }
-    modeNote = custom && agent.prompt?.trim() ? `[Mode "${agent.name}": ${agent.prompt.trim()}]` : custom ? undefined : modeNote && `[Mode "${agent.name}": the earlier mode's instruction no longer applies.]`
+    setStore("agentMode", custom ? agent.id : undefined)
+    if (custom && agent.prompt?.trim()) {
+      modeNote = `[Mode "${agent.name}": ${agent.prompt.trim()}]`
+      instructed = true
+    } else {
+      // The earlier mode's instruction is in the conversation: tell the model it is over.
+      modeNote = instructed ? `[Mode "${agent.name}": the earlier mode's instruction no longer applies; work normally, tools included.]` : undefined
+      instructed = false
+    }
     void setMode(agent.mode)
   }
 
@@ -2812,7 +2856,9 @@ export function createSession(seed             ) {
       else for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
       prompt.push(...attachmentAcp(item.attachments))
     }
-    prompt.push({ type: "text", text: items.map((item) => item.text).join("\n\n") })
+    prompt.push({ type: "text", text: (modeNote ? `${modeNote}\n\n` : "") + items.map((item) => item.text).join("\n\n") })
+    modeNote = undefined
+    rememberAgentMode()
     const gen = generation
     ensureTurn()
     let result
@@ -2969,6 +3015,8 @@ export function createSession(seed             ) {
   const onLimitReset = () => store.pause?.reason === "limit" && resume()
   limitResetListeners.add(onLimitReset)
   allSessions.add(self)
+  // A new tab starts in the default mode (Chat); a restored one takes its session's own in load().
+  applyDefaultMode()
 
   /** Pause until `until` (ms; undefined = until resumed by hand). */
   function pause(until, reason = "user", windows) {
@@ -3137,6 +3185,7 @@ export function createSession(seed             ) {
     lastWork = Date.now()
     const forModel = modeNote ? `${modeNote}\n\n${text}` : text
     modeNote = undefined
+    rememberAgentMode()
     content.push({ type: "text", text: forModel })
     current.input.push({
       type: "user",
@@ -3456,6 +3505,7 @@ export function createSession(seed             ) {
   function resetTranscript() {
     streamParts.clear()
     syncedParts.clear()
+    applyDefaultMode()
     batch(() => {
       setStore("messages", [])
       setStore("children", {})
@@ -3485,7 +3535,10 @@ export function createSession(seed             ) {
     if (engine) {
       resetTranscript()
       const used = config.sessionModels?.[id]
+      modeNote = undefined
+      instructed = !!config.sessionAgentMode?.[id]
       batch(() => {
+        setStore("agentMode", config.sessionAgentMode?.[id])
         setStore("sessionID", id)
         setStore("title", title)
         setStore("view", "session")
@@ -3508,7 +3561,11 @@ export function createSession(seed             ) {
       setStore("sessionID", id)
       setStore("title", title)
       setStore("view", "session")
+      // An existing conversation keeps its own mode (none saved: Build).
+      setStore("agentMode", config.sessionAgentMode?.[id])
     })
+    modeNote = undefined
+    instructed = !!config.sessionAgentMode?.[id]
     restorePause()
     // What the session cost before this window opened it (its subagents too): counted from its transcripts as they
     // are now; whatever it spends from here on is counted live.

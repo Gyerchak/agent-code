@@ -2,6 +2,7 @@ import { findBinary, isWindows, openCommand, spawnOptions } from "./context/plat
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
 import { knownSessionSpend, scanAllSpend } from "./context/spendhistory"
+import { otherWindows, sendTabs } from "./context/windows"
 import { billingLabel, catalog, CLAUDE_IDS, contextText, modelMeta, priceText, refreshCatalog, SUBAGENT_TIERS, tierModels } from "./context/catalog"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { opencodeBinary } from "./context/acp"
@@ -49,6 +50,7 @@ import {
   backgroundTasks,
   closeTab,
   closeTabsRight,
+  releaseTab,
   reopenTab,
   toggleUnread,
   currentAgent,
@@ -677,6 +679,17 @@ function openWindow(cwd, command, title) {
   const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-window")
   if (isWindows || !existsSync(launcher)) return toast.show({ variant: "warning", message: `Open a terminal in ${cwd} and run: ${command.join(" ")}`, duration: 8000 })
   spawn(launcher, ["--title", title, ...command], { cwd, detached: true, stdio: "ignore" }).unref()
+}
+
+/** A tab can change windows once it has a conversation; a running turn has to end first (its engine restarts there). */
+const tabHasChat = () => !!store.sessionID && store.messages.some((m) => m.type === "user")
+function tabMovable() {
+  if (!tabHasChat()) return false
+  if (store.status === "running") {
+    toast.show({ variant: "warning", message: "Wait for the turn to end (or interrupt it) before moving the tab" })
+    return false
+  }
+  return true
 }
 
 const openWorktree = (dir) => openWindow(dir, [path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode"), dir], APP_NAME)
@@ -2263,6 +2276,7 @@ function DialogSettings() {
     { key: "runTests", title: "Run tests", description: "Claude may run tests and checks", get: flag("runTests", true), set: write("runTests"), restart: true },
     { key: "preferTools", title: "Prefer tools", description: "use installed tools instead of spending tokens", get: flag("preferTools", true), set: write("preferTools"), restart: true },
     { key: "installTools", title: "Install tools", description: "Claude may download and set up new tools", get: flag("installTools", false), set: write("installTools"), restart: true },
+    { key: "chatByDefault", title: "New chats start in Chat mode", description: "a plain conversation, no tools unless asked (tab switches to Build or Plan)", get: flag("chatByDefault", true), set: write("chatByDefault") },
     { key: "planning", title: "Planning checklist", description: "Claude keeps a plan with checkboxes", get: flag("planning", false), set: write("planning"), restart: true },
     { key: "subagents", title: "Subagents", description: "Claude may delegate work to subagents", get: flag("subagents", true), set: write("subagents"), restart: true },
     { key: "subagentModels", title: "  Different models", description: "subagents may use another model", get: flag("subagentModels", true), set: write("subagentModels"), restart: true },
@@ -3436,6 +3450,43 @@ export function App() {
       title: promptMode() === "shell" ? "Leave shell mode" : "Shell mode",
       category: "Prompt",
       run: () => setPromptMode(promptMode() === "shell" ? "normal" : "shell"),
+    },
+    {
+      id: "tab.detach",
+      title: "Move tab to a new window",
+      category: "Tabs",
+      enabled: () => tabHasChat(),
+      run: () => {
+        if (!tabMovable()) return
+        const tab = active()
+        const id = store.sessionID
+        openWindow(store.cwd, [path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode"), "-r", id], store.title?.slice(0, 40) ?? APP_NAME)
+        releaseTab(tab)
+      },
+    },
+    {
+      id: "tab.move",
+      title: "Move tab to another window…",
+      category: "Tabs",
+      enabled: () => tabHasChat() && otherWindows().length > 0,
+      run: () =>
+        tabMovable() &&
+        dialog.replace(() => (
+          <DialogSelect
+            title="Move tab to"
+            options={otherWindows().map((window, index) => ({
+              title: `Window ${index + 1}`,
+              value: String(window.pid),
+              description: (window.tabs ?? []).map((tab) => tab.title ?? "session").slice(0, 3).join(" · ") || "empty",
+              footer: `${window.tabs?.length ?? 0} tab${window.tabs?.length === 1 ? "" : "s"}`,
+            }))}
+            onSelect={(option) => {
+              const tab = active()
+              if (sendTabs(Number(option.value), [{ id: store.sessionID, title: store.title }])) releaseTab(tab)
+              dialog.clear()
+            }}
+          />
+        )),
     },
     {
       id: "tab.reopen",
