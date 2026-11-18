@@ -186,10 +186,9 @@ export function Prompt(props                                         ) {
         return
       }
     }
-    if (!store.ready) {
-      toast.show({ variant: "warning", message: store.fatal ?? `${engineName()} is still starting…` })
-      return
-    }
+    // Not ready (still starting, or its process died): the message is taken anyway. The tab holds it (shown as
+    // "not sent yet"), brings its engine back and sends it. Refusing here left a dead tab dead for good.
+    if (!store.ready) toast.show({ variant: "info", message: store.fatal ? `${engineName()} stopped: starting it again…` : `${engineName()} is starting: your message goes out when it is up`, duration: 3500 })
     const expanded = expandPastes(raw)
     const attachments = [...draft.attachments.entries()].filter(([token]) => raw.includes(token)).map(([token, item]) => ({ ...item, token }))
     setText("")
@@ -520,26 +519,39 @@ export function Prompt(props                                         ) {
         setText(store.suggestion)
         return true
       }
-      // Up/down browse prompt history only from the very end of the prompt; anywhere else they move inside the text.
+      // Up/down move inside the text; up at its very start (or down at its very end while browsing) goes through
+      // the prompt history.
       const previous = matchesId(event, "prompt.history.previous")
       if (input.focused && (previous || matchesId(event, "prompt.history.next"))) {
         const cursor = input.logicalCursor
         const lastRow = cursor.row === input.lineCount - 1
         const atEnd = lastRow && cursor.col === input.editBuffer.getEOL().col
         if (previous) {
-          if (atEnd && history().length) {
+          // At the very start of the text, up goes on to the previous prompt too (cursor kept at the start), so
+          // up, up, up walks: lines → start of the text → older prompts.
+          const atStart = input.cursorOffset === 0
+          // From the end, up browses history only while browsing it (or with an empty prompt): in text you typed
+          // yourself, up moves up through it first.
+          const browsing = !input.plainText || (store_.historyIndex >= 0 && input.plainText === history()[store_.historyIndex])
+          if ((atStart || (atEnd && browsing)) && history().length) {
             if (store_.historyIndex === -1) setStore("saved", input.plainText)
             const next = Math.min(history().length - 1, store_.historyIndex + 1)
             if (next === store_.historyIndex) return true
             setStore("historyIndex", next)
             input.setText(history()[next])
-            input.gotoBufferEnd()
+            if (atStart && !atEnd) input.gotoBufferHome()
+            else input.gotoBufferEnd()
             return true
           }
           if (!input.plainText) return false
           // On the first line, up goes to the very start of the text (as down on the last line goes to its end).
-          if (input.editorView.getVisualSOL().offset === 0) input.gotoBufferHome()
-          else input.moveCursorUp()
+          const before = input.cursorOffset
+          if (cursor.row === 0 || input.editorView.getVisualSOL().offset === 0) input.gotoBufferHome()
+          else {
+            input.moveCursorUp()
+            // A wrapped first line the editor wouldn't leave: the start it is.
+            if (input.cursorOffset === before) input.gotoBufferHome()
+          }
           return true
         }
         if (atEnd && store_.historyIndex >= 0) {

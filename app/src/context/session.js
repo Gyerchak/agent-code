@@ -1259,6 +1259,14 @@ function checkAutoResume() {
       if (!session.store.resumeAt) {
         const tries = resumeTries.get(session) ?? 0
         const stated = refusedUntil.get(session)
+        // Another engine's limit with no reset time (e.g. opencode's free tier): three tries, then it is the user's call.
+        if (!stated && (session.store.engine || splitModel(session.store.model)) && tries >= 3) {
+          waitingResume.delete(session)
+          setResumeAt(session, undefined)
+          resumeTries.delete(session)
+          session.notice?.("Auto-resume stopped after 3 tries: this limit gives no reset time. Send a message when you want to try again.", "info")
+          continue
+        }
         const when = (stated && stated > Date.now() ? stated : resumeTime(session)) ?? Date.now() + Math.min(40, 5 * 2 ** tries) * 60_000
         setResumeAt(session, when + 20_000)
         continue
@@ -2384,8 +2392,15 @@ export function createSession(seed             ) {
 
   /** Restart the Claude Code process keeping the conversation (used when behaviour settings change). */
   let restartAfterTurn = false
-  async function restart() {
-    if (!(current || oc) || store.status === "running") return false
+  async function restart(force = false) {
+    if (force) {
+      // From any state (stuck, dead, starting forever): end the process and start again with the conversation.
+      if (store.status === "running") finishTurn({})
+      if (store.engine || oc) {
+        await reviveHarness()
+        return true
+      }
+    } else if (!(current || oc) || store.status === "running") return false
     restartAfterTurn = false
     if (store.sessionID && store.messages.some((m) => m.type === "user")) await start({ resume: store.sessionID })
     // A session with no prompt yet keeps its id (and so its per-session settings, like the agent mix).
@@ -2450,7 +2465,9 @@ export function createSession(seed             ) {
       oc.caps = { models: acpModels(result) ?? oc.caps.models, effort: acpEffort(result) ?? oc.caps.effort, modes: acpModes(result) ?? oc.caps.modes }
     }
     try {
-      const hello = await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} })
+      const within = (promise, seconds, what) =>
+        Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer to ${what} in ${seconds} s`)), seconds * 1000).unref?.())])
+      const hello = await within(client.request("initialize", { protocolVersion: 1, clientCapabilities: {} }), 45, "initialize")
       // HTTP MCP servers only where the harness says it can take them.
       if (!hello?.agentCapabilities?.mcpCapabilities?.http) for (let i = mcpServers.length - 1; i >= 0; i--) if (mcpServers[i].type === "http") mcpServers.splice(i, 1)
       // The harness's own version, for the sidebar's version line.
@@ -2464,7 +2481,7 @@ export function createSession(seed             ) {
       // its context comes back on its side, and the chat shown is the copy Agent Code kept.
       if (resume && !caps.loadSession && caps.sessionCapabilities?.resume) {
         try {
-          learn(await client.request("session/resume", { sessionId: resume, cwd: store.cwd, mcpServers }))
+          learn(await within(client.request("session/resume", { sessionId: resume, cwd: store.cwd, mcpServers }), 90, "session/resume"))
           const kept = readAcpHistory(resume)
           if (kept && !store.messages.some((m) => m.type === "user")) setStore("messages", kept)
         } catch (error) {
@@ -2479,7 +2496,7 @@ export function createSession(seed             ) {
           setStore("children", {})
         })
         try {
-          learn(await client.request("session/load", { sessionId: resume, cwd: store.cwd, mcpServers }))
+          learn(await within(client.request("session/load", { sessionId: resume, cwd: store.cwd, mcpServers }), 180, "session/load"))
         } catch (error) {
           log(`${harness.id} load error`, error)
           pushNotice(`Could not reopen the ${harness.name} conversation (${errorMessage(error)}); starting a new one.`, "warning")
@@ -2490,7 +2507,7 @@ export function createSession(seed             ) {
         }
       }
       if (!id) {
-        const created = await client.request("session/new", { cwd: store.cwd, mcpServers })
+        const created = await within(client.request("session/new", { cwd: store.cwd, mcpServers }), 90, "session/new")
         learn(created)
         id = created.sessionId
       }
@@ -2509,12 +2526,19 @@ export function createSession(seed             ) {
       })
       rememberSessionModel(id, store.model)
       if (resume === id && harness.id === "opencode") void loadOpencodeInfo()
+      if (unsent.length) setTimeout(flushUnsent, 0)
     } catch (error) {
       if (gen !== generation) return
       log(`${harness.id} start error`, error)
+      // No half-alive harness is left behind: the next message starts it again.
+      try {
+        client.close()
+      } catch {}
+      if (oc?.client === client) oc = undefined
       batch(() => {
         setStore("booting", false)
-        setStore("fatal", errorMessage(error))
+        setStore("ready", false)
+        setStore("fatal", `${harness.name} didn't start (${errorMessage(error)}). Send a message or /restart to try again.`)
       })
     }
   }
@@ -2862,7 +2886,26 @@ export function createSession(seed             ) {
     emit("attention", { kind: "login" })
   }
 
-  function holdUnsent(text, extra) {
+  /** Bring a harness tab's process back (after it died, hung or failed to start), keeping the conversation. */
+  let reviving = false
+  async function reviveHarness() {
+    if (reviving || disposed) return
+    reviving = true
+    try {
+      if (oc) {
+        try {
+          oc.client.close()
+        } catch {}
+        oc = undefined
+      }
+      const started = store.messages.some((m) => m.type === "user" && !m.unsent)
+      await start(store.sessionID && started ? { resume: store.sessionID } : {})
+    } finally {
+      reviving = false
+    }
+  }
+
+  function holdUnsent(text, extra, harness = false) {
     const id = randomUUID()
     batch(() => {
       setStore("messages", (list) => [
@@ -2883,6 +2926,7 @@ export function createSession(seed             ) {
     })
     unsent.push({ id, text, extra })
     emit("sent", { id })
+    if (harness) return
     // Logged in again outside Agent Code (claude auth login in a terminal): the credentials changed, so go on.
     if (store.authRequired && credentialsChangedSince(loginNeededAt)) return void loggedIn()
     // Bring the process back (unless the login has to be renewed first).
@@ -2898,7 +2942,7 @@ export function createSession(seed             ) {
 
   /** Send what waited, in order, now that the process runs. */
   function flushUnsent() {
-    if (!current || store.fatal || store.authRequired || !unsent.length) return
+    if ((!current && !(oc && store.ready)) || store.fatal || store.authRequired || !unsent.length) return
     const items = unsent.splice(0)
     setStore("messages", (list) => list.filter((m) => !(m.type === "user" && m.unsent)))
     for (const item of items) send(item.text, item.extra)
@@ -3047,7 +3091,14 @@ export function createSession(seed             ) {
       void commitRevert().then(() => send(text, extra))
       return
     }
-    if (oc) return sendOpencode(text, extra)
+    if (oc && store.ready && !store.fatal) return sendOpencode(text, extra)
+    // A harness tab that is still starting, or whose process died or never came up: hold the message, bring the
+    // harness back, send when it is ready.
+    if (oc || (store.engine && !current)) {
+      holdUnsent(text, extra, true)
+      if (store.fatal || !oc) void reviveHarness()
+      return
+    }
     if (!current && store.dormant && !store.authRequired) {
       void ensureStarted().then(() => send(text, extra))
       return
@@ -3116,8 +3167,27 @@ export function createSession(seed             ) {
     setStore("permissions", [])
     setStore("questions", [])
     try {
-      if (oc) oc.client.notify("session/cancel", { sessionId: oc.id })
-      else await current .q.interrupt()
+      if (oc) {
+        oc.client.notify("session/cancel", { sessionId: oc.id })
+        const session = oc
+        const turnGen = generation
+        setTimeout(() => {
+          if (oc !== session || generation !== turnGen || store.status !== "running") return
+          log(`${session.harness} didn't stop after cancel: ending the turn here`)
+          generation++
+          try {
+            session.client.close()
+          } catch {}
+          oc = undefined
+          ocQueue.length = 0
+          batch(() => {
+            finishTurn({})
+            setStore("ready", false)
+            setStore("dormant", true)
+          })
+          pushNotice("The harness didn't answer the stop, so its process was ended. Your next message starts it again with this conversation.", "info")
+        }, 8000).unref?.()
+      } else await current .q.interrupt()
     } catch (error) {
       log("interrupt error", error)
     }

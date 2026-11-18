@@ -3375,6 +3375,16 @@ export function App() {
       enabled: () => !store.engine && !splitModel(store.model),
       run: () => void openCodeMode(),
     },
+    {
+      id: "session.restart",
+      title: "Restart this tab's engine (keeps the conversation)",
+      category: "Session",
+      slash: "restart",
+      run: async () => {
+        toast.show({ variant: "info", message: "Restarting this tab's engine…", duration: 2500 })
+        await active().restart(true)
+      },
+    },
     { id: "session.find", title: "Find in chat", category: "Session", slash: "find", run: () => dialog.replace(() => <DialogFind />, undefined, "large") },
     { id: "session.find.next", title: "Find next", category: "Session", palette: false, run: () => findAgain(1) },
     { id: "session.find.previous", title: "Find previous", category: "Session", palette: false, run: () => findAgain(-1) },
