@@ -874,109 +874,94 @@ export function setSessionAutoPause(sessionID, change) {
 }
 
 // ---------------------------------------------------------------------------
-// Stop after / Resume at (sidebar, above Pause): stop a tab (or every tab) at a time or when a plan window reaches
-// a level; resume paused tabs at a time or when a window resets. A tab's own rule comes first, then the one for every
-// tab. Both are one-shot: a rule is used up once it has acted.
+// Stop after (sidebar, above Pause): stop a tab (or every tab) when a plan window reaches an exact level — the
+// 5-hour limit first of all — or at a time. A limit stop pauses until that window resets and then goes on by itself;
+// a time stop pauses until you resume. A tab's own rule comes first, then the one for every tab; a rule is used up
+// once it has stopped the tab.
 // ---------------------------------------------------------------------------
 
 const PLAN_WINDOWS = { fiveHour: "5-hour", week: "weekly", fable: "Fable" }
 const fableWindow = () => (limits.scoped ?? []).find((window) => /fable/i.test(window.name ?? ""))
 export const planWindowOf = (key) => (key === "fable" ? fableWindow() : limits[key])
 export const hasFableWindow = () => !!fableWindow()
+/** How full a plan window is now, as Stop after sees it: the live estimate; 0 once the window has reset; undefined
+ *  before the first reading. */
+export function stopLevel(key) {
+  const exact = planWindowOf(key)
+  if (exact?.utilization == null) return undefined
+  if (exact.resetsAt && exact.resetsAt <= Date.now()) return 0
+  return liveWindow(exact, key === "fable" ? "week" : key)?.utilization ?? 0
+}
 
-function ruleFor(kind, sessionID) {
-  const all = config[kind] ?? {}
+export function stopRuleFor(sessionID) {
+  const all = config.stopAfter ?? {}
   const own = sessionID ? all.tabs?.[sessionID] : undefined
   return own ? { ...own, own: true } : all.every ? { ...all.every, own: false } : undefined
 }
-export const stopRuleFor = (sessionID) => ruleFor("stopAfter", sessionID)
-export const resumeRuleFor = (sessionID) => ruleFor("resumeAt", sessionID)
 
-/** Set (or with `null`, clear) a stop or resume rule for one tab (its session id) or, with no id, for every tab. */
-export function setPlanRule(kind, sessionID, rule) {
-  const all = { tabs: {}, ...(config[kind] ?? {}) }
+/** Set (or with `null`, clear) the stop rule of one tab (its session id) or, with no id, of every tab. */
+export function setStopRule(sessionID, rule) {
+  const all = { tabs: {}, ...(config.stopAfter ?? {}) }
   all.tabs = { ...(all.tabs ?? {}) }
   if (sessionID) {
     if (rule) all.tabs[sessionID] = rule
     else delete all.tabs[sessionID]
   } else if (rule) all.every = rule
   else delete all.every
-  config[kind] = all
+  config.stopAfter = all
+  // "Resume at" is gone: pausing and resuming do that.
+  delete config.resumeAt
   saveConfig()
-  setTimeout(checkPlanRules, 0)
+  setTimeout(checkStopRules, 0)
 }
 
-/** "14:30", "5-hour 80%", "when the weekly limit resets". */
+/** "5-hour 80%", "14:30". */
 export function describeRule(rule) {
   if (!rule) return undefined
   if (rule.time) return new Date(rule.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
   if (rule.window && rule.percent) return `${PLAN_WINDOWS[rule.window]} ${rule.percent}%`
-  if (rule.reset) return `${PLAN_WINDOWS[rule.reset]} reset`
   return undefined
 }
 
-/** When a resume rule lets a tab go on (ms), if it is known yet. */
-function resumeTimeOf(rule) {
-  if (!rule) return undefined
-  if (rule.time) return rule.time
-  const window = rule.reset ? planWindowOf(rule.reset) : undefined
-  return window?.resetsAt ? window.resetsAt + 30_000 : undefined
+function usedUp(session, rule) {
+  // A tab's own rule goes with it; the one for every tab goes once every open tab has had it.
+  if (rule.own) return setStopRule(session.store.sessionID, null)
+  const all = config.stopAfter ?? {}
+  if (!all.every) return
+  const done = new Set([...(all.every.done ?? []), session.store.sessionID])
+  config.stopAfter = { ...all, every: { ...all.every, done: [...done] } }
+  saveConfig()
 }
 
-function usedUp(kind, session, rule) {
-  // A tab's own rule goes with it; the one for every tab goes once every tab has had it.
-  if (rule.own) setPlanRule(kind, session.store.sessionID, null)
-  else {
-    const all = config[kind] ?? {}
-    if (all.every) {
-      const done = new Set([...(all.every.done ?? []), session.store.sessionID])
-      config[kind] = { ...all, every: { ...all.every, done: [...done] } }
-      saveConfig()
-    }
-  }
-}
-
-function checkPlanRules() {
+function checkStopRules() {
   const now = Date.now()
   for (const session of allSessions) {
-    if (session.disposed || !session.store.sessionID) continue
+    if (session.disposed || !session.store.sessionID || session.store.pause) continue
     const id = session.store.sessionID
     const stop = stopRuleFor(id)
-    if (stop && !(stop.done ?? []).includes(id) && !session.store.pause) {
-      let hit = false
-      if (stop.time) hit = now >= stop.time
-      else if (stop.window && stop.percent && !splitModel(session.store.model)) {
-        const window = liveWindow(planWindowOf(stop.window), stop.window === "fable" ? "week" : stop.window)
-        hit = (window?.utilization ?? 0) >= stop.percent
-      }
-      if (hit) {
-        const resume = resumeRuleFor(id)
-        const until = resumeTimeOf(resume)
-        session.pause(until, "stop")
-        session.notice?.(`Stopped (Stop after: ${describeRule(stop)})${until ? `; resumes ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}.`, "info")
-        usedUp("stopAfter", session, stop)
-        if (resume && until) usedUp("resumeAt", session, resume)
-        continue
-      }
+    if (!stop || (stop.done ?? []).includes(id)) continue
+    let until
+    let hit = false
+    if (stop.time) hit = now >= stop.time
+    else if (stop.window && stop.percent && !splitModel(session.store.model)) {
+      const exact = planWindowOf(stop.window)
+      hit = (stopLevel(stop.window) ?? 0) >= stop.percent
+      // A limit stop goes on by itself when that window resets.
+      if (exact?.resetsAt && exact.resetsAt > now) until = exact.resetsAt + 30_000
     }
-    // A paused tab with no time to go on yet: the resume rule gives it one.
-    const pause = session.store.pause
-    const resume = resumeRuleFor(id)
-    if (pause && !pause.until && resume && !(resume.done ?? []).includes(id)) {
-      const until = resumeTimeOf(resume)
-      if (until) {
-        session.pause(until, pause.reason, pause.windows)
-        usedUp("resumeAt", session, resume)
-      }
-    }
+    if (!hit) continue
+    session.pause(until, "stop", stop.window ? [{ key: stop.window, ...planWindowOf(stop.window) }] : undefined)
+    // A weekly reset can be days away: then the day goes with the time.
+    const today = until && new Date(until).toDateString() === new Date().toDateString()
+    const at = until ? new Date(until).toLocaleString([], { ...(today ? {} : { weekday: "short" }), hour: "2-digit", minute: "2-digit" }) : undefined
+    session.notice?.(`Stopped at ${describeRule(stop)} (Stop after)${at ? `: goes on when the window resets, ${at}` : ": resume with the Pause bar when you want"}.`, "info")
+    usedUp(session, stop)
   }
-  // Rules for every tab that every open tab has had are finished.
-  for (const kind of ["stopAfter", "resumeAt"]) {
-    const every = config[kind]?.every
-    if (every?.done && [...allSessions].every((session) => session.disposed || every.done.includes(session.store.sessionID))) setPlanRule(kind, undefined, null)
-  }
+  // A rule for every tab that every open tab has had is finished.
+  const every = config.stopAfter?.every
+  if (every?.done && [...allSessions].every((session) => session.disposed || every.done.includes(session.store.sessionID))) setStopRule(undefined, null)
 }
-setInterval(checkPlanRules, 10_000).unref?.()
+setInterval(checkStopRules, 10_000).unref?.()
 
 /** Tabs (by session id) with their own auto-pause setting. */
 export const autoPauseOverrides = () => Object.keys(config.sessionAutoPause ?? {})

@@ -43,7 +43,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, describeRule, hasFableWindow, planWindowOf, resumeRuleFor, setPlanRule, stopRuleFor, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, describeRule, hasFableWindow, setStopRule, stopLevel, stopRuleFor, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -534,106 +534,82 @@ function parseWhen(text) {
 const WINDOW_TITLES = { fiveHour: "5-hour limit", week: "weekly limit", fable: "Fable limit" }
 
 /**
- * Stop after (sidebar, above Pause): stop this tab — or, with the "every tab" cell, every tab — at a time or when a
- * plan window reaches a level. A tab's own rule comes first. Used up once it has stopped the tab.
+ * Stop after (sidebar, above Pause): mainly an exact level of the 5-hour limit (or the weekly / Fable one), else a
+ * time. Enter sets it for this tab; the "every tab" cell (right-click, ctrl+o) for every tab. A tab's own rule comes
+ * first. A limit stop goes on by itself when that window resets; a time stop waits for you.
  */
 function DialogStopAfter() {
   const sid = store.sessionID
   const mine = stopRuleFor(sid)
-  const windows = ["fiveHour", "week", ...(hasFableWindow() ? ["fable"] : [])].filter((key) => planWindowOf(key))
+  // The live level (the last reading plus what was spent since), as the stop check sees it. The limits show even
+  // before the first reading (then without "now").
+  const known = (key) => stopLevel(key) !== undefined
+  const used = (key) => Math.round(stopLevel(key) ?? 0)
+  const windows = [...(limits.rolling === false ? [] : ["fiveHour"]), "week", ...(hasFableWindow() ? ["fable"] : [])]
+  const who = (every) => (every ? "every tab" : "this tab")
   const set = (rule, every) => {
-    setPlanRule("stopAfter", every ? undefined : sid, rule)
+    setStopRule(every ? undefined : sid, rule)
     dialog.clear()
-    toast.show({ variant: "info", message: rule ? `Stop after ${describeRule(rule)} · ${every ? "every tab" : "this tab"}` : `Stop after: off · ${every ? "every tab" : "this tab"}` })
+    toast.show({ variant: "info", message: rule ? `Stop at ${describeRule(rule)} · ${who(every)}` : `Stop after: off · ${who(every)}` })
   }
+  const exact = (key, every) =>
+    dialog.replace(() => (
+      <DialogPrompt
+        title={`Stop ${who(every)} at what % of the ${WINDOW_TITLES[key]}?`}
+        placeholder={known(key) ? `now ${used(key)}% · e.g. ${Math.min(100, used(key) + 15)}, or +10 for 10% more` : "e.g. 85"}
+        onConfirm={(value) => {
+          const text = value.trim()
+          const more = text.match(/^\+\s*(\d+(?:\.\d+)?)\s*%?$/)
+          if (more && !known(key)) return toast.show({ variant: "warning", message: "The level now isn't read yet: write the % to stop at" })
+          const level = more ? used(key) + Number(more[1]) : Number(text.replace("%", ""))
+          if (!Number.isFinite(level) || level <= used(key) || level > 100)
+            return toast.show({ variant: "warning", message: `Write a level above the ${used(key)}% used now (up to 100), or +N` })
+          set({ window: key, percent: Math.round(level * 10) / 10 }, every)
+        }}
+      />
+    ))
   const choose = (option, every) => {
-    if (option.value === "off") return set(null, every)
-    if (option.value === "time")
+    const [kind, key, value] = option.value.split(":")
+    if (kind === "off") return set(null, every)
+    if (kind === "exact") return exact(key, every)
+    if (kind === "level") return set({ window: key, percent: Number(value) }, every)
+    if (kind === "more") return set({ window: key, percent: Math.min(100, used(key) + Number(value)) }, every)
+    if (kind === "in") return set({ time: Date.now() + Number(value) * 60_000 }, every)
+    if (kind === "time")
       return dialog.replace(() => (
         <DialogPrompt
-          title={`Stop ${every ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
+          title={`Stop ${who(every)} at (HH:MM) or after N minutes`}
           placeholder="e.g. 23:30 or 90"
-          onConfirm={(value) => {
-            const time = parseWhen(value)
+          onConfirm={(text) => {
+            const time = parseWhen(text)
             if (!time) return toast.show({ variant: "warning", message: "Write a time like 23:30 or a number of minutes" })
             set({ time }, every)
           }}
         />
       ))
-    const key = option.value.slice(7)
-    const now = Math.round(planWindowOf(key)?.utilization ?? 0)
-    dialog.replace(() => (
-      <DialogSelect
-        title={`Stop ${every ? "every tab" : "this tab"} when the ${WINDOW_TITLES[key]} reaches`}
-        options={[50, 60, 70, 75, 80, 85, 90, 95, 98, 99].filter((value) => value > now).map((value) => ({ title: `${value}%`, value: String(value), description: `now ${now}%` }))}
-        onSelect={(item) => set({ window: key, percent: Number(item.value) }, every)}
-      />
-    ))
   }
+  const options = []
+  for (const key of windows) {
+    const now = used(key)
+    const title = `${WINDOW_TITLES[key][0].toUpperCase()}${WINDOW_TITLES[key].slice(1)} ${known(key) ? `(now ${now}%)` : "(not read yet)"}`
+    options.push({ title: "At an exact %…", value: `exact:${key}`, category: title, description: known(key) ? "any level, or +N from now" : "any level" })
+    const levels = key === "fiveHour" ? [70, 80, 90, 95] : [50, 75, 90]
+    for (const level of levels.filter((level) => level > now)) options.push({ title: `At ${level}%`, value: `level:${key}:${level}`, category: title })
+    if (key === "fiveHour" && known(key)) for (const more of [5, 10, 20].filter((more) => now + more <= 100)) options.push({ title: `${more}% more from now`, value: `more:${key}:${more}`, category: title, description: `at ${now + more}%` })
+  }
+  for (const [minutes, label] of [[30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"]]) options.push({ title: label, value: `in::${minutes}`, category: "Time" })
+  options.push({ title: "At a time…", value: "time", category: "Time", description: "HH:MM, or a number of minutes" })
+  options.push({ title: "Off", value: "off", category: "Stop after", description: mine ? `now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : "no stop set" })
   return (
     <DialogSelect
       title={`Stop after${mine ? ` · now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : ""}`}
-      options={[
-        { title: "At a time…", value: "time", description: "HH:MM, or a number of minutes" },
-        ...windows.map((key) => ({ title: `When the ${WINDOW_TITLES[key]} reaches…`, value: `window:${key}`, description: `now ${Math.round(planWindowOf(key)?.utilization ?? 0)}%` })),
-        { title: "Off", value: "off", description: "no stop rule" },
-      ]}
+      options={options}
       onSelect={(option) => choose(option, false)}
       side={{ label: "every tab", run: (option) => choose(option, true) }}
       actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
       footer={
         <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
-        </text>
-      }
-    />
-  )
-}
-
-/** Resume at (sidebar, above Pause): when paused tabs go on — at a time, or when a plan window resets. */
-function DialogResumeAt() {
-  const sid = store.sessionID
-  const mine = resumeRuleFor(sid)
-  const windows = ["fiveHour", "week", ...(hasFableWindow() ? ["fable"] : [])].filter((key) => planWindowOf(key)?.resetsAt)
-  const set = (rule, every) => {
-    setPlanRule("resumeAt", every ? undefined : sid, rule)
-    dialog.clear()
-    toast.show({ variant: "info", message: rule ? `Resume at ${describeRule(rule)} · ${every ? "every tab" : "this tab"}` : `Resume at: off · ${every ? "every tab" : "this tab"}` })
-  }
-  const choose = (option, every) => {
-    if (option.value === "off") return set(null, every)
-    if (option.value === "time")
-      return dialog.replace(() => (
-        <DialogPrompt
-          title={`Resume ${every ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
-          placeholder="e.g. 07:00 or 120"
-          onConfirm={(value) => {
-            const time = parseWhen(value)
-            if (!time) return toast.show({ variant: "warning", message: "Write a time like 07:00 or a number of minutes" })
-            set({ time }, every)
-          }}
-        />
-      ))
-    set({ reset: option.value.slice(6) }, every)
-  }
-  return (
-    <DialogSelect
-      title={`Resume at${mine ? ` · now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : ""}`}
-      options={[
-        { title: "At a time…", value: "time", description: "HH:MM, or a number of minutes" },
-        ...windows.map((key) => ({
-          title: `When the ${WINDOW_TITLES[key]} resets`,
-          value: `reset:${key}`,
-          footer: new Date(planWindowOf(key).resetsAt).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }),
-        })),
-        { title: "Off", value: "off", description: "paused tabs wait for you" },
-      ]}
-      onSelect={(option) => choose(option, false)}
-      side={{ label: "every tab", run: (option) => choose(option, true) }}
-      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
-      footer={
-        <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
+          enter <span style={{ fg: theme.textMuted }}>this tab (comes first) · a limit stop goes on when it resets</span>
         </text>
       }
     />
@@ -3317,8 +3293,7 @@ export function App() {
         toast.show({ variant: "info", message: after.on ? `Auto-pause on for this tab: pausing at ${after.at}% of a plan limit` : "Auto-pause off for this tab" })
       },
     },
-    { id: "plan.stopafter", title: "Stop after… (a time or a limit level)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
-    { id: "plan.resumeat", title: "Resume at… (a time or a limit reset)", category: "Session", slash: "resumeat", run: () => dialog.replace(() => <DialogResumeAt />, undefined, "large") },
+    { id: "plan.stopafter", title: "Stop after… (an exact limit level, or a time)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
     {
       id: "orchestrator.toggle",
       title: orchestrator().enabled ? "Turn off orchestrator mode" : "Turn on orchestrator mode",

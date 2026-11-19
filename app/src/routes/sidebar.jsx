@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, resumeRuleFor, stopRuleFor, subagentRouting } from "../context/session"
+import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, stopRuleFor, subagentRouting } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -581,7 +581,7 @@ export function RoutingToggle() {
   return <SwitchRow on={on()} label={on() ? "Subagent routing on" : "Subagent routing off"} toggle="routing.toggle" settings="routing.settings" />
 }
 
-/** A plan-rule row above Pause ("Stop after", "Resume at"): what is set for this tab, a click to change it. */
+/** The Stop after row above Pause: what is set for this tab, a click to change it. */
 function RuleRow(props) {
   const [hover, setHover] = createSignal(false)
   const rule = () => (configRevision(), props.rule(store.sessionID))
@@ -596,7 +596,7 @@ function RuleRow(props) {
     >
       <text fg={rule() ? theme.text : theme.textMuted} wrapMode="none" truncate>
         <span style={{ fg: rule() ? theme.warning : theme.textMuted }}>{props.icon}</span>
-        {`  ${props.label}${rule() ? ` ${describeRule(rule())}` : ": off"}`}
+        {rule() ? `  Stop at ${describeRule(rule())}` : `  ${props.label}: off`}
         <Show when={rule()}>
           <span style={{ fg: theme.textMuted }}>{rule().own ? " · this tab" : " · every tab"}</span>
         </Show>
@@ -613,10 +613,6 @@ export function StopAfterRow() {
   return <RuleRow icon="⏹" label="Stop after" rule={stopRuleFor} command="plan.stopafter" />
 }
 
-/** When paused tabs go on: a time, or a limit's reset. */
-export function ResumeAtRow() {
-  return <RuleRow icon="⏵" label="Resume at" rule={resumeRuleFor} command="plan.resumeat" />
-}
 
 /** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
 export function PhoneRow() {
@@ -659,7 +655,6 @@ export function SidebarFooter() {
     <>
       <box flexShrink={0}>
         <StopAfterRow />
-        <ResumeAtRow />
         <PauseBar />
         <AutoPauseToggle />
         <AutoResumeToggle />
