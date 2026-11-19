@@ -165,9 +165,7 @@ export function Prompt(props                                         ) {
     // Local TUI commands take precedence, everything else goes to Claude Code.
     if (trimmed.startsWith("/")) {
       const [name, ...rest] = trimmed.slice(1).split(/\s+/)
-      const command = allCommands().find(
-        (item) => (item.slash === name || item.slashAliases?.includes(name)) && (!item.enabled || item.enabled()),
-      )
+      const command = localCommand(name)
       // An Agent Code command that has nothing to act on right now (/undo with no prompt, /timeline with no messages…)
       // must not go to the model as text.
       const idle = command
@@ -343,6 +341,15 @@ export function Prompt(props                                         ) {
     return true
   }
 
+  /**
+   * The Agent Code command a typed name means: one whose own name it is comes first, then one with it as an alias
+   * ("/resume" resumes a paused tab; with nothing paused it is "Switch session"'s alias).
+   */
+  function localCommand(name) {
+    const usable = allCommands().filter((item) => !item.enabled || item.enabled())
+    return usable.find((item) => item.slash === name) ?? usable.find((item) => item.slashAliases?.includes(name))
+  }
+
   // ---------------------------------------------------------------------------
   // Autocomplete
   // ---------------------------------------------------------------------------
@@ -356,15 +363,25 @@ export function Prompt(props                                         ) {
       const query = before.slice(1).toLowerCase()
       const local = allCommands().filter((command) => command.slash && (!command.enabled || command.enabled()))
       const localNames = new Set(local.flatMap((command) => [command.slash , ...(command.slashAliases ?? [])]))
+      const ownNames = new Set(local.map((command) => command.slash))
+      // How well a name fits what was typed: the name itself, then names starting with it, then names containing it.
+      const fit = (name) => {
+        const value = name.toLowerCase()
+        return value === query ? 0 : value.startsWith(query) ? 1 : value.includes(query) ? 2 : 3
+      }
       const options           = [
-        ...local.map((command) => ({
-          display: "/" + command.slash,
-          value: command.slash ,
-          description: command.description ?? command.title,
-          kind: "command"         ,
-        })),
+        // Each command once, under the name that fits best: "/mode" lists "/mode" (Permission mode), not "/models",
+        // which used to be shown for both while Enter ran whichever was typed. An alias that is another command's own
+        // name isn't offered for it (that name means the other command).
+        ...local.flatMap((command) => {
+          const names = [command.slash , ...(command.slashAliases ?? []).filter((alias) => !ownNames.has(alias))]
+          const best = names.reduce((a, b) => (fit(b) < fit(a) ? b : a))
+          if (fit(best) > 2) return []
+          const text = command.description ?? command.title
+          return [{ display: "/" + best, value: best, description: best === command.slash ? text : `${text} (also /${command.slash})`, kind: "command"          }]
+        }),
         ...store.commands
-          .filter((command) => !localNames.has(command.name))
+          .filter((command) => !localNames.has(command.name) && fit(command.name) <= 2)
           .map((command) => ({
             display: "/" + command.name + (command.argumentHint ? ` ${command.argumentHint}` : ""),
             value: command.name,
@@ -372,13 +389,7 @@ export function Prompt(props                                         ) {
             kind: "command"         ,
           })),
       ]
-      const filtered = options
-        .filter((option) => option.value.toLowerCase().includes(query))
-        .sort((a, b) => {
-          const as = a.value.toLowerCase().startsWith(query) ? 0 : 1
-          const bs = b.value.toLowerCase().startsWith(query) ? 0 : 1
-          return as - bs || a.value.localeCompare(b.value)
-        })
+      const filtered = options.sort((a, b) => fit(a.value) - fit(b.value) || a.value.localeCompare(b.value))
       setAuto({ visible: "/", query, start: 0, selected: 0, options: filtered })
       return
     }
@@ -420,7 +431,7 @@ export function Prompt(props                                         ) {
         submit()
         return
       }
-      const local = allCommands().find((command) => command.slash === option.value && (!command.enabled || command.enabled()))
+      const local = localCommand(option.value)
       if (local && submitAfter) {
         setText("")
         setAuto("visible", false)
