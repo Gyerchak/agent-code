@@ -1997,6 +1997,15 @@ function linkSessions(previous, next) {
   const all = { ...(config.sessionChains ?? {}) }
   all[next] = [...(all[previous] ?? []), previous].filter((id, index, list) => list.indexOf(id) === index && id !== next)
   config.sessionChains = all
+  // What was kept for the old session belongs to the conversation, so to the new session now (held messages would
+  // otherwise go out again when the old one is opened).
+  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode"]) {
+    const record = config[key]
+    if (!record || !(previous in record)) continue
+    const moved = { ...record, [next]: record[previous] }
+    delete moved[previous]
+    config[key] = moved
+  }
   saveConfig()
 }
 
@@ -2171,7 +2180,11 @@ export function createSession(seed             ) {
   }
   function restoreDraft(id) {
     const saved = config.sessionDrafts?.[id]
-    if (saved && !draft.text) draft.text = saved
+    if (saved && !draft.text) {
+      draft.text = saved
+      // A prompt already on screen takes it now.
+      emit("draft", { text: saved })
+    }
   }
   /** Prompt draft that survives switching tabs. */
   const draft = {
@@ -2222,12 +2235,30 @@ export function createSession(seed             ) {
   let modeNote
   // The conversation so far, for an engine that takes over the tab (sent once, with the first message to it).
   let carryNote
+  // The session the tab is moving away from (until the new engine's session exists): never reopened by the new
+  // engine, and linked to the new session once there is one.
+  let handedFrom
+  /** A session with earlier parts but nothing of its own yet (e.g. after a restart): its first message carries them. */
+  function pendingCarry() {
+    if (carryNote) return carryNote
+    if (!store.messages.some((m) => m.fromChain === true) || store.messages.some((m) => m.type === "user" && !m.fromChain && !m.unsent)) return undefined
+    const text = conversationText(store.messages)
+    const name = store.engine ? (harnessById(store.engine)?.name ?? store.engine) : "Claude Code"
+    return text ? `[Agent Code] This conversation went on with ${name} from here. Agent Code (the app this chat runs in) switched the model mid-conversation; this is the real earlier part of the same conversation with the same user, from Agent Code's own record. Treat it as what was said before, and answer the user's message that follows.\n\n${text}\n\n[End of the earlier conversation.]` : undefined
+  }
   /** The tab moves to another engine: keep this part, remember what to tell the next one. */
   function handOver(toName) {
     const previous = store.sessionID
     const own = store.messages.filter((m) => !m.fromChain)
     if (!previous || !own.some((m) => m.type === "user" && !m.unsent)) return undefined
-    writeAcpHistory(previous, JSON.parse(JSON.stringify(own)))
+    writeAcpHistory(previous, JSON.parse(JSON.stringify(own.filter((m) => !m.unsent))))
+    // In the tab, what is there now is the earlier part: it is never counted or saved as the new session's own.
+    setStore("messages", (list) => [
+      ...list.map((m) => (m.fromChain || m.unsent ? m : { ...m, fromChain: true })).filter((m) => !m.unsent),
+      { type: "notice", id: `chain:${previous}`, text: `Continued with ${toName} · the model has this conversation`, variant: "info", fromChain: "marker" },
+      ...list.filter((m) => m.unsent),
+    ])
+    handedFrom = previous
     const text = conversationText(store.messages)
     carryNote = text
       ? `[Agent Code] This conversation went on with ${toName} from here. Agent Code (the app this chat runs in) switched the model mid-conversation; this is the real earlier part of the same conversation with the same user, from Agent Code's own record. Treat it as what was said before, and answer the user's message that follows.\n\n${text}\n\n[End of the earlier conversation.]`
@@ -2239,7 +2270,12 @@ export function createSession(seed             ) {
     const chain = sessionChain(id)
     if (!chain.length || store.messages.some((m) => m.fromChain)) return
     const before = []
-    for (const earlier of chain) {
+    // The line after each part names the engine that took over from it.
+    const engineName = (session) => {
+      const engine = harnessSession(session)
+      return engine ? (harnessById(engine)?.name ?? engine) : "Claude Code"
+    }
+    for (const [index, earlier] of chain.entries()) {
       let messages = readAcpHistory(earlier)
       if (!messages && !harnessSession(earlier)) {
         try {
@@ -2248,7 +2284,7 @@ export function createSession(seed             ) {
       }
       if (!messages?.length) continue
       before.push(...messages.map((m) => ({ ...m, fromChain: true })))
-      before.push({ type: "notice", id: `chain:${earlier}`, text: `Continued with ${store.engine ? (harnessById(store.engine)?.name ?? store.engine) : "Claude Code"} · the model has this conversation`, variant: "info", fromChain: "marker" })
+      before.push({ type: "notice", id: `chain:${earlier}`, text: `Continued with ${engineName(chain[index + 1] ?? id)} · the model has this conversation`, variant: "info", fromChain: "marker" })
     }
     if (before.length && store.sessionID === id) {
       setStore("messages", (list) => [...before, ...list])
@@ -2306,6 +2342,11 @@ export function createSession(seed             ) {
       modeNote = instructed ? `[Mode "${agent.name}": the earlier mode's instruction no longer applies; work normally, tools included.]` : undefined
       instructed = false
     }
+    // A harness without a plan mode of its own (DeepSeek Harness): Plan is an instruction instead.
+    if (agent.mode === "plan" && oc && !oc.caps?.modes) {
+      modeNote = `[Mode "Plan": plan only. Read, search and think, but don't change files or run commands that change anything; end with a clear plan for the user to approve.]`
+      instructed = true
+    }
     void setMode(agent.mode)
   }
 
@@ -2352,14 +2393,14 @@ export function createSession(seed             ) {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     if (store.engine || harnessSession(options.resume) || (options.resume && !uuid.test(options.resume)) || (options.sessionId && !uuid.test(options.sessionId))) {
       const previous = handOver("Claude Code")
-      if (previous) pushNotice("Continuing in Claude Code: the earlier conversation goes with your next message.", "info")
       batch(() => {
         setStore("engine", undefined)
         setStore("sessionID", undefined)
         setStore("revert", undefined)
       })
       options = { sessionId: randomUUID() }
-      linkSessions(previous, options.sessionId)
+      linkSessions(previous ?? handedFrom, options.sessionId)
+      handedFrom = undefined
     }
     const policy = subagentPolicy()
     const external = splitModel(store.model)
@@ -2514,8 +2555,9 @@ export function createSession(seed             ) {
   /** The chat of a harness that can't replay it, kept for the next time the tab opens. */
   function saveAcpHistory() {
     if (!oc?.id || !harnessById(oc.harness) || store.engine !== oc.harness) return
-    if (!store.messages.some((m) => m.type === "user")) return
-    writeAcpHistory(oc.id, JSON.parse(JSON.stringify(store.messages)))
+    const own = store.messages.filter((m) => !m.fromChain && !m.unsent)
+    if (!own.some((m) => m.type === "user")) return
+    writeAcpHistory(oc.id, JSON.parse(JSON.stringify(own)))
   }
 
   function stop() {
@@ -2550,7 +2592,7 @@ export function createSession(seed             ) {
   /** Boot a dormant (restored) tab. */
   async function ensureStarted() {
     if (current || oc || disposed || store.booting) return
-    if (store.sessionID && store.messages.length) await start({ resume: store.sessionID })
+    if (store.sessionID && store.messages.some((m) => !m.fromChain && !m.unsent && m.type === "user")) await start({ resume: store.sessionID })
     else await start({ sessionId: store.sessionID ?? randomUUID() })
   }
 
@@ -2577,7 +2619,7 @@ export function createSession(seed             ) {
       }
     } else if (!(current || oc) || store.status === "running") return false
     restartAfterTurn = false
-    if (store.sessionID && store.messages.some((m) => m.type === "user")) await start({ resume: store.sessionID })
+    if (store.sessionID && store.messages.some((m) => m.type === "user" && !m.fromChain)) await start({ resume: store.sessionID })
     // A session with no prompt yet keeps its id (and so its per-session settings, like the agent mix).
     else await start({ sessionId: store.sessionID && !store.engine ? store.sessionID : randomUUID() })
     return true
@@ -2588,6 +2630,16 @@ export function createSession(seed             ) {
   // -------------------------------------------------------------------------
 
   let oc
+  let ocPrompting = false
+  let wakeTimer
+  function wakeTurn() {
+    if (store.status !== "running") setStore("status", "running")
+    clearTimeout(wakeTimer)
+    wakeTimer = setTimeout(() => {
+      if (!ocPrompting && store.status === "running") finishTurn({})
+    }, 6000)
+    wakeTimer.unref?.()
+  }
   /** Prompts typed while opencode works; sent together as the next turn, like Claude Code's queue. */
   const ocQueue                                                                                          = []
   /** session/load replays the stored conversation as updates. */
@@ -2595,10 +2647,9 @@ export function createSession(seed             ) {
 
   async function startAcp(gen        , options              , harness     , model        ) {
     // A conversation of this harness (by the model it was saved with; opencode's own ids start "ses_").
-    const own = (id         ) => !!id && (harnessSession(id) === harness.id || (store.engine === harness.id && id === store.sessionID))
+    const own = (id         ) => !!id && id !== handedFrom && (harnessSession(id) === harness.id || (store.engine === harness.id && id === store.sessionID))
     const resume = [options.resume, store.sessionID].find(own)
     const previous = store.engine !== harness.id ? handOver(harness.name) : undefined
-    if (previous) pushNotice(`Continuing in ${harness.name}: the earlier conversation goes with your next message.`, "info")
     setStore("engine", harness.id)
     const launch = harnessLaunch(harness, apiKeyFor)
     if (!launch) {
@@ -2620,6 +2671,9 @@ export function createSession(seed             ) {
         // Subagent (child session) updates carry their own session id.
         if (gen !== generation || (oc?.id && sessionId !== oc.id)) return
         handleAcp(update)
+        // A turn the harness starts by itself (opencode 2.3: a background subagent or shell reporting in after
+        // the prompt ended): shown as running, and ended once it goes quiet.
+        if (!replaying && !ocPrompting && /^(agent_message_chunk|agent_thought_chunk|tool_call|tool_call_update)$/.test(update.sessionUpdate ?? "")) wakeTurn()
       },
       request: (method, params) => acpRequest(gen, method, params),
       exit: (error) => {
@@ -2658,7 +2712,8 @@ export function createSession(seed             ) {
         try {
           learn(await within(client.request("session/resume", { sessionId: resume, cwd: store.cwd, mcpServers }), 90, "session/resume"))
           const kept = readAcpHistory(resume)
-          if (kept && !store.messages.some((m) => m.type === "user")) setStore("messages", kept)
+          // The kept chat, with anything typed while the harness started after it.
+          if (kept && !store.messages.some((m) => m.type === "user" && !m.unsent && !m.fromChain)) setStore("messages", (list) => [...kept, ...list.filter((m) => m.unsent)])
         } catch (error) {
           log(`${harness.id} resume error`, error)
           pushNotice(`Could not reopen the ${harness.name} conversation (${errorMessage(error)}); starting a new one.`, "warning")
@@ -2693,7 +2748,8 @@ export function createSession(seed             ) {
         const created = await within(client.request("session/new", { cwd: store.cwd, mcpServers }), 90, "session/new")
         learn(created)
         id = created.sessionId
-        linkSessions(previous, id)
+        linkSessions(previous ?? handedFrom, id)
+        handedFrom = undefined
       }
       if (gen !== generation) return
       oc.id = id
@@ -2997,7 +3053,8 @@ export function createSession(seed             ) {
       else for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
       prompt.push(...attachmentAcp(item.attachments))
     }
-    if (carryNote) prompt.push({ type: "text", text: carryNote })
+    const carry = pendingCarry()
+    if (carry) prompt.push({ type: "text", text: carry })
     prompt.push({ type: "text", text: [modeNote, items.map((item) => item.text).join("\n\n")].filter(Boolean).join("\n\n") })
     carryNote = undefined
     modeNote = undefined
@@ -3007,9 +3064,12 @@ export function createSession(seed             ) {
     let result
     let error
     try {
+      ocPrompting = true
       result = await session.client.request("session/prompt", { sessionId: session.id, prompt })
     } catch (failure) {
       error = errorMessage(failure)
+    } finally {
+      ocPrompting = false
     }
     if (gen !== generation) return
     if (result?.stopReason === "refusal") error = "The model refused to answer"
@@ -3109,7 +3169,7 @@ export function createSession(seed             ) {
         } catch {}
         oc = undefined
       }
-      const started = store.messages.some((m) => m.type === "user" && !m.unsent)
+      const started = store.messages.some((m) => m.type === "user" && !m.unsent && !m.fromChain)
       await start(store.sessionID && started ? { resume: store.sessionID } : {})
     } finally {
       reviving = false
@@ -3147,7 +3207,7 @@ export function createSession(seed             ) {
 
   /** Start Claude Code again for this tab: resume its conversation, or begin it. */
   async function revive() {
-    const started = store.messages.some((m) => m.type === "user" && !m.unsent)
+    const started = store.messages.some((m) => m.type === "user" && !m.unsent && !m.fromChain)
     if (store.sessionID && started) await start({ resume: store.sessionID })
     else await start({ sessionId: store.sessionID ?? randomUUID() })
   }
@@ -3351,7 +3411,8 @@ export function createSession(seed             ) {
     // A mode's instruction goes to the model once, with the first prompt after switching to it.
     lastWork = Date.now()
     // The earlier conversation goes as a block of its own, before the message.
-    if (carryNote) content.push({ type: "text", text: carryNote })
+    const carry = pendingCarry()
+    if (carry) content.push({ type: "text", text: carry })
     const forModel = [modeNote, text].filter(Boolean).join("\n\n")
     carryNote = undefined
     modeNote = undefined
@@ -3390,15 +3451,21 @@ export function createSession(seed             ) {
         oc.client.notify("session/cancel", { sessionId: oc.id })
         const session = oc
         const turnGen = generation
+        const stopped = lastTurn()?.id
         setTimeout(() => {
-          if (oc !== session || generation !== turnGen || store.status !== "running") return
+          // Only the turn that was stopped, still open: a turn started since then is left alone.
+          const open = lastTurn()
+          if (oc !== session || generation !== turnGen || store.status !== "running" || open?.id !== stopped || open?.end !== undefined) return
           log(`${session.harness} didn't stop after cancel: ending the turn here`)
           generation++
           try {
             session.client.close()
           } catch {}
           oc = undefined
-          ocQueue.length = 0
+          // Prompts that were waiting go out once the harness runs again (shown as not sent yet).
+          for (const item of ocQueue.splice(0)) unsent.push({ id: randomUUID(), text: item.text, extra: { images: item.images, attachments: item.attachments } })
+          setStore("messages", (list) => list.map((m) => (m.type === "user" && m.queued ? { ...m, queued: false, unsent: true } : m)))
+          saveUnsent()
           batch(() => {
             finishTurn({})
             setStore("ready", false)
@@ -3533,6 +3600,15 @@ export function createSession(seed             ) {
 
   async function setMode(mode                ) {
     setStore("mode", mode)
+    // The tab's own mode (Chat, a custom one) holds only with its permission mode: a different one means Build or
+    // Plan now, and the earlier mode's pending instruction is dropped.
+    const own = store.agentMode ? agentList().find((agent) => agent.id === store.agentMode) : undefined
+    if (own && own.mode !== mode) {
+      setStore("agentMode", undefined)
+      modeNote = instructed && !modeNote ? `[Mode "${mode === "plan" ? "Plan" : "Build"}": the earlier mode's instruction no longer applies; work normally, tools included.]` : undefined
+      instructed = false
+      rememberAgentMode()
+    }
     if (oc) return acpSetMode(mode)
     try {
       await current?.q.setPermissionMode(mode)

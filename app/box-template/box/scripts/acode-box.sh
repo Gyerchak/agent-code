@@ -176,7 +176,7 @@ cd "$BOX_DIR"
 # The box in the web app (acode-web): the same box settings, sessions and memory, in a browser window.
 if [ "$MODE" = web ]; then
   use_settings
-  exec "$(dirname "$ACODE_BIN")/acode-web" "$BOX_DIR" "${ACODE_ARGS[@]}"
+  exec "$(dirname "$ACODE_BIN")/acode-web" "$BOX_DIR" --user main "${ACODE_ARGS[@]}"
 fi
 printf '\033]0;%s\007\033]2;%s\007' "$BOX_NAME" "$BOX_NAME"
 

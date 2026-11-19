@@ -10,7 +10,7 @@ import { readAttachment } from "./attachments"
 import { config, saveConfig } from "./config"
 import { log } from "./log"
 import { stateDir } from "./paths"
-import { findBinary } from "./platform"
+import { findBinary, openCommand } from "./platform"
 // tabs before session: tabs.js has to load first (it imports session.js, which reaches back to it).
 import { newSession, tabs } from "./tabs"
 import { onSessionEvent } from "./session"
@@ -910,6 +910,8 @@ async function desktopApi(request, response, url, parts) {
 
 const webDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web")
 let webToken
+let webCode
+let webEnvSaved = {}
 let screen
 let webServer
 
@@ -1000,18 +1002,18 @@ async function webModels() {
 }
 
 function webUsers() {
-  const root = process.env.ACODE_WEB_USERS
+  const root = webEnvSaved.ACODE_WEB_USERS
   let names = []
   try {
     names = readdirSync(root).filter((name) => statSync(path.join(root, name)).isDirectory())
   } catch {}
-  return { current: process.env.ACODE_WEB_USER || "main", list: ["main", ...names.filter((name) => name !== "main")] }
+  return { current: webEnvSaved.ACODE_WEB_USER || "main", list: ["main", ...names.filter((name) => name !== "main" && !/^\.+$/.test(name))] }
 }
 
 /** Tell the launcher what to do next (another user, a restart) and leave: it starts Agent Code again. */
 function webRelaunch(next) {
   try {
-    writeFileSync(process.env.ACODE_WEB_CONTROL, JSON.stringify(next))
+    writeFileSync(webEnvSaved.ACODE_WEB_CONTROL, JSON.stringify(next))
   } catch (error) {
     log("web control", error)
   }
@@ -1054,6 +1056,7 @@ async function webApi(request, response, url, parts) {
         tabs: tabs().map((session) => webTab(session, false)),
         active: active()?.key,
         defaultModel: config.model ?? "haiku",
+        defaultAgent: config.chatByDefault === false ? "build" : "chat",
         box: !!process.env.ACODE_BOX_DIR,
       })
     }
@@ -1079,6 +1082,7 @@ async function webApi(request, response, url, parts) {
       const session = findSession(parts[3])
       return session ? json(response, 200, webTab(session, true)) : json(response, 404, { error: "no such tab" })
     }
+    if (what === "alive") return json(response, 200, { pages: clients.size })
     if (what === "screen") {
       const now = webScreen()
       return json(response, 200, Number(url.searchParams.get("have")) === now.id ? { id: now.id, same: true } : now)
@@ -1142,7 +1146,8 @@ async function webApi(request, response, url, parts) {
       screen.resize(Math.max(60, Math.min(400, Number(body.cols) | 0)), Math.max(20, Math.min(150, Number(body.rows) | 0)))
       return json(response, 200, { ok: true })
     case "user": {
-      const name = String(body.name ?? "").trim().replace(/[^\p{L}\p{N} _.-]/gu, "").slice(0, 40)
+      const name = String(body.name ?? "").trim().replace(/[^\p{L}\p{N} _.-]/gu, "").replace(/^[. ]+|[. ]+$/g, "").slice(0, 40)
+      if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name)) return json(response, 400, { error: "that name is reserved" })
       if (body.action === "reset") {
         const { resetSettings } = await import("./config")
         resetSettings()
@@ -1154,10 +1159,21 @@ async function webApi(request, response, url, parts) {
     }
     case "box": {
       // A new acode-box in the given folder (the same as the acode-box command).
-      const where = path.resolve(String(body.dir || app.cwd))
+      const where = path.resolve(String(body.dir || app.cwd).replace(/^~(?=$|\/)/, os.homedir()))
+      if (!existsSync(where) || !statSync(where).isDirectory()) return json(response, 400, { error: `No such folder: ${where}` })
       const tool = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-box")
       const result = spawnSync(tool, [], { cwd: where, encoding: "utf8", timeout: 60_000 })
-      return json(response, result.status === 0 ? 200 : 500, { ok: result.status === 0, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(-1500), dir: path.join(where, "acode-box") })
+      const dir = path.join(where, "acode-box")
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(-1500)
+      if (result.status !== 0) return json(response, 500, { error: output || "acode-box failed" })
+      return json(response, 200, { ok: true, output, dir, open: path.join(dir, "box", "scripts", "acode-box.sh") + " web" })
+    }
+    case "openurl": {
+      const target = String(body.url ?? "")
+      if (!/^https?:\/\//i.test(target)) return json(response, 400, { error: "only web links" })
+      const [command, list] = openCommand(target)
+      spawn(command, list, { stdio: "ignore", detached: true }).unref()
+      return json(response, 200, { ok: true })
     }
     case "quit":
       json(response, 200, { ok: true })
@@ -1169,6 +1185,14 @@ async function webApi(request, response, url, parts) {
 async function handleWeb(request, response) {
   const url = new URL(request.url ?? "/", "http://acode")
   try {
+    if (url.pathname === "/api/web/claim" && request.method === "POST") {
+      // The address the browser opens carries a one-time code (visible to other users in the process list), never
+      // the key: the first page that shows it gets the key, and the code is spent.
+      const body = await readBody(request)
+      if (!webCode || String(body.code ?? "") !== webCode) return json(response, 403, { error: "this link was used already: start acode-web again" })
+      webCode = undefined
+      return json(response, 200, { token: webToken })
+    }
     if (url.pathname.startsWith("/api/")) {
       const given = (request.headers.authorization ?? "").replace(/^Bearer\s+/i, "") || url.searchParams.get("t") || ""
       const a = Buffer.from(given)
@@ -1193,10 +1217,12 @@ async function handleWeb(request, response) {
 }
 
 /** Start the web app's server (headless Agent Code only): 127.0.0.1, the port and token the launcher chose. */
-export function startWebServer(memory) {
+export function startWebServer(memory, env = {}) {
   screen = memory
-  webToken = process.env.ACODE_WEB_TOKEN || randomBytes(18).toString("base64url")
-  const port = Number(process.env.ACODE_WEB_PORT) || 7790
+  webEnvSaved = env
+  webToken = env.ACODE_WEB_TOKEN || randomBytes(18).toString("base64url")
+  webCode = env.ACODE_WEB_CODE
+  const port = Number(env.ACODE_WEB_PORT) || 7790
   listenToSessions()
   // Nothing draws by itself without a terminal: a few frames a second keep layout, scrolling and the view current.
   let drawing = false

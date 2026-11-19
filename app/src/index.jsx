@@ -81,12 +81,19 @@ provideHostModules({ "solid-js": solid, "solid-js/store": solidStore, "@opentui/
 // The web app (acode-web) runs this same program without a terminal: it draws into memory, and the browser gets
 // the chats through the web server (and, for everything else, this screen as a live "terminal view").
 const headless = process.env.ACODE_HEADLESS === "1"
+// What acode-web passed in, read once: then gone from the environment, so programs started from here (a new terminal
+// window, a harness) don't start headless on the same port too.
+const webEnv = {}
+for (const key of ["ACODE_HEADLESS", "ACODE_WEB_COLS", "ACODE_WEB_ROWS", "ACODE_WEB_PORT", "ACODE_WEB_TOKEN", "ACODE_WEB_CODE", "ACODE_WEB_CONTROL", "ACODE_WEB_USERS", "ACODE_WEB_USER"]) {
+  webEnv[key] = process.env[key]
+  delete process.env[key]
+}
 let memory
 if (headless) {
   const { createTestRenderer } = await import("@opentui/core/testing")
   memory = await createTestRenderer({
-    width: Number(process.env.ACODE_WEB_COLS) || 150,
-    height: Number(process.env.ACODE_WEB_ROWS) || 46,
+    width: Number(webEnv.ACODE_WEB_COLS) || 150,
+    height: Number(webEnv.ACODE_WEB_ROWS) || 46,
     kittyKeyboard: true,
     nativeSceneVerify: false,
     exitOnCtrlC: false,
@@ -183,7 +190,7 @@ void startPlugins(renderer).catch((error) => log("plugins error", error))
 // The phone server (/phone), when it is switched on.
 autostartPhoneServer()
 // The web app's own server (acode-web starts Agent Code with these).
-if (headless) void startWebServer(memory).catch((error) => {
+if (headless) void startWebServer(memory, webEnv).catch((error) => {
   log("web server", error)
   process.exit(1)
 })
@@ -199,8 +206,7 @@ void refreshProviders().catch((error) => log("providers error", error))
 createRoot(async () => {
   // Another window already runs on this folder: the saved tabs are its; this one starts with what it was asked
   // for (a session, a prompt) or a new empty tab, and its tab numbers go on from the other window's.
-  const others = registerWindow(process.cwd())
-  watchWindows((list, where) => void adoptTabs(list, where))
+  const others = await registerWindow(process.cwd())
   if (others.length) {
     if (typeof args.resume === "string") await openSession(args.resume)
     else await startFresh()
@@ -231,5 +237,7 @@ createRoot(async () => {
     }
   }
   if (args.prompt) active().send(args.prompt)
+  // Tabs from other windows are taken in only once this window's own start is done (no tab twice).
+  watchWindows((list, where) => void adoptTabs(list, where))
   void app
 })

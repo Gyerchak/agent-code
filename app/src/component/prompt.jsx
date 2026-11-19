@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto"
 import { config, saveConfig } from "../context/config"
 import { clock, draft, exit, focusPrompt, SIDEBAR_DOCK_WIDTH, sidebarShown, promptMode, refs, setPromptMode, setRoute, showDetails } from "../context/app"
 import { allCommands, leaderActive, matchesId, runCommand, shortcut, useLayer } from "../context/keymap"
-import { agentIndex, limits, liveWindow, onModel, stripAnsi } from "../context/session"
+import { agentIndex, limits, liveWindow, onModel, onSessionEvent, stripAnsi } from "../context/session"
 import { active, currentAgent, interrupt, modelLabel, pickModel, store } from "../context/tabs"
 import { agentColor, syntax, theme, tint } from "../context/theme"
 import { listFiles, rankFiles } from "../context/files"
@@ -585,7 +585,14 @@ export function Prompt(props                                         ) {
     ),
   )
 
+  // A draft restored after this prompt was drawn (a harness tab, a session opened into this tab) shows up here.
+  const offDraft = onSessionEvent((event) => {
+    if (event.type !== "draft" || event.session !== session || !input || input.isDestroyed || input.plainText) return
+    input.setText(event.text)
+    input.gotoBufferEnd()
+  })
   onCleanup(() => {
+    offDraft()
     if (refs.prompt === input) refs.prompt = undefined
   })
 

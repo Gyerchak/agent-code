@@ -2,16 +2,24 @@
 // 127.0.0.1, started by acode-web) with the token in the address (#t=…). Chats live in Agent Code; this page shows
 // them and sends what you type. The "terminal view" shows Agent Code's own screen for everything else.
 const $ = (id) => document.getElementById(id)
-const token = (() => {
-  const fromHash = new URLSearchParams(location.hash.slice(1)).get("t")
-  if (fromHash) {
-    sessionStorage.setItem("acode.web.t", fromHash)
-    history.replaceState(null, "", location.pathname)
+// The address carries a one-time code (other users can see a browser's command line); the page swaps it for the
+// key once and keeps the key for this window only.
+let token = sessionStorage.getItem("acode.web.t") || ""
+async function claimKey() {
+  const hash = new URLSearchParams(location.hash.slice(1))
+  history.replaceState(null, "", location.pathname)
+  if (hash.get("t")) token = hash.get("t")
+  else if (hash.get("c")) {
+    const answer = await fetch("api/web/claim", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: hash.get("c") }) })
+    const data = await answer.json().catch(() => ({}))
+    if (data.token) token = data.token
+    else if (!token) throw new Error(data.error || "This link was used already: start acode-web again.")
   }
-  return fromHash || sessionStorage.getItem("acode.web.t") || ""
-})()
+  sessionStorage.setItem("acode.web.t", token)
+}
 
-const state = { boot: undefined, active: undefined, tab: undefined, sessions: [], files: [], openSteps: new Set(), sending: false }
+// composingNew: "New chat" was clicked; the next message makes a new tab (nothing may switch the page back meanwhile).
+const state = { boot: undefined, active: undefined, tab: undefined, sessions: [], files: [], openSteps: new Set(), openParts: new Set(), sending: false, composingNew: false }
 
 // ---------------------------------------------------------------------------------------------------- the server
 async function api(method, url, body) {
@@ -168,7 +176,14 @@ function stepLine(parts) {
     .join(" · ")
 }
 
-function renderPart(part) {
+/** A <details> that stays open across re-renders (keyed by message and part). */
+function keepOpen(box, key) {
+  if (state.openParts.has(key)) box.open = true
+  box.addEventListener("toggle", () => (box.open ? state.openParts.add(key) : state.openParts.delete(key)))
+  return box
+}
+
+function renderPart(part, key) {
   if (part.type === "text") {
     const div = document.createElement("div")
     div.className = "md"
@@ -179,13 +194,13 @@ function renderPart(part) {
     const box = document.createElement("details")
     box.className = "thought"
     box.innerHTML = `<summary>${part.done ? `Thought${part.ms ? ` for ${Math.max(1, Math.round(part.ms / 1000))}s` : ""}` : "Thinking…"}</summary><pre>${escape(part.text)}</pre>`
-    return box
+    return keepOpen(box, key)
   }
   const box = document.createElement("details")
   box.className = `tool${part.status === "error" ? " error" : ""}`
   const state = part.status === "running" || part.status === "pending" ? "…" : part.status === "error" ? "✗" : "✓"
   box.innerHTML = `<summary><span class="name">${escape(part.name.replace(/^mcp__(.+?)__/, "$1."))}</span><span class="what">${escape(part.title)}</span><span class="state">${state}</span></summary><pre>${escape(part.output || part.input)}</pre>`
-  return box
+  return keepOpen(box, key)
 }
 
 function renderMessages() {
@@ -232,7 +247,7 @@ function renderMessages() {
           continue
         }
         if (part.type === "text" && !part.text.trim()) continue
-        div.append(renderPart(part))
+        div.append(renderPart(part, `${message.id}:${message.parts.indexOf(part)}`))
       }
       if (message.error) {
         const error = document.createElement("div")
@@ -259,6 +274,11 @@ function renderMessages() {
       box.append(div)
     }
   }
+  for (const link of box.querySelectorAll("a[href^='http']"))
+    link.onclick = (event) => {
+      event.preventDefault()
+      void post("web/openurl", { url: link.href }).catch((error) => toast(error.message))
+    }
   for (const button of box.querySelectorAll(".copy"))
     button.onclick = () => {
       void navigator.clipboard.writeText(button.nextElementSibling.textContent)
@@ -324,7 +344,7 @@ function renderComposer() {
   send.title = running ? "Stop" : "Send (Enter; Shift+Enter: new line)"
   const mode = $("mode")
   mode.innerHTML = (state.boot?.agents ?? []).map((agent) => `<option value="${escape(agent.id)}">${escape(agent.name)}</option>`).join("")
-  mode.value = tab?.agent ?? "chat"
+  mode.value = tab?.agent ?? state.newAgent ?? state.boot?.defaultAgent ?? "chat"
   mode.classList.toggle("mode-chat", mode.value === "chat")
   const model = $("model")
   if (!model.dataset.filled) {
@@ -359,7 +379,11 @@ function render() {
 // ---------------------------------------------------------------------------------------------------- actions
 async function refreshBoot() {
   state.boot = await get("web/boot")
+  if (state.composingNew) return finishBoot()
   if (!state.active || !state.boot.tabs.some((tab) => tab.key === state.active)) state.active = state.boot.active ?? state.boot.tabs[0]?.key
+  finishBoot()
+}
+function finishBoot() {
   $("user-name").textContent = state.boot.users.current
   $("avatar").textContent = state.boot.users.current.slice(0, 1).toUpperCase()
   document.title = `Agent Code${state.boot.box ? " · box" : ""}`
@@ -380,6 +404,7 @@ async function refreshSessions() {
   renderSessions()
 }
 async function selectTab(key) {
+  state.composingNew = false
   state.active = key
   await post("web/focus", { key })
   await refreshTab()
@@ -407,6 +432,7 @@ async function sendMessage() {
       // A new chat: its tab first (with the model and mode picked here), then the message.
       const made = await post("web/new", { model: state.newModel, agent: state.newAgent })
       state.newModel = state.newAgent = undefined
+      state.composingNew = false
       await refreshBoot()
       state.active = made.key
       await post(`tabs/${state.active}/send`, { text, attachments })
@@ -452,28 +478,39 @@ function autosize() {
 // ---------------------------------------------------------------------------------------------------- terminal view
 const term = { open: false, timer: undefined, frame: 0, cols: 0, rows: 0, escapes: 0 }
 function cellSize() {
-  const probe = document.createElement("span")
-  probe.textContent = "M".repeat(10)
-  probe.style.visibility = "hidden"
-  $("screen").append(probe)
-  const box = probe.getBoundingClientRect()
-  probe.remove()
-  return { w: box.width / 10, h: box.height }
+  // A row as the screen draws it (its height is the line spacing, not the font's box).
+  const line = document.createElement("div")
+  line.className = "line"
+  line.style.visibility = "hidden"
+  line.textContent = "M".repeat(10)
+  $("screen").append(line)
+  const range = document.createRange()
+  range.selectNodeContents(line)
+  const width = range.getBoundingClientRect().width
+  const height = line.getBoundingClientRect().height
+  line.remove()
+  return { w: width / 10, h: height }
 }
-async function openTerminal() {
-  term.open = true
-  $("terminal").classList.remove("hidden")
+async function fitTerminal() {
   const screen = $("screen")
-  screen.focus()
   const cell = cellSize()
+  term.cell = cell
   const cols = Math.max(80, Math.floor((screen.clientWidth - 12) / cell.w))
   const rows = Math.max(24, Math.floor((screen.clientHeight - 12) / cell.h))
-  term.cell = cell
   if (cols !== term.cols || rows !== term.rows) {
     term.cols = cols
     term.rows = rows
     await post("web/resize", { cols, rows }).catch(() => {})
   }
+}
+window.addEventListener("resize", () => term.open && void fitTerminal())
+async function openTerminal() {
+  term.open = true
+  $("terminal").classList.remove("hidden")
+  $("screen").focus()
+  // After a restart (another user) Agent Code is back at its own size: always send it.
+  term.cols = term.rows = 0
+  await fitTerminal()
   term.frame = 0
   pollScreen()
 }
@@ -499,9 +536,11 @@ async function pollScreen() {
               if (bg) style += `background:#${bg};`
               if (attrs & 1) style += "font-weight:700;"
               if (attrs & 4) style += "text-decoration:underline;"
-              const cursor = frame.cursor && frame.cursor[1] === y && frame.cursor[0] >= x && frame.cursor[0] < x + text.length
+              const at = frame.cursor && frame.cursor[1] === y && frame.cursor[0] >= x && frame.cursor[0] < x + text.length ? frame.cursor[0] - x : -1
               x += text.length
-              return `<span style="${style}"${cursor ? ' class="cur"' : ""}>${escape(text)}</span>`
+              // The cursor marks one cell, not the whole run of text it sits in.
+              if (at < 0) return `<span style="${style}">${escape(text)}</span>`
+              return `<span style="${style}">${escape(text.slice(0, at))}<span class="cur">${escape(text[at])}</span>${escape(text.slice(at + 1))}</span>`
             })
             .join("")
           return `<div class="line">${spans || " "}</div>`
@@ -609,6 +648,7 @@ function wire() {
   $("toggle-right").onclick = () => layout("right", !document.querySelector(".app").classList.contains("right-hidden"))
   $("expand-right").onclick = () => layout("right", false)
   $("new-chat").onclick = async () => {
+    state.composingNew = true
     state.active = undefined
     state.tab = undefined
     render()
@@ -649,6 +689,12 @@ function wire() {
   screen.onkeydown = screenKey
   screen.onmousedown = (event) => screenMouse("down", event)
   screen.onmouseup = (event) => screenMouse("up", event)
+  let lastMove = 0
+  screen.onmousemove = (event) => {
+    if (Date.now() - lastMove < 40) return
+    lastMove = Date.now()
+    screenMouse(event.buttons ? "drag" : "move", event)
+  }
   screen.oncontextmenu = (event) => event.preventDefault()
   screen.onwheel = (event) => {
     event.preventDefault()
@@ -676,7 +722,7 @@ function wire() {
     $("box-out").textContent = "Making the box…"
     try {
       const result = await post("web/box", { dir: $("box-dir").value.trim() })
-      $("box-out").textContent = `${result.output}\n\nOpen it with: acode-web "${result.dir}"`
+      $("box-out").textContent = `${result.output}\n\nOpen it in this app with: ${result.open}\n(or in a terminal: acode-box in ${result.dir})`
     } catch (error) {
       $("box-out").textContent = error.message
     }
@@ -699,16 +745,16 @@ function wire() {
 
 function listen() {
   const source = new EventSource(`api/events?t=${encodeURIComponent(token)}`)
-  let pending
-  const later = (fn) => {
-    clearTimeout(pending)
-    pending = setTimeout(fn, 120)
+  const timers = {}
+  const later = (name, fn) => {
+    clearTimeout(timers[name])
+    timers[name] = setTimeout(fn, 120)
   }
   source.addEventListener("tab", (event) => {
     const data = JSON.parse(event.data)
-    if (data.key === state.active) later(refreshTab)
+    if (data.key === state.active) later("tab", refreshTab)
   })
-  source.addEventListener("tabs", () => later(() => refreshBoot().then(render)))
+  source.addEventListener("tabs", () => later("tabs", () => refreshBoot().then(render)))
   source.onerror = () => {
     // Agent Code restarting (another user, a reset): reconnects by itself.
   }
@@ -719,6 +765,7 @@ function listen() {
 async function main() {
   wire()
   try {
+    await claimKey()
     await refreshBoot()
     await refreshTab()
     await refreshSessions()

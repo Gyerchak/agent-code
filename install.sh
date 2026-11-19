@@ -79,7 +79,9 @@ ln -sf "$HOME_DIR/app/bin/acode-web" "$BIN_DIR/acode-web"
 have_chromium() { for b in chromium chromium-browser google-chrome-stable google-chrome brave brave-browser microsoft-edge-stable vivaldi-stable; do command -v "$b" >/dev/null 2>&1 && return 0; done; [ -d "/Applications/Google Chrome.app" ] || [ -d "/Applications/Chromium.app" ] || [ -d "/Applications/Brave Browser.app" ]; }
 have_firefox() { command -v firefox >/dev/null 2>&1 || command -v librewolf >/dev/null 2>&1 || [ -d "/Applications/Firefox.app" ]; }
 ENGINE="${ACODE_BROWSER:-}"
-if [ -z "$ENGINE" ] && [ -t 0 ] || { [ -z "$ENGINE" ] && [ -r /dev/tty ]; }; then
+# A terminal to ask in: /dev/tty must really open (it is readable but fails to open in unattended runs).
+tty_ok() { { : < /dev/tty; } 2>/dev/null; }
+if [ -z "$ENGINE" ] && tty_ok; then
   printf 'Web app browser engine: [1] Chromium-based  [2] Firefox  [3] skip  (Enter = 1): '
   read -r answer < /dev/tty || answer=""
   case "$answer" in 2) ENGINE=firefox ;; 3) ENGINE=none ;; *) ENGINE=chromium ;; esac
@@ -102,7 +104,7 @@ install_browser() {
   elif command -v flatpak >/dev/null 2>&1; then pkg="flatpak install -y flathub $( [ "$1" = firefox ] && echo org.mozilla.firefox || echo org.chromium.Chromium )"
   fi
   if [ -z "$pkg" ]; then warn "Install a browser with your package manager, then run acode-web."; return; fi
-  if [ -r /dev/tty ]; then
+  if tty_ok; then
     printf 'Install it now with: %s ?  [y/N] ' "$pkg"
     read -r yes < /dev/tty || yes=""
     case "$yes" in y|Y|yes) sh -c "$pkg" ;; *) echo "Later: $pkg" ;; esac
@@ -135,7 +137,8 @@ DESKTOP
     # A small app bundle in ~/Applications that runs acode-web.
     APP="$HOME/Applications/Agent Code.app/Contents/MacOS"
     mkdir -p "$APP"
-    printf '#!/bin/sh\nexec "%s/acode-web" "$HOME"\n' "$BIN_DIR" > "$APP/Agent Code"
+    # Finder starts apps with a bare PATH: the app knows where node (e.g. Homebrew's) and acode-web are.
+    printf '#!/bin/sh\nexport ACODE_NODE="%s"\nexport PATH="%s:/opt/homebrew/bin:/usr/local/bin:$PATH"\nexec "%s/acode-web" "$HOME"\n' "$NODE" "$(dirname "$NODE")" "$BIN_DIR" > "$APP/Agent Code"
     chmod +x "$APP/Agent Code"
     printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>Agent Code</string><key>CFBundleName</key><string>Agent Code</string><key>CFBundleIdentifier</key><string>dev.agentcode.web</string></dict></plist>\n' > "$HOME/Applications/Agent Code.app/Contents/Info.plist"
   fi

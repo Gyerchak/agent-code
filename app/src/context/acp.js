@@ -128,7 +128,14 @@ export function opencodeApi(cwd        , method        , route        , body    
   return new Promise((resolve, reject) => {
     execFile(opencodeBinary() ?? "opencode", args, { cwd, timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error((stderr || stdout || error.message).trim().split("\n").slice(-1)[0]))
+        // opencode 2.3.2 answers a server error with JSON ({ message, ref }): show its message.
+        const raw = (stderr || stdout || error.message).trim()
+        let message = raw.split("\n").slice(-1)[0]
+        try {
+          const parsed = JSON.parse(raw.slice(raw.indexOf("{")))
+          if (parsed?.message || parsed?.data?.message) message = parsed.message ?? parsed.data.message
+        } catch {}
+        reject(new Error(message))
         return
       }
       const text = stdout.trim()

@@ -54,13 +54,14 @@ export function otherWindows() {
     .sort((a, b) => a.started - b.started)
 }
 
-/** Join the folder's windows; returns the windows that were already there. */
-export function registerWindow(cwd) {
+/** Join the folder's windows; returns the windows that were already there (or started at the same moment). */
+export async function registerWindow(cwd) {
   me.cwd = cwd
   registered = true
-  const others = otherWindows()
   write()
-  return others
+  // Two windows starting together both see none: the younger one waits a moment and looks again.
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  return otherWindows().filter((item) => item.started <= me.started)
 }
 
 const [offset, setOffset] = createSignal(0)
@@ -119,10 +120,10 @@ export function watchWindows(adopt) {
     for (const item of all) {
       // Tabs sent to this window.
       if (item.request) {
-        if (item.target === me.pid) {
+        if (item.target === me.pid || (!alive(item.target) && oldest)) {
           rmSync(item.file, { force: true })
           adopt(item.tabs ?? [], "after")
-        } else if (!alive(item.target)) rmSync(item.file, { force: true })
+        }
         continue
       }
       // A window that closed or died: the oldest one left takes its tabs.

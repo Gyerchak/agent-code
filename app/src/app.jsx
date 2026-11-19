@@ -675,10 +675,20 @@ const gitOut = (cwd, ...args) => {
 }
 
 /** A new terminal window running `command` in `cwd` (acode-window finds the terminal app). */
+/** A new terminal window running `command`; false (with a note) where none can be opened from here. */
 function openWindow(cwd, command, title) {
   const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-window")
-  if (isWindows || !existsSync(launcher)) return toast.show({ variant: "warning", message: `Open a terminal in ${cwd} and run: ${command.join(" ")}`, duration: 8000 })
-  spawn(launcher, ["--title", title, ...command], { cwd, detached: true, stdio: "ignore" }).unref()
+  if (isWindows || !existsSync(launcher)) {
+    toast.show({ variant: "warning", message: `Open a terminal in ${cwd} and run: ${command.join(" ")}`, duration: 8000 })
+    return false
+  }
+  try {
+    spawn(launcher, ["--title", title, ...command], { cwd, detached: true, stdio: "ignore" }).unref()
+    return true
+  } catch (error) {
+    log("open window", error)
+    return false
+  }
 }
 
 /** A tab can change windows once it has a conversation; a running turn has to end first (its engine restarts there). */
@@ -3465,8 +3475,8 @@ export function App() {
         if (!tabMovable()) return
         const tab = active()
         const id = store.sessionID
-        openWindow(store.cwd, [path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode"), "-r", id], store.title?.slice(0, 40) ?? APP_NAME)
-        releaseTab(tab)
+        // The tab leaves this window only if the new one could be opened.
+        if (openWindow(store.cwd, [path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode"), "-r", id], store.title?.slice(0, 40) ?? APP_NAME)) releaseTab(tab)
       },
     },
     {

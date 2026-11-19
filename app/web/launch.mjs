@@ -5,7 +5,7 @@
 //   acode-web [folder] [--engine chromium|firefox] [--user NAME] [--port N] [--no-window]
 import { spawn, spawnSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -46,6 +46,8 @@ const savePrefs = () => {
   writeFileSync(prefsFile, JSON.stringify(prefs, null, 2))
 }
 engine = engine ?? prefs.engine
+// A user given on the command line (e.g. a box's "main") is for this start only: it isn't saved as the default.
+const userGiven = !!user
 user = user ?? prefs.user ?? "main"
 
 // --- the browser ---------------------------------------------------------------------------------------------------
@@ -66,7 +68,16 @@ const FIREFOX = mac
     : ["firefox", "firefox-esr", "librewolf", "firefox-developer-edition", "floorp", "zen-browser"]
 const find = (list) => list.map(which).find(Boolean)
 if (!engine) engine = find(CHROMIUM) ? "chromium" : find(FIREFOX) ? "firefox" : undefined
-const browser = prefs.browser && existsSync(prefs.browser) && prefs.engine === engine ? prefs.browser : engine === "firefox" ? find(FIREFOX) : find(CHROMIUM)
+let browser = prefs.browser && existsSync(prefs.browser) && prefs.engine === engine ? prefs.browser : engine === "firefox" ? find(FIREFOX) : find(CHROMIUM)
+// The chosen engine's browser isn't there but the other one is: use that (and remember it).
+if (!browser && !noWindow) {
+  const other = engine === "firefox" ? find(CHROMIUM) : find(FIREFOX)
+  if (other) {
+    console.error(`acode-web: no ${engine === "firefox" ? "Firefox" : "Chromium-based"} browser found; using ${path.basename(other)} instead.`)
+    engine = engine === "firefox" ? "chromium" : "firefox"
+    browser = other
+  }
+}
 if (!noWindow && !browser) {
   console.error(`acode-web: no ${engine === "firefox" ? "Firefox" : "Chromium-based"} browser found. Install one (see the README, "Web app"), or pass --engine chromium|firefox.`)
   process.exit(1)
@@ -74,9 +85,26 @@ if (!noWindow && !browser) {
 prefs.engine = engine
 savePrefs()
 
+/** The browser profile for this window: one per user, and a separate one when that one is in use (a second window). */
+function profileDir() {
+  const name = user.replace(/[^\p{L}\p{N}_.-]/gu, "_")
+  // Snap browsers can't open profiles in hidden folders of the home: theirs go under ~/snap/<name>/common.
+  const snap = browser?.startsWith("/snap/") ? path.join(home, "snap", path.basename(browser), "common", "agent-code-web") : undefined
+  const parent = snap ?? path.join(base, `web-${engine}`)
+  let dir = path.join(parent, name)
+  const lock = (folder) => path.join(folder, ".acode-web.pid")
+  try {
+    const pid = Number(readFileSync(lock(dir), "utf8"))
+    process.kill(pid, 0)
+    if (pid !== process.pid) dir = path.join(parent, `${name}-${process.pid}`)
+  } catch {}
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(lock(dir), String(process.pid))
+  return dir
+}
+
 function openWindow(url) {
-  const profile = path.join(base, `web-${engine}`, user.replace(/[^\p{L}\p{N}_.-]/gu, "_"))
-  mkdirSync(profile, { recursive: true })
+  const profile = profileDir()
   if (engine === "firefox") {
     // Firefox has no "app window" switch: its own profile hides the tabs and the address bar instead.
     mkdirSync(path.join(profile, "chrome"), { recursive: true })
@@ -90,7 +118,7 @@ function openWindow(url) {
         'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
         'user_pref("browser.startup.homepage_override.mstone", "ignore");',
         'user_pref("browser.sessionstore.resume_from_crash", false);',
-        'user_pref("browser.link.open_newwindow", 3);',
+        'user_pref("browser.link.open_newwindow", 2);',
         "",
       ].join("\n"),
     )
@@ -112,8 +140,11 @@ const freePort = () =>
   })
 
 const token = randomBytes(18).toString("base64url")
+// The address the browser opens (and that other users can see in the process list) carries a one-time code only.
+let code = randomBytes(12).toString("base64url")
 const port = await freePort()
-const control = path.join(os.tmpdir(), `acode-web-${process.pid}.json`)
+// A private folder for the note Agent Code leaves when it wants a restart (another user) or to quit.
+const control = path.join(mkdtempSync(path.join(os.tmpdir(), "acode-web-")), "control.json")
 let core
 let window
 let quitting = false
@@ -136,7 +167,7 @@ function startCore() {
   rmSync(control, { force: true })
   core = spawn(process.execPath, ["--experimental-ffi", "--no-warnings", index], {
     cwd,
-    env: { ...process.env, ...env, ACODE_HEADLESS: "1", ACODE_WEB_PORT: String(port), ACODE_WEB_TOKEN: token, ACODE_WEB_CONTROL: control, ACODE_WEB_USERS: usersDir, ACODE_WEB_USER: user },
+    env: { ...process.env, ...env, ACODE_HEADLESS: "1", ACODE_WEB_PORT: String(port), ACODE_WEB_TOKEN: token, ACODE_WEB_CODE: code, ACODE_WEB_CONTROL: control, ACODE_WEB_USERS: usersDir, ACODE_WEB_USER: user },
     stdio: ["ignore", "ignore", "pipe"],
   })
   let ready = false
@@ -144,47 +175,71 @@ function startCore() {
     const text = chunk.toString()
     if (!ready && text.includes("ACODE_WEB_READY")) {
       ready = true
-      if (noWindow) console.log(`Agent Code web: http://127.0.0.1:${port}/#t=${token}`)
+      started = Date.now()
+      if (noWindow) console.log(`Agent Code web: http://127.0.0.1:${port}/#c=${code}`)
       else if (!window) {
-        window = openWindow(`http://127.0.0.1:${port}/#t=${token}`)
-        // The window closing ends Agent Code.
+        window = openWindow(`http://127.0.0.1:${port}/#c=${code}`)
+        const opened = Date.now()
+        // The window closing ends Agent Code. A browser that handed the window to one already running exits at
+        // once: then the page going away (below) is what ends it.
         window.on("exit", () => {
-          quitting = true
-          core?.kill("SIGTERM")
+          if (Date.now() - opened < 4000) return
+          quit()
         })
       }
     }
   })
-  core.on("exit", () => {
+  core.on("exit", (exitCode) => {
     if (quitting) return process.exit(0)
     // Agent Code left a note: another user, a restart, or quit.
-    let next = {}
+    let next
     try {
       next = JSON.parse(readFileSync(control, "utf8"))
     } catch {}
     rmSync(control, { force: true })
-    if (next.quit) {
-      quitting = true
-      window?.kill()
-      return process.exit(0)
+    // No note: it quit (/exit) or crashed. Either way this ends here (no restart loop).
+    if (!next || next.quit) {
+      if (!next && exitCode) console.error(`acode-web: Agent Code stopped (exit ${exitCode}); see its log in your state folder (agent-code/log.txt).`)
+      return quit()
     }
     if (next.user) {
       user = next.user
       prefs.user = user
       savePrefs()
     }
-    // The page reconnects by itself (same address, same token).
-    setTimeout(startCore, 300)
+    // The page reconnects by itself (same address, the key it already has).
+    setTimeout(() => !quitting && startCore(), 300)
   })
 }
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
-  process.on(signal, () => {
-    quitting = true
-    core?.kill("SIGTERM")
-    window?.kill()
-    setTimeout(() => process.exit(0), 500)
-  })
-prefs.user = user
-savePrefs()
+function quit() {
+  if (quitting) return
+  quitting = true
+  core?.kill("SIGTERM")
+  window?.kill()
+  setTimeout(() => process.exit(0), 600)
+}
+
+// Whether the page is still open (for browsers that keep running after the window closes, e.g. on macOS, or that
+// handed the window to an instance already running): once a page was there and none is for 40 s, Agent Code ends.
+let started = 0
+let seenPage = false
+let lastPage = Date.now()
+setInterval(async () => {
+  if (quitting || noWindow || !started) return
+  try {
+    const answer = await fetch(`http://127.0.0.1:${port}/api/web/alive`, { headers: { authorization: `Bearer ${token}` } })
+    const { pages } = await answer.json()
+    if (pages > 0) {
+      seenPage = true
+      lastPage = Date.now()
+    } else if (seenPage && Date.now() - lastPage > 40_000) quit()
+  } catch {}
+}, 5000).unref()
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, quit)
+if (!userGiven) {
+  prefs.user = user
+  savePrefs()
+}
 startCore()

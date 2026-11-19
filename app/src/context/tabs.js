@@ -2,10 +2,10 @@ import { listSessions, query,                                       } from "@ant
 import { batch, createRoot, createSignal } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import { randomUUID } from "node:crypto"
-import { config, saveConfig } from "./config"
+import { config, saveConfig, reloadConfig } from "./config"
 import { opencodeApi } from "./acp"
 import { log } from "./log"
-import { allWindowTabs, publishTabs } from "./windows"
+import { allWindowTabs, otherWindows, publishTabs, tabOffset } from "./windows"
 import { createSession, DEFAULT_MODEL, onSessionEvent, storedEffort, storeEffort,                                 } from "./session"
 
 // ---------------------------------------------------------------------------
@@ -112,6 +112,11 @@ export async function newSession() {
 
 /** Open a stored session: focus its tab if open, otherwise load it (into the untouched tab or a new one). */
 export async function openSession(id        , title         ) {
+  const elsewhere = otherWindows().find((window) => (window.tabs ?? []).some((tab) => tab.id === id))
+  if (elsewhere) {
+    active()?.notice?.("That conversation is open in another Agent Code window: continue it there (or close it there first).", "info")
+    return undefined
+  }
   const existing = findTab(id)
   if (existing) {
     focusTab(existing)
@@ -172,6 +177,8 @@ export async function forkSession(messageID         ) {
     session.setStore("model", source.store.model)
     session.setStore("effort", source.store.effort)
     session.setStore("mode", source.store.mode)
+    // The fork's mode is the original's (a new tab starts in Chat; a fork of a Build conversation stays Build).
+    session.setStore("agentMode", source.store.agentMode)
   })
   // The fork keeps the original's per-session settings (agent mix).
   const forkId = randomUUID()
@@ -197,7 +204,7 @@ export function nextTab(direction        ) {
 }
 
 export function gotoTab(index        ) {
-  const tab = tabs()[index]
+  const tab = tabs()[index - tabOffset()]
   if (tab) focusTab(tab)
 }
 
@@ -283,6 +290,8 @@ export function releaseTab(session) {
 
 /** Tabs from another window (it closed, or sent them): open them here, asleep until looked at, in their order. */
 export async function adoptTabs(list, where = "after") {
+  // What the other window knew about these sessions (engines, chains, held messages, modes) is on disk.
+  reloadConfig()
   const fresh = list.filter((item) => item?.id && !findTab(item.id))
   if (!fresh.length) return
   const loaded = await Promise.all(
@@ -297,7 +306,15 @@ export async function adoptTabs(list, where = "after") {
       return undefined
     }),
   )
-  const added = loaded.filter(Boolean)
+  const added = loaded.filter((session) => {
+    if (!session) return false
+    // Opened meanwhile (by the start-up restore): the copy goes.
+    if (tabs().some((tab) => tab.store.sessionID === session.store.sessionID)) {
+      session.dispose()
+      return false
+    }
+    return true
+  })
   if (!added.length) return
   const current = tabs()
   // A lone empty tab makes way for them.
