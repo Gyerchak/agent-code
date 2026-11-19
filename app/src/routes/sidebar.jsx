@@ -536,16 +536,22 @@ export function FableReturnToggle() {
   )
 }
 
-/** Orchestrator mode: the main chat plans and delegates; right click: its settings. */
+/**
+ * Orchestrator mode (with Subagent routing): a click opens its settings — the "Usage" and "Subagent routing" tabs —
+ * a right click turns orchestrator mode on or off.
+ */
 export function OrchestratorToggle() {
   const on = () => (configRevision(), orchestrator().enabled)
-  return <SwitchRow on={on()} label={on() ? "Orchestrator mode on" : "Orchestrator mode off"} toggle="orchestrator.toggle" settings="orchestrator.settings" />
-}
-
-/** Subagent routing: exact models per kind of task; right click: its settings. */
-export function RoutingToggle() {
-  const on = () => (configRevision(), subagentRouting().enabled)
-  return <SwitchRow on={on()} label={on() ? "Subagent routing on" : "Subagent routing off"} toggle="routing.toggle" settings="routing.settings" />
+  const routing = () => (configRevision(), subagentRouting().enabled)
+  return (
+    <SwitchRow
+      on={on() || routing()}
+      label={`Orchestrator mode ${on() ? "on" : "off"}${routing() ? " · routing on" : ""}`}
+      hint="on/off"
+      toggle="orchestrator.settings"
+      settings="orchestrator.toggle"
+    />
+  )
 }
 
 /**
@@ -632,7 +638,6 @@ export function SidebarFooter() {
         <FableFallbackToggle />
         <FableReturnToggle />
         <OrchestratorToggle />
-        <RoutingToggle />
         <PhoneRow />
       </box>
       <text fg={theme.textMuted} wrapMode="none" truncate>

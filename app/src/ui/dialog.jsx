@@ -224,6 +224,23 @@ export function DialogSelect   (props
       { defer: true },
     ),
   )
+  // `tabs` / `tab` / `onTab`: pages of one dialog (tab and shift+tab, or a click on a name); a new page starts at its top.
+  createEffect(
+    on(
+      () => props.tab,
+      () => {
+        setStore("selected", 0)
+        scroll?.scrollTo?.(0)
+      },
+      { defer: true },
+    ),
+  )
+  const switchTab = (delta) => {
+    const list = props.tabs ?? []
+    const index = list.findIndex((item) => item.key === props.tab)
+    const next = list[(index + delta + list.length) % list.length]
+    if (next) props.onTab?.(next.key)
+  }
 
   // `memoryKey`: come back to the row that was selected when this dialog was last left (a dialog under a pushed one
   // is drawn again when that one closes).
@@ -309,6 +326,10 @@ export function DialogSelect   (props
           return true
         }
       }
+      if (props.tabs?.length && event.name === "tab") {
+        switchTab(event.shift ? -1 : 1)
+        return true
+      }
       if (matchesId(event, "dialog.select.prev")) {
         move(-1)
         return true
@@ -351,6 +372,22 @@ export function DialogSelect   (props
             esc
           </text>
         </box>
+        <Show when={props.tabs?.length}>
+          <box flexDirection="row" gap={3} paddingTop={1}>
+            <For each={props.tabs}>
+              {(item) => (
+                <text
+                  fg={item.key === props.tab ? theme.primary : theme.textMuted}
+                  attributes={item.key === props.tab ? TextAttributes.BOLD | TextAttributes.UNDERLINE : 0}
+                  onMouseUp={() => props.onTab?.(item.key)}
+                >
+                  {item.title}
+                </text>
+              )}
+            </For>
+            <text fg={theme.textMuted}>tab: switch</text>
+          </box>
+        </Show>
         <Show when={props.filter !== false}>
           <box paddingTop={1}>
             <input

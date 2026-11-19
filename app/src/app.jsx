@@ -2301,27 +2301,10 @@ function DialogSettings() {
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
     {
       key: "orchestrator",
-      title: "Orchestrator mode",
-      get: () => orchestrator().enabled,
-      set: (value) => {
-        config.orchestrator = { ...(config.orchestrator ?? {}), enabled: value }
-        // Orchestrating needs subagents at all.
-        if (value && config.subagents === false) config.subagents = true
-        saveConfig()
-      },
-      restart: true,
-    },
-    {
-      key: "subagent.routing",
-      title: "Subagent routing",
-      get: () => subagentRouting().enabled,
-      set: (value) => {
-        config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: value }
-        // Routing needs subagents at all.
-        if (value && config.subagents === false) config.subagents = true
-        saveConfig()
-      },
-      restart: true,
+      title: "Orchestrator mode…",
+      description: "how it uses subagents (max numbers too), and Subagent routing (second tab)",
+      get: () => orchestrator().enabled || subagentRouting().enabled,
+      set: () => {},
     },
     { key: "transcriptDetail", title: "Transcript detail", description: "low: each run of steps is one row · medium: every step · high: thoughts open too", get: () => true, set: () => {} },
     { key: "scrollOnSend", title: "Scroll on send", description: "jump to the end of the chat when you send a prompt", get: flag("scrollOnSend", true), set: write("scrollOnSend") },
@@ -2336,7 +2319,6 @@ function DialogSettings() {
     const setting = settings.find((item) => item.key === key)
     const back = () => setTick((value) => value + 1)
     if (setting?.tier) return dialog.push(() => <DialogPriority tier={setting.tier} onClose={back} />)
-    if (key === "subagent.routing") return openRouting(back)
     if (key === "orchestrator") return openOrchestrator(back)
     if (key === "fable.fallback") return dialog.push(() => <DialogFableFallback />)
     if (key === "fable.upgrade") return dialog.push(() => <DialogFableUpgrade />)
@@ -2353,6 +2335,7 @@ function DialogSettings() {
       // Saving, restoring and resetting the settings are actions, not switches.
       ...(setting.key === "transcriptDetail" ? { footer: transcriptDetail(), gutter: <text fg={theme.textMuted}>{" ≡ "}</text> } : {}),
       ...(setting.key === "autoResumeMode" ? { footer: config.autoResumeMode === "one" ? "one at a time" : "all at once", gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> } : {}),
+      ...(setting.key === "orchestrator" ? { footer: `${orchestrator().enabled ? "on" : "off"} · routing ${subagentRouting().enabled ? "on" : "off"}` } : {}),
       ...(setting.key === "stopafter" ? { footer: config.pauseNearLimit !== false ? `any limit ${config.pauseAt ?? 95}%` : "off" } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
@@ -2372,6 +2355,7 @@ function DialogSettings() {
           dialog.replace(() => <DialogMods />, undefined, "large")
           return
         }
+        if (option.value === "orchestrator") return openOrchestrator(() => setTick((n) => n + 1))
         if (option.value === "stopafter") {
           dialog.replace(() => <DialogStopAfter />, undefined, "large")
           return
@@ -2484,16 +2468,20 @@ function DialogSettings() {
 }
 
 let orchestratorChanged = false
+let routingChanged = false
 
-/** Open the orchestrator setup on top of the current dialog; idle tabs restart once it closes, if anything changed. */
-function openOrchestrator(back) {
+/**
+ * Open orchestrator mode's settings on top of the current dialog, on its "Usage" tab or its "Subagent routing" tab;
+ * idle tabs restart once it closes, if anything changed (subagent types and the prompt live in the start options).
+ */
+function openOrchestrator(back, tab = "usage") {
   dialog.push(
-    () => <DialogOrchestrator />,
+    () => <DialogOrchestrator tab={tab} />,
     () => {
       back?.()
-      if (!orchestratorChanged) return
-      orchestratorChanged = false
-      for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
+      if (!orchestratorChanged && !routingChanged) return
+      orchestratorChanged = routingChanged = false
+      for (const item of tabs()) if (item.live && item.store.status === "idle") void item.restart()
     },
   )
 }
@@ -2505,21 +2493,62 @@ function saveOrchestrator(change) {
   orchestratorChanged = true
 }
 
+const AT_ONCE = [0, 1, 2, 3, 4, 5, 6, 8, 10]
+const PER_MESSAGE = [0, 3, 5, 8, 10, 15, 20, 30, 50]
+const limitText = (value, one) => (!value ? "no limit" : value === 1 && one ? one : `up to ${value}`)
+
+/** A max number for orchestrator mode: a list of common values, or any number. */
+function DialogOrchestratorLimit(props) {
+  const current = orchestrator()[props.field]
+  const write = (value) => {
+    saveOrchestrator({ [props.field]: value, ...(props.field === "maxAtOnce" ? { parallel: value !== 1 } : {}) })
+    props.onDone()
+  }
+  return (
+    <DialogSelect
+      title={props.title}
+      current={String(current)}
+      options={[
+        ...props.values.map((value) => ({ title: limitText(value, props.one), value: String(value), description: value === 0 ? "default" : undefined })),
+        { title: "A number…", value: "exact", description: props.values.includes(current) ? undefined : `now ${current}` },
+      ]}
+      onSelect={(option) => {
+        dialog.pop()
+        if (option.value !== "exact") return write(Number(option.value))
+        dialog.push(() => (
+          <DialogPrompt
+            title={`${props.title} (0: no limit)`}
+            placeholder="e.g. 7"
+            onConfirm={(text) => {
+              const value = Number(text.trim())
+              if (!Number.isInteger(value) || value < 0 || value > 500) return toast.show({ variant: "warning", message: "Write a whole number from 0 to 500" })
+              write(value)
+              dialog.pop()
+            }}
+          />
+        ))
+      }}
+    />
+  )
+}
+
 /**
- * Orchestrator mode (right-click on its Settings row): the main chat plans and delegates. Sections: what the
- * subagents may differ in (reasoning, model or both), the reasoning section, the models section, the way of working.
- * Sections that the chosen way doesn't use are hidden.
+ * Orchestrator mode's settings, in two tabs. "Usage": on/off and how it uses subagents — what they may differ in
+ * (reasoning, model or both), the reasoning and models sections, the way of working with the max numbers of
+ * subagents (at once, per message). "Subagent routing": its on/off and, under it, the exact model and variant for
+ * each kind of task and each complexity level (routing works with or without orchestrator mode).
  */
-function DialogOrchestrator() {
+function DialogOrchestrator(props) {
+  const [tab, setTab] = createSignal(props.tab === "routing" ? "routing" : "usage")
   const [tick, setTick] = createSignal(0)
+  const refresh = () => setTick((value) => value + 1)
   const bump = (change) => {
     saveOrchestrator(change)
-    setTick((value) => value + 1)
+    refresh()
   }
   const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
   const dot = (on) => <text fg={on ? theme.primary : theme.textMuted}>{on ? "(•)" : "( )"}</text>
-  const options = createMemo(() => {
-    tick()
+  const usage = () => {
     const rule = orchestrator()
     const own = store.effort ? `yours: ${store.effort}` : "yours: default"
     const usesLevels = rule.strategy !== "model"
@@ -2539,29 +2568,106 @@ function DialogOrchestrator() {
           ]
         : []),
       { title: "Delegation", value: "delegation", category: "Way of working", description: "enter: next", footer: ORCH_DELEGATION.find((item) => item.key === rule.delegation).title, gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> },
-      { title: "Parallel subagents", value: "parallel", category: "Way of working", description: "independent subtasks run at once", footer: rule.parallel ? "on" : "off", gutter: box(rule.parallel) },
+      { title: "Max subagents at once", value: "maxAtOnce", category: "Way of working", description: "more wait for a free place", footer: limitText(rule.maxAtOnce, "one at a time"), gutter: <text fg={theme.textMuted}>{" # "}</text> },
+      { title: "Max subagents per message", value: "maxPerMessage", category: "Way of working", description: "after that it does the rest itself", footer: limitText(rule.maxPerMessage), gutter: <text fg={theme.textMuted}>{" # "}</text> },
       { title: "Check results", value: "review", category: "Way of working", description: "the orchestrator verifies each result", footer: rule.review ? "on" : "off", gutter: box(rule.review) },
     ]
+  }
+  const routing = () => {
+    const rule = subagentRouting()
+    return [
+      { title: "Subagent routing", value: "routing", description: "exact model and variant per kind of task (with or without orchestrator mode)", footer: rule.enabled ? "on" : "off", gutter: box(rule.enabled) },
+      ...ROUTE_KINDS.map((item) => ({
+        title: item.title,
+        value: `kind:${item.key}`,
+        category: "Task types (off: complexity decides)",
+        footer: rule.kinds[item.key].on ? routeLabel(rule.kinds[item.key]) : "off",
+        gutter: box(rule.kinds[item.key].on),
+      })),
+      ...ROUTE_LEVELS.map((item) => ({
+        title: item.title,
+        value: `level:${item.key}`,
+        category: "By complexity (everything else)",
+        footer: routeLabel(rule.levels[item.key]),
+        gutter: <text fg={theme.textMuted}>{" › "}</text>,
+      })),
+    ]
+  }
+  const options = createMemo(() => {
+    tick()
+    configRevision()
+    return tab() === "routing" ? routing() : usage()
   })
+  const routed = () => {
+    routingChanged = true
+    refresh()
+  }
+  // A routed slot: its model, then its variant.
+  const pickRoute = (value) => {
+    if (!value.startsWith("kind:") && !value.startsWith("level:")) return
+    dialog.push(() => <DialogRouteModel slot={value} onDone={routed} />)
+  }
   const next = (list, key) => list[(list.findIndex((item) => item.key === key) + 1) % list.length].key
+  const limit = (field) =>
+    dialog.push(() => (
+      <DialogOrchestratorLimit
+        field={field}
+        title={field === "maxAtOnce" ? "Max subagents at once" : "Max subagents per message"}
+        values={field === "maxAtOnce" ? AT_ONCE : PER_MESSAGE}
+        one={field === "maxAtOnce" ? "one at a time" : undefined}
+        onDone={refresh}
+      />
+    ))
   return (
     <DialogSelect
       title="Orchestrator mode"
-      memoryKey="orchestrator"
+      tabs={[
+        { key: "usage", title: "Usage" },
+        { key: "routing", title: "Subagent routing" },
+      ]}
+      tab={tab()}
+      onTab={setTab}
       options={options()}
       onSelect={(option) => {
         const rule = orchestrator()
         const [kind, value] = option.value.split(":")
+        if (kind === "routing") {
+          const on = !subagentRouting().enabled
+          config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: on }
+          if (on && config.subagents === false) config.subagents = true
+          saveConfig()
+          return routed()
+        }
+        if (kind === "kind") {
+          saveRoute(option.value, { on: !subagentRouting().kinds[value].on })
+          return routed()
+        }
+        if (kind === "level") return pickRoute(option.value)
         if (kind === "enabled") return bump({ enabled: !rule.enabled })
         if (kind === "strategy") return bump({ strategy: value })
         if (kind === "higherEffort") return bump({ higherEffort: !rule.higherEffort })
         if (kind === "strongerModels") return bump({ strongerModels: !rule.strongerModels })
         if (kind === "pool") return bump({ pool: next(ORCH_POOLS, rule.pool) })
         if (kind === "delegation") return bump({ delegation: next(ORCH_DELEGATION, rule.delegation) })
-        if (kind === "parallel") return bump({ parallel: !rule.parallel })
+        if (kind === "maxAtOnce" || kind === "maxPerMessage") return limit(kind)
         if (kind === "review") return bump({ review: !rule.review })
-        if (kind === "models") dialog.push(() => <DialogOrchestratorModels onDone={() => setTick((n) => n + 1)} />)
+        if (kind === "models") dialog.push(() => <DialogOrchestratorModels onDone={refresh} />)
       }}
+      onRightClick={(option) => pickRoute(option.value)}
+      actions={tab() === "routing" ? [{ keybind: "ctrl+o", label: "model and variant", run: (option) => pickRoute(option.value) }] : []}
+      footer={
+        <text fg={theme.text}>
+          {tab() === "routing" ? (
+            <>
+              enter <span style={{ fg: theme.textMuted }}>on/off</span> · right-click <span style={{ fg: theme.textMuted }}>model</span>
+            </>
+          ) : (
+            <>
+              enter <span style={{ fg: theme.textMuted }}>change</span>
+            </>
+          )}
+        </text>
+      }
     />
   )
 }
@@ -2675,86 +2781,9 @@ function saveRoute(slot, change) {
   saveConfig()
 }
 
-/**
- * Subagent routing (right-click on its Settings row): which exact model and variant runs each delegated task. Task
- * types first (each on/off), then the complexity levels used for everything else.
- */
-let routingChanged = false
-
-/** Open the routing setup on top of the current dialog; idle tabs restart once it closes, if anything changed. */
+/** Subagent routing's settings: the second tab of orchestrator mode's settings. */
 function openRouting(back) {
-  dialog.push(
-    () => <DialogSubagentRouting />,
-    () => {
-      back?.()
-      // Subagent types live in Claude Code's start options: idle tabs restart to pick up the change.
-      if (!routingChanged) return
-      routingChanged = false
-      for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
-    },
-  )
-}
-
-function DialogSubagentRouting() {
-  const [tick, setTick] = createSignal(0)
-  const bump = () => {
-    routingChanged = true
-    setTick((value) => value + 1)
-  }
-  const options = createMemo(() => {
-    tick()
-    const rule = subagentRouting()
-    const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
-    return [
-      { title: "Subagent routing", value: "enabled", footer: rule.enabled ? "on" : "off", gutter: box(rule.enabled) },
-      ...ROUTE_KINDS.map((item) => ({
-        title: item.title,
-        value: `kind:${item.key}`,
-        category: "Task types (off: complexity decides)",
-        footer: rule.kinds[item.key].on ? routeLabel(rule.kinds[item.key]) : "off",
-        gutter: box(rule.kinds[item.key].on),
-      })),
-      ...ROUTE_LEVELS.map((item) => ({
-        title: item.title,
-        value: `level:${item.key}`,
-        category: "By complexity (everything else)",
-        footer: routeLabel(rule.levels[item.key]),
-        gutter: <text fg={theme.textMuted}>{" › "}</text>,
-      })),
-    ]
-  })
-  const pick = (value) => {
-    if (value === "enabled") return
-    dialog.push(() => <DialogRouteModel slot={value} onDone={bump} />)
-  }
-  return (
-    <DialogSelect
-      title="Subagent routing"
-      memoryKey="routing"
-      options={options()}
-      onSelect={(option) => {
-        if (option.value === "enabled") {
-          const on = !subagentRouting().enabled
-          config.subagentRouting = { ...(config.subagentRouting ?? {}), enabled: on }
-          if (on && config.subagents === false) config.subagents = true
-          saveConfig()
-          return bump()
-        }
-        if (option.value.startsWith("kind:")) {
-          saveRoute(option.value, { on: !subagentRouting().kinds[option.value.slice(5)].on })
-          return bump()
-        }
-        pick(option.value)
-      }}
-      onRightClick={(option) => pick(option.value)}
-      actions={[{ keybind: "ctrl+o", label: "model and variant", run: (option) => pick(option.value) }]}
-      footer={
-        <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>on/off</span> · right-click <span style={{ fg: theme.textMuted }}>model</span>
-        </text>
-      }
-    />
-  )
+  openOrchestrator(back, "routing")
 }
 
 /** Any model for one routed slot: the session's own, every Claude model, or a provider model (not harness ones). */

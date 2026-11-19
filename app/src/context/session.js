@@ -1662,8 +1662,91 @@ export function orchestrator() {
     selected: own.selected ?? [],
     excluded: own.excluded ?? [],
     delegation: ORCH_DELEGATION.some((item) => item.key === own.delegation) ? own.delegation : "mostly",
-    parallel: own.parallel !== false,
+    // How many subagents may run at once (0: no limit; 1: one at a time — the old "Parallel subagents" off) and how
+    // many it may start for one message from the user (0: no limit).
+    maxAtOnce: Number.isInteger(own.maxAtOnce) && own.maxAtOnce >= 0 ? own.maxAtOnce : own.parallel === false ? 1 : 0,
+    maxPerMessage: Number.isInteger(own.maxPerMessage) && own.maxPerMessage >= 0 ? own.maxPerMessage : 0,
     review: own.review !== false,
+  }
+}
+
+/**
+ * Orchestrator mode's limits for one tab: subagents at once (a call over the limit waits for a free place) and per
+ * message from the user (a call over it is refused, with the reason). Counted from the hooks: a call is "pending"
+ * from its PreToolUse until a subagent starts (or the call fails), then running until that subagent stops; whatever
+ * is still pending when the turn ends is dropped, and stale entries let go after a while (a missed stop can't hold
+ * the limit for ever).
+ */
+function makeAgentLimits() {
+  const pending = new Map()
+  const running = new Map()
+  let sinceMessage = 0
+  const waiters = []
+  const wake = () => {
+    for (const release of waiters.splice(0)) release()
+  }
+  const count = () => {
+    const now = Date.now()
+    for (const [id, since] of pending) if (now - since > 10 * 60_000) pending.delete(id)
+    for (const [id, since] of running) if (now - since > 3 * 3_600_000) running.delete(id)
+    return pending.size + running.size
+  }
+  return {
+    /** Undefined: go on (after waiting for a place); a string: refused, the reason for the model. */
+    async admit(id, signal) {
+      const begun = Date.now()
+      for (;;) {
+        const rule = orchestrator()
+        if (rule.maxPerMessage && sinceMessage >= rule.maxPerMessage)
+          return `The user allows at most ${rule.maxPerMessage} subagent${rule.maxPerMessage === 1 ? "" : "s"} per message in orchestrator mode, and this message has used them. Do the rest yourself, or stop and tell the user what is left.`
+        if (!rule.maxAtOnce || count() < rule.maxAtOnce || signal?.aborted || Date.now() - begun > 30 * 60_000) break
+        await new Promise((resolve) => {
+          waiters.push(resolve)
+          setTimeout(resolve, 5000)
+        })
+      }
+      sinceMessage++
+      pending.set(id ?? `call-${begun}-${Math.random()}`, Date.now())
+      return undefined
+    },
+    started(agentId) {
+      const first = pending.keys().next()
+      if (!first.done) pending.delete(first.value)
+      if (agentId) running.set(agentId, Date.now())
+    },
+    stopped(agentId) {
+      running.delete(agentId)
+      wake()
+    },
+    finished(toolUseId) {
+      if (pending.delete(toolUseId)) wake()
+    },
+    turnEnded() {
+      pending.clear()
+      wake()
+    },
+    userMessage() {
+      sinceMessage = 0
+    },
+    reset() {
+      pending.clear()
+      running.clear()
+      wake()
+    },
+  }
+}
+
+/** The hooks that keep the limits' count (only while orchestrator mode is on in this tab's process). */
+function agentLimitHooks(limits) {
+  const done = async (input) => {
+    if (/^(Agent|Task)$/.test(input.tool_name ?? "")) limits.finished(input.tool_use_id)
+    return {}
+  }
+  return {
+    SubagentStart: [{ hooks: [async (input) => (limits.started(input.agent_id), {})] }],
+    SubagentStop: [{ hooks: [async (input) => (limits.stopped(input.agent_id), {})] }],
+    PostToolUse: [{ matcher: "Agent|Task", hooks: [done] }],
+    PostToolUseFailure: [{ matcher: "Agent|Task", hooks: [done] }],
   }
 }
 
@@ -1746,7 +1829,7 @@ function orchestratorPrompt(orch, routingOn) {
   const { rule } = orch
   const lines = [
     "# Orchestrator mode",
-    `You are the orchestrator of this session: understand the goal, plan, split the work into clear self-contained subtasks, delegate them with the Agent tool, check what comes back and integrate it. ${ORCH_DELEGATION.find((item) => item.key === rule.delegation).text}${rule.parallel ? " Run independent subtasks in parallel (several Agent calls in one message)." : ""}${rule.review ? " Check each result before relying on it, and send the subtask back or redo it when it falls short." : ""} Give every subagent all it needs in its prompt: the goal, the files, the constraints and what to report.`,
+    `You are the orchestrator of this session: understand the goal, plan, split the work into clear self-contained subtasks, delegate them with the Agent tool, check what comes back and integrate it. ${ORCH_DELEGATION.find((item) => item.key === rule.delegation).text}${rule.maxAtOnce === 1 ? " Run one subagent at a time." : ` Run independent subtasks in parallel (several Agent calls in one message)${rule.maxAtOnce ? `, at most ${rule.maxAtOnce} at once (more wait for a free place)` : ""}.`}${rule.maxPerMessage ? ` Use at most ${rule.maxPerMessage} subagent${rule.maxPerMessage === 1 ? "" : "s"} for each message from the user: plan with that in mind.` : ""}${rule.review ? " Check each result before relying on it, and send the subtask back or redo it when it falls short." : ""} Give every subagent all it needs in its prompt: the goal, the files, the constraints and what to report.`,
   ]
   if (routingOn) {
     lines.push("Which model runs each subtask is fixed by the routed subagent types below.")
@@ -1871,12 +1954,19 @@ const PICK_PROMPT =
 const providerPrompt = (lines          ) =>
   `Subagents on other models are available as subagent_type values, by kind:\n${lines.join("\n")}\nUse them for routine delegated work (searches, reading, summaries, mechanical edits), the ones marked preferred first; keep Claude models for anything that needs careful judgment. They don't count against the user's Claude limits.`
 
-function subagentHooks(main              , effort                               , routes, orch)                        {
+function subagentHooks(main              , effort                               , routes, orch, limits)                        {
   return [
     {
       matcher: "Agent|Task",
+      // A call over orchestrator mode's "at once" limit waits here for a free place.
+      timeout: 86_400,
       hooks: [
-        async (input     ) => {
+        async (input     , toolUseId, options) => {
+          // Orchestrator mode's limits: per message (refused, with the reason) and at once (waits).
+          if (orch && limits && orchestrator().enabled) {
+            const refused = await limits.admit(input.tool_use_id ?? toolUseId, options?.signal)
+            if (refused) return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: refused } }
+          }
           const policy = subagentPolicy()
           const next = { ...(input.tool_input ?? {}) }
           // Routing: every delegation goes to one of the user's routed types, with exactly its model and variant.
@@ -2098,6 +2188,8 @@ function withoutKey                                   (value   , key        )   
 
 
 export function createSession(seed             ) {
+  // Orchestrator mode's limits on subagents (at once, per message) for this tab.
+  const agentLimits = makeAgentLimits()
   const key = randomUUID()
   const from = seed.from?.store
   const [store, setStore] = createStore              ({
@@ -2409,6 +2501,7 @@ export function createSession(seed             ) {
     if (gen !== generation) return
     // Routing replaces Claude's own pick and the provider tiers: the user's slots decide every subagent's model.
     const routes = routing ? routingAgents(store.model, splitModel(store.model) ? undefined : store.effort) : undefined
+    agentLimits.reset()
     const orch = policy.enabled && orchestrator().enabled ? orchestratorAgents(store.model, splitModel(store.model) ? undefined : store.effort, !!routes) : undefined
     const { agents, lines } = routes
       ? { agents: routes.agents, lines: [] }
@@ -2450,7 +2543,10 @@ export function createSession(seed             ) {
         disallowedTools: disallowed.length ? disallowed : undefined,
         agents: Object.keys(agents).length ? agents : undefined,
         settings: extraSettings(store.model)       ,
-        hooks: { PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort), routes?.names, orch) : []), pauseHook()] },
+        hooks: {
+          PreToolUse: [...(policy.enabled ? subagentHooks(() => store.model, () => (splitModel(store.model) ? undefined : store.effort), routes?.names, orch, agentLimits) : []), pauseHook()],
+          ...(orch ? agentLimitHooks(agentLimits) : {}),
+        },
         // Agent Code's own MCP servers (mcp.ts) win over same-named ones in ~/.claude.json.
         mcpServers: { ...acodeMcpServers(), ...(own ? { [ACODE_MCP]: own.server } : {}) },
         plugins: modPlugins(),
@@ -3352,6 +3448,8 @@ export function createSession(seed             ) {
   // -------------------------------------------------------------------------
 
   function send(text        , extra            = {}) {
+    // A message from the user: orchestrator mode's per-message count starts again.
+    if (text !== "Continue where you stopped.") agentLimits.userMessage()
     // Writing to a paused tab means: go on.
     if (store.pause && !(store.pause.interrupted && text === "Continue where you stopped.")) resume()
     // Like opencode: a new prompt deletes the reverted messages for good.
@@ -5181,6 +5279,7 @@ export function createSession(seed             ) {
   let fableRefused = false
 
   function handleResult(message     ) {
+    agentLimits.turnEnded()
     const error =
       message.subtype !== "success"
         ? (message.errors?.join("\n") ?? message.subtype)
