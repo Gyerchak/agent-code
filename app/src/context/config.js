@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { createSignal } from "solid-js"
+import { log } from "./log"
 import { configDir } from "./paths"
 
 
@@ -227,6 +228,9 @@ export function flushConfig() {
   writeConfig()
 }
 
+// A JSON copy: the config only holds JSON, and a value taken from a Solid store (a proxy) can't go through
+// structuredClone — it threw, and the config stopped being written at all.
+const copy = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)))
 const isObject = (value         )                               => !!value && typeof value === "object" && !Array.isArray(value)
 const same = (a         , b         ) => JSON.stringify(a) === JSON.stringify(b)
 
@@ -235,7 +239,7 @@ function merge(before                     , mine                     , disk     
   for (const key of new Set([...Object.keys(before), ...Object.keys(mine)])) {
     if (same(before[key], mine[key])) continue
     if (isObject(before[key]) && isObject(mine[key]) && isObject(disk[key])) merge(before[key], mine[key], disk[key])
-    else if (key in mine) disk[key] = structuredClone(mine[key])
+    else if (key in mine) disk[key] = copy(mine[key])
     else delete disk[key]
   }
   return disk
@@ -254,14 +258,16 @@ function writeConfig() {
     } catch {}
     const merged = merge(base, config                       , disk)
     for (const key of Object.keys(config)) if (!(key in merged)) delete (config       )[key]
-    Object.assign(config, structuredClone(merged))
-    base = structuredClone(merged)
+    Object.assign(config, copy(merged))
+    base = copy(merged)
     mkdirSync(configDir, { recursive: true })
     // Write-then-rename: a crash mid-write can't leave a cut-off config.
     const temp = `${file}.${process.pid}.tmp`
     writeFileSync(temp, JSON.stringify(merged, null, 2) + "\n")
     renameSync(temp, file)
-  } catch {}
+  } catch (error) {
+    log("config write failed", error)
+  }
 }
 
 

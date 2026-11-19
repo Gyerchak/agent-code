@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, stopRuleFor, subagentRouting } from "../context/session"
+import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, stopRuleFor, subagentRouting, whenText } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -446,8 +446,8 @@ export function PauseBar() {
   const label = () => {
     const p = paused()
     if (!p) return store.status === "running" ? "⏸  Pause" : "⏸  Pause (nothing running)"
-    const when = p.until ? `resumes ${clockTime(p.until)}` : "until you resume"
-    return `▶  Paused${p.reason === "limit" ? " before the limit" : ""} · ${when}`
+    const when = p.until ? `resumes ${whenText(p.until)}` : "until you resume"
+    return `▶  ${p.reason === "limit" || p.reason === "stop" ? "Stopped" : "Paused"} · ${when}`
   }
   return (
     <box
@@ -462,39 +462,6 @@ export function PauseBar() {
         {label()}
         <Show when={paused() && hover()}>
           <span style={{ fg: theme.textMuted }}>{paused().reason === "limit" ? " (click to go on to 100%)" : " (click to resume)"}</span>
-        </Show>
-      </text>
-    </box>
-  )
-}
-
-/**
- * Auto-pause before a plan limit, right below the pause bar: a click turns it on or off, a right click sets the level
- * (the same as Settings → "Pause before a limit" / "Pause at").
- */
-export function AutoPauseToggle() {
-  const [hover, setHover] = createSignal(false)
-  // This tab's auto-pause: its own setting, else the one for every tab.
-  const rule = () => (configRevision(), autoPauseFor(store.sessionID))
-  const on = () => rule().on
-  const level = () => rule().at
-  return (
-    <box
-      flexShrink={0}
-      paddingLeft={1}
-      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
-      onMouseOver={() => setHover(true)}
-      onMouseOut={() => setHover(false)}
-      onMouseUp={(event) => runCommand(event?.button === 2 ? "pause.limit.threshold" : "pause.limit.toggle")}
-    >
-      <text fg={on() ? theme.text : theme.textMuted} wrapMode="none" truncate>
-        <span style={{ fg: on() ? theme.success : theme.textMuted }}>{on() ? "◉" : "○"}</span>
-        {on() ? `  Auto-pause at ${level()}%` : "  Auto-pause off"}
-        <Show when={rule().own}>
-          <span style={{ fg: theme.textMuted }}> · this tab</span>
-        </Show>
-        <Show when={hover()}>
-          <span style={{ fg: theme.textMuted }}> (right click: this tab / every tab)</span>
         </Show>
       </text>
     </box>
@@ -525,7 +492,7 @@ function SwitchRow(props) {
 }
 
 /**
- * Auto-resume, right below auto-pause: a click turns it on or off (default on), a right click switches between
+ * Auto-resume, right below the pause bar: a click turns it on or off (default on), a right click switches between
  * resuming all waiting tabs at once and one at a time (the same as Settings → "Auto resume" / "Resume").
  */
 export function AutoResumeToggle() {
@@ -581,10 +548,21 @@ export function RoutingToggle() {
   return <SwitchRow on={on()} label={on() ? "Subagent routing on" : "Subagent routing off"} toggle="routing.toggle" settings="routing.settings" />
 }
 
-/** The Stop after row above Pause: what is set for this tab, a click to change it. */
-function RuleRow(props) {
+/**
+ * The Stop after row above Pause: the stop near any limit and a one-time stop, as set for this tab. A click opens
+ * Stop after; a right click turns the stop near any limit on or off for this tab.
+ */
+export function StopAfterRow() {
   const [hover, setHover] = createSignal(false)
-  const rule = () => (configRevision(), props.rule(store.sessionID))
+  const once = () => (configRevision(), stopRuleFor(store.sessionID))
+  const near = () => (configRevision(), autoPauseFor(store.sessionID))
+  const active = () => !!once() || near().on
+  const text = () => {
+    const parts = []
+    if (once()) parts.push(describeRule(once()))
+    if (near().on) parts.push(once() ? `any ${near().at}%` : `${near().at}% of any limit`)
+    return parts.length ? `  Stop at ${parts.join(" · ")}` : "  Stop after: off"
+  }
   return (
     <box
       flexShrink={0}
@@ -592,27 +570,21 @@ function RuleRow(props) {
       backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
       onMouseOver={() => setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => runCommand(props.command)}
+      onMouseUp={(event) => runCommand(event?.button === 2 ? "pause.limit.toggle" : "plan.stopafter")}
     >
-      <text fg={rule() ? theme.text : theme.textMuted} wrapMode="none" truncate>
-        <span style={{ fg: rule() ? theme.warning : theme.textMuted }}>{props.icon}</span>
-        {rule() ? `  Stop at ${describeRule(rule())}` : `  ${props.label}: off`}
-        <Show when={rule()}>
-          <span style={{ fg: theme.textMuted }}>{rule().own ? " · this tab" : " · every tab"}</span>
+      <text fg={active() ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: active() ? theme.warning : theme.textMuted }}>⏹</span>
+        {text()}
+        <Show when={once()?.own || near().own}>
+          <span style={{ fg: theme.textMuted }}> · this tab</span>
         </Show>
         <Show when={hover()}>
-          <span style={{ fg: theme.textMuted }}> (click: set)</span>
+          <span style={{ fg: theme.textMuted }}> (click: set · right click: any limit on/off)</span>
         </Show>
       </text>
     </box>
   )
 }
-
-/** Stop after a time or a limit level (this tab, or every tab). */
-export function StopAfterRow() {
-  return <RuleRow icon="⏹" label="Stop after" rule={stopRuleFor} command="plan.stopafter" />
-}
-
 
 /** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
 export function PhoneRow() {
@@ -656,7 +628,6 @@ export function SidebarFooter() {
       <box flexShrink={0}>
         <StopAfterRow />
         <PauseBar />
-        <AutoPauseToggle />
         <AutoResumeToggle />
         <FableFallbackToggle />
         <FableReturnToggle />

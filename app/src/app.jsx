@@ -448,75 +448,6 @@ function selectAll(renderer) {
   }
 }
 
-/**
- * Auto-pause for this tab and for every tab. Enter (or a click) sets it for this tab; the "every tab" cell on the right
- * (right-click, ctrl+o) sets the setting for every tab. A tab's own setting comes first; tabs without one follow
- * the setting for every tab.
- */
-function DialogAutoPause() {
-  const [tick, setTick] = createSignal(0)
-  const sid = () => store.sessionID
-  const options = createMemo(() => {
-    tick()
-    configRevision()
-    const mine = autoPauseFor(sid())
-    const every = { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 }
-    const others = autoPauseOverrides().filter((id) => id !== sid()).length
-    return [
-      {
-        title: mine.on ? "Auto-pause on" : "Auto-pause off",
-        value: "toggle",
-        description: `this tab${mine.own ? " (its own setting)" : " (follows every tab)"} · every tab: ${every.on ? `on at ${every.at}%` : "off"}`,
-        gutter: <text fg={mine.on ? theme.success : theme.textMuted}>{mine.on ? "[x]" : "[ ]"}</text>,
-        category: "Pause before a limit",
-      },
-      ...[70, 75, 80, 85, 90, 95, 98, 99].map((value) => ({
-        title: `${value}%`,
-        value: String(value),
-        category: "Pause at",
-        description: [value === mine.at ? "this tab" : "", value === every.at ? "every tab" : "", value === 95 ? "default" : ""].filter(Boolean).join(" · ") || undefined,
-        gutter: <text fg={value === mine.at ? theme.primary : theme.textMuted}>{value === mine.at ? "(•)" : "( )"}</text>,
-      })),
-      ...(mine.own ? [{ title: "Follow the setting for every tab", value: "follow", category: "This tab", side: false }] : []),
-      ...(others ? [{ title: `Make every tab follow it`, value: "followAll", category: "Every tab", description: `${others} other tab${others === 1 ? " has" : "s have"} its own setting`, side: false }] : []),
-    ]
-  })
-  const apply = (option, every) => {
-    if (option.value === "follow") setSessionAutoPause(sid(), { on: null, at: null })
-    else if (option.value === "followAll") {
-      config.sessionAutoPause = {}
-      saveConfig()
-    } else if (option.value === "toggle") {
-      if (every || !sid()) {
-        config.pauseNearLimit = config.pauseNearLimit === false
-        saveConfig()
-      } else setSessionAutoPause(sid(), { on: !autoPauseFor(sid()).on })
-    } else {
-      const at = Number(option.value)
-      if (every || !sid()) {
-        config.pauseAt = at
-        config.pauseNearLimit = true
-        saveConfig()
-      } else setSessionAutoPause(sid(), { at, on: true })
-    }
-    setTick((value) => value + 1)
-  }
-  return (
-    <DialogSelect
-      title="Auto-pause"
-      options={options()}
-      onSelect={(option) => apply(option, false)}
-      side={{ label: "every tab", run: (option) => apply(option, true) }}
-      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => option.side !== false && apply(option, true) }]}
-      footer={
-        <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>this tab (comes first)</span>
-        </text>
-      }
-    />
-  )
-}
-
 /** "HH:MM" or a number of minutes → a time (ms), or undefined. */
 function parseWhen(text) {
   const value = text.trim()
@@ -534,28 +465,54 @@ function parseWhen(text) {
 const WINDOW_TITLES = { fiveHour: "5-hour limit", week: "weekly limit", fable: "Fable limit" }
 
 /**
- * Stop after (sidebar, above Pause): mainly an exact level of the 5-hour limit (or the weekly / Fable one), else a
- * time. Enter sets it for this tab; the "every tab" cell (right-click, ctrl+o) for every tab. A tab's own rule comes
- * first. A limit stop goes on by itself when that window resets; a time stop waits for you.
+ * Stop after (sidebar, above Pause). On top, the stop near any limit (it was "Auto-pause"): each time a plan window —
+ * 5-hour, weekly, or the model's own (Fable) — reaches its level, the tab stops until that window resets and then goes
+ * on by itself; resuming by hand goes on up to 100 % of that window. Below, a one-time stop at an exact level of one
+ * limit, or at a time. Enter sets this tab; the "every tab" cell (right-click, ctrl+o) every tab. A tab's own setting
+ * comes first.
  */
 function DialogStopAfter() {
-  const sid = store.sessionID
-  const mine = stopRuleFor(sid)
+  const [tick, setTick] = createSignal(0)
+  const sid = () => store.sessionID
   // The live level (the last reading plus what was spent since), as the stop check sees it. The limits show even
   // before the first reading (then without "now").
   const known = (key) => stopLevel(key) !== undefined
   const used = (key) => Math.round(stopLevel(key) ?? 0)
-  const windows = [...(limits.rolling === false ? [] : ["fiveHour"]), "week", ...(hasFableWindow() ? ["fable"] : [])]
-  const who = (every) => (every ? "every tab" : "this tab")
-  const set = (rule, every) => {
-    setStopRule(every ? undefined : sid, rule)
+  const forEvery = (every) => every || !sid()
+  const who = (every) => (forEvery(every) ? "every tab" : "this tab")
+  const once = (rule, every) => {
+    setStopRule(forEvery(every) ? undefined : sid(), rule)
     dialog.clear()
-    toast.show({ variant: "info", message: rule ? `Stop at ${describeRule(rule)} · ${who(every)}` : `Stop after: off · ${who(every)}` })
+    toast.show({ variant: "info", message: rule ? `Stop once at ${describeRule(rule)} · ${who(every)}` : `No one-time stop · ${who(every)}` })
   }
+  // The stop near any limit: this tab's own setting, or the one for every tab.
+  const near = (change, every) => {
+    if (forEvery(every)) {
+      if (change.on !== undefined) config.pauseNearLimit = change.on
+      if (change.at !== undefined) config.pauseAt = change.at
+      saveConfig()
+    } else setSessionAutoPause(sid(), change)
+    const now = forEvery(every) ? { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 } : autoPauseFor(sid())
+    toast.show({ variant: "info", message: now.on ? `Stop near any limit: at ${now.at}% · ${who(every)}` : `Stop near any limit: off · ${who(every)}` })
+    setTick((value) => value + 1)
+  }
+  const nearExact = (every) =>
+    dialog.replace(() => (
+      <DialogPrompt
+        title={`Stop ${who(every)} near any limit at what %?`}
+        placeholder="e.g. 93 (from 50 to 100)"
+        onConfirm={(value) => {
+          const level = Number(value.trim().replace("%", ""))
+          if (!Number.isFinite(level) || level < 50 || level > 100) return toast.show({ variant: "warning", message: "Write a level from 50 to 100" })
+          near({ on: true, at: Math.round(level * 10) / 10 }, every)
+          dialog.replace(() => <DialogStopAfter />, undefined, "large")
+        }}
+      />
+    ))
   const exact = (key, every) =>
     dialog.replace(() => (
       <DialogPrompt
-        title={`Stop ${who(every)} at what % of the ${WINDOW_TITLES[key]}?`}
+        title={`Stop ${who(every)} once at what % of the ${WINDOW_TITLES[key]}?`}
         placeholder={known(key) ? `now ${used(key)}% · e.g. ${Math.min(100, used(key) + 15)}, or +10 for 10% more` : "e.g. 85"}
         onConfirm={(value) => {
           const text = value.trim()
@@ -564,79 +521,100 @@ function DialogStopAfter() {
           const level = more ? used(key) + Number(more[1]) : Number(text.replace("%", ""))
           if (!Number.isFinite(level) || level <= used(key) || level > 100)
             return toast.show({ variant: "warning", message: `Write a level above the ${used(key)}% used now (up to 100), or +N` })
-          set({ window: key, percent: Math.round(level * 10) / 10 }, every)
+          once({ window: key, percent: Math.round(level * 10) / 10 }, every)
         }}
       />
     ))
   const choose = (option, every) => {
     const [kind, key, value] = option.value.split(":")
-    if (kind === "off") return set(null, every)
+    if (kind === "near") {
+      if (key === "toggle") return near({ on: !(forEvery(every) ? config.pauseNearLimit !== false : autoPauseFor(sid()).on) }, every)
+      if (key === "at") return near({ on: true, at: Number(value) }, every)
+      if (key === "exact") return nearExact(every)
+      if (key === "follow") setSessionAutoPause(sid(), { on: null, at: null })
+      if (key === "followAll") {
+        config.sessionAutoPause = {}
+        saveConfig()
+      }
+      return setTick((n) => n + 1)
+    }
+    if (kind === "off") return once(null, every)
     if (kind === "exact") return exact(key, every)
-    if (kind === "level") return set({ window: key, percent: Number(value) }, every)
-    if (kind === "more") return set({ window: key, percent: Math.min(100, used(key) + Number(value)) }, every)
-    if (kind === "in") return set({ time: Date.now() + Number(value) * 60_000 }, every)
+    if (kind === "level") return once({ window: key, percent: Number(value) }, every)
+    if (kind === "more") return once({ window: key, percent: Math.min(100, used(key) + Number(value)) }, every)
+    if (kind === "in") return once({ time: Date.now() + Number(value) * 60_000 }, every)
     if (kind === "time")
       return dialog.replace(() => (
         <DialogPrompt
-          title={`Stop ${who(every)} at (HH:MM) or after N minutes`}
+          title={`Stop ${who(every)} once at (HH:MM) or after N minutes`}
           placeholder="e.g. 23:30 or 90"
           onConfirm={(text) => {
             const time = parseWhen(text)
             if (!time) return toast.show({ variant: "warning", message: "Write a time like 23:30 or a number of minutes" })
-            set({ time }, every)
+            once({ time }, every)
           }}
         />
       ))
   }
-  const options = []
-  for (const key of windows) {
-    const now = used(key)
-    const title = `${WINDOW_TITLES[key][0].toUpperCase()}${WINDOW_TITLES[key].slice(1)} ${known(key) ? `(now ${now}%)` : "(not read yet)"}`
-    options.push({ title: "At an exact %…", value: `exact:${key}`, category: title, description: known(key) ? "any level, or +N from now" : "any level" })
-    const levels = key === "fiveHour" ? [70, 80, 90, 95] : [50, 75, 90]
-    for (const level of levels.filter((level) => level > now)) options.push({ title: `At ${level}%`, value: `level:${key}:${level}`, category: title })
-    if (key === "fiveHour" && known(key)) for (const more of [5, 10, 20].filter((more) => now + more <= 100)) options.push({ title: `${more}% more from now`, value: `more:${key}:${more}`, category: title, description: `at ${now + more}%` })
-  }
-  for (const [minutes, label] of [[30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"]]) options.push({ title: label, value: `in::${minutes}`, category: "Time" })
-  options.push({ title: "At a time…", value: "time", category: "Time", description: "HH:MM, or a number of minutes" })
-  options.push({ title: "Off", value: "off", category: "Stop after", description: mine ? `now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : "no stop set" })
+  const options = createMemo(() => {
+    tick()
+    configRevision()
+    const mine = autoPauseFor(sid())
+    const every = { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 }
+    const others = autoPauseOverrides().filter((id) => id !== sid()).length
+    const rule = stopRuleFor(sid())
+    const nearTitle = "Near any limit · each time (5-hour, weekly, Fable)"
+    const list = [
+      {
+        title: mine.on ? `On · at ${mine.at}%` : "Off",
+        value: "near:toggle",
+        description: `this tab${mine.own ? " (its own)" : " (follows every tab)"} · every tab: ${every.on ? `at ${every.at}%` : "off"}`,
+        gutter: <text fg={mine.on ? theme.success : theme.textMuted}>{mine.on ? "[x]" : "[ ]"}</text>,
+        category: nearTitle,
+      },
+      ...[80, 90, 95, 98, 99].map((level) => ({
+        title: `At ${level}%`,
+        value: `near:at:${level}`,
+        category: nearTitle,
+        description: [level === mine.at ? "this tab" : "", level === every.at ? "every tab" : "", level === 95 ? "default" : ""].filter(Boolean).join(" · ") || undefined,
+        gutter: <text fg={level === mine.at ? theme.primary : theme.textMuted}>{level === mine.at ? "(•)" : "( )"}</text>,
+      })),
+      {
+        title: "At an exact %…",
+        value: "near:exact",
+        category: nearTitle,
+        description: [80, 90, 95, 98, 99].includes(mine.at) ? "any level from 50 to 100" : `this tab: ${mine.at}%`,
+        gutter: <text fg={[80, 90, 95, 98, 99].includes(mine.at) ? theme.textMuted : theme.primary}>{[80, 90, 95, 98, 99].includes(mine.at) ? "( )" : "(•)"}</text>,
+      },
+      ...(mine.own ? [{ title: "Follow the setting for every tab", value: "near:follow", category: nearTitle, side: false }] : []),
+      ...(others ? [{ title: "Make every tab follow it", value: "near:followAll", category: nearTitle, description: `${others} other tab${others === 1 ? " has" : "s have"} its own setting`, side: false }] : []),
+    ]
+    const windows = [...(limits.rolling === false ? [] : ["fiveHour"]), "week", ...(hasFableWindow() ? ["fable"] : [])]
+    for (const key of windows) {
+      const now = used(key)
+      const title = `Once · ${WINDOW_TITLES[key]} ${known(key) ? `(now ${now}%)` : "(not read yet)"}`
+      list.push({ title: "At an exact %…", value: `exact:${key}`, category: title, description: known(key) ? "any level, or +N from now" : "any level" })
+      const levels = key === "fiveHour" ? [70, 80, 90, 95] : [50, 75, 90]
+      for (const level of levels.filter((level) => level > now)) list.push({ title: `At ${level}%`, value: `level:${key}:${level}`, category: title })
+      if (key === "fiveHour" && known(key)) for (const more of [5, 10, 20].filter((more) => now + more <= 100)) list.push({ title: `${more}% more from now`, value: `more:${key}:${more}`, category: title, description: `at ${now + more}%` })
+    }
+    for (const [minutes, label] of [[30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"]]) list.push({ title: label, value: `in::${minutes}`, category: "Once · at a time" })
+    list.push({ title: "At a time…", value: "time", category: "Once · at a time", description: "HH:MM, or a number of minutes" })
+    list.push({ title: "No one-time stop", value: "off", category: "Once", description: rule ? `now: ${describeRule(rule)} (${rule.own ? "this tab" : "every tab"})` : "none set" })
+    return list
+  })
   return (
     <DialogSelect
-      title={`Stop after${mine ? ` · now: ${describeRule(mine)} (${mine.own ? "this tab" : "every tab"})` : ""}`}
-      options={options}
+      title="Stop after"
+      options={options()}
       onSelect={(option) => choose(option, false)}
       side={{ label: "every tab", run: (option) => choose(option, true) }}
-      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
+      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => option.side !== false && choose(option, true) }]}
       footer={
         <text fg={theme.text}>
           enter <span style={{ fg: theme.textMuted }}>this tab (comes first) · a limit stop goes on when it resets</span>
         </text>
       }
-    />
-  )
-}
-
-/** How full a plan limit window gets before "Pause before a limit" pauses (default 95 %). */
-function DialogPauseAt(props) {
-  const current = config.pauseAt ?? 95
-  return (
-    <DialogSelect
-      title="Pause at"
-      current={String(current)}
-      options={[70, 75, 80, 85, 90, 95, 98, 99].map((value) => ({
-        title: `${value}%`,
-        value: String(value),
-        description: value === 95 ? "default" : value >= 98 ? "just before the limit" : undefined,
-      }))}
-      onSelect={(option) => {
-        config.pauseAt = Number(option.value)
-        if (config.pauseNearLimit === false) config.pauseNearLimit = true
-        saveConfig()
-        toast.show({ variant: "success", message: `Pausing at ${option.value}% of a plan limit` })
-        if (props.stacked) dialog.pop()
-        else if (props.back) dialog.replace(() => <DialogSettings />, undefined, "large")
-        else dialog.clear()
-      }}
     />
   )
 }
@@ -2318,8 +2296,7 @@ function DialogSettings() {
       get: flag("dropFiles", true),
       set: write("dropFiles"),
     },
-    { key: "pauseNearLimit", title: "Pause before a limit", description: "near a plan limit, pause until it resets (resume to go on up to 100%)", get: flag("pauseNearLimit", true), set: write("pauseNearLimit") },
-    { key: "pauseAt", title: "  Pause at", description: "how full a limit window gets before the pause", get: () => config.pauseNearLimit !== false, set: () => {} },
+    { key: "stopafter", title: "Stop after…", description: "stop near any limit each time (until it resets), or once at an exact level or a time", get: () => autoPauseFor(undefined).on || !!config.stopAfter?.every, set: () => {} },
     { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
     {
@@ -2363,7 +2340,7 @@ function DialogSettings() {
     if (key === "orchestrator") return openOrchestrator(back)
     if (key === "fable.fallback") return dialog.push(() => <DialogFableFallback />)
     if (key === "fable.upgrade") return dialog.push(() => <DialogFableUpgrade />)
-    if (key === "pauseAt") return dialog.push(() => <DialogPauseAt stacked />)
+    if (key === "stopafter") return dialog.push(() => <DialogStopAfter />, undefined, "large")
   }
   const options = createMemo(() => {
     tick()
@@ -2376,7 +2353,7 @@ function DialogSettings() {
       // Saving, restoring and resetting the settings are actions, not switches.
       ...(setting.key === "transcriptDetail" ? { footer: transcriptDetail(), gutter: <text fg={theme.textMuted}>{" ≡ "}</text> } : {}),
       ...(setting.key === "autoResumeMode" ? { footer: config.autoResumeMode === "one" ? "one at a time" : "all at once", gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> } : {}),
-      ...(setting.key === "pauseAt" ? { footer: `${config.pauseAt ?? 95}%`, gutter: <text fg={theme.textMuted}>{" % "}</text> } : {}),
+      ...(setting.key === "stopafter" ? { footer: config.pauseNearLimit !== false ? `any limit ${config.pauseAt ?? 95}%` : "off" } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
       ...(setting.key === "settings.reset" ? { footer: "reset", gutter: <text fg={theme.textMuted}>{" ↺ "}</text> } : {}),
@@ -2395,8 +2372,8 @@ function DialogSettings() {
           dialog.replace(() => <DialogMods />, undefined, "large")
           return
         }
-        if (option.value === "pauseAt") {
-          dialog.replace(() => <DialogPauseAt back />)
+        if (option.value === "stopafter") {
+          dialog.replace(() => <DialogStopAfter />, undefined, "large")
           return
         }
         if (option.value === "transcriptDetail") {
@@ -3280,9 +3257,8 @@ export function App() {
     },
     {
       id: "pause.limit.toggle",
-      title: autoPauseFor(store.sessionID).on ? "Turn off auto-pause before a limit (this tab)" : "Turn on auto-pause before a limit (this tab)",
+      title: autoPauseFor(store.sessionID).on ? "Stop near any limit: turn off (this tab)" : "Stop near any limit: turn on (this tab)",
       category: "Session",
-      slash: "autopause",
       run: () => {
         const now = autoPauseFor(store.sessionID)
         if (!store.sessionID) {
@@ -3290,10 +3266,10 @@ export function App() {
           saveConfig()
         } else setSessionAutoPause(store.sessionID, { on: !now.on })
         const after = autoPauseFor(store.sessionID)
-        toast.show({ variant: "info", message: after.on ? `Auto-pause on for this tab: pausing at ${after.at}% of a plan limit` : "Auto-pause off for this tab" })
+        toast.show({ variant: "info", message: after.on ? `Stop near any limit: at ${after.at}% · this tab` : "Stop near any limit: off · this tab" })
       },
     },
-    { id: "plan.stopafter", title: "Stop after… (an exact limit level, or a time)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
+    { id: "plan.stopafter", title: "Stop after… (near any limit, an exact level, or a time)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
     {
       id: "orchestrator.toggle",
       title: orchestrator().enabled ? "Turn off orchestrator mode" : "Turn on orchestrator mode",
@@ -3320,7 +3296,6 @@ export function App() {
       },
     },
     { id: "routing.settings", title: "Subagent routing settings", category: "Session", run: () => openRouting() },
-    { id: "pause.limit.threshold", title: "Auto-pause settings (this tab, every tab)", category: "Session", run: () => dialog.replace(() => <DialogAutoPause />, undefined, "large") },
     {
       id: "auto.resume.toggle",
       title: config.autoResume === false ? "Turn on auto-resume after a limit" : "Turn off auto-resume after a limit",

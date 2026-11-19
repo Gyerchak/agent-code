@@ -836,7 +836,7 @@ function applyUsage(usage) {
 }
 
 // ---------------------------------------------------------------------------
-// Fable fallback and return (sidebar, under auto-pause; Settings → Fable fallback… / Back to Fable…)
+// Fable fallback and return (sidebar, under the pause bar; Settings → Fable fallback… / Back to Fable…)
 //  - fallback: a Fable tab that hits the Fable limit (or would pause before it) goes on at once on another model
 //    (Opus by default) with its reasoning level raised (+1 by default). Off by default.
 //  - return: once a Fable limit that was used up resets, tabs on Opus, Sonnet or Haiku go back to Fable with their
@@ -845,8 +845,9 @@ function applyUsage(usage) {
 
 export const LEVELS = ["low", "medium", "high", "xhigh", "max"]
 
-// Auto-pause before a limit, per tab and for every tab: a tab's own setting (config.sessionAutoPause[session id])
-// comes first; the setting for every tab (config.pauseNearLimit / config.pauseAt) applies where a tab has none.
+// Stop after → near any limit (it was "Auto-pause"), per tab and for every tab: a tab's own setting
+// (config.sessionAutoPause[session id]) comes first; the one for every tab (config.pauseNearLimit / config.pauseAt)
+// applies where a tab has none.
 export function autoPauseFor(sessionID) {
   const own = (sessionID && config.sessionAutoPause?.[sessionID]) || {}
   return {
@@ -915,6 +916,12 @@ export function setStopRule(sessionID, rule) {
   setTimeout(checkStopRules, 0)
 }
 
+/** A time to show: "14:30" today, "Tue 01:00" on another day (a weekly reset can be days away). */
+export function whenText(ms) {
+  const today = new Date(ms).toDateString() === new Date().toDateString()
+  return new Date(ms).toLocaleString([], { ...(today ? {} : { weekday: "short" }), hour: "2-digit", minute: "2-digit" })
+}
+
 /** "5-hour 80%", "14:30". */
 export function describeRule(rule) {
   if (!rule) return undefined
@@ -951,9 +958,7 @@ function checkStopRules() {
     }
     if (!hit) continue
     session.pause(until, "stop", stop.window ? [{ key: stop.window, ...planWindowOf(stop.window) }] : undefined)
-    // A weekly reset can be days away: then the day goes with the time.
-    const today = until && new Date(until).toDateString() === new Date().toDateString()
-    const at = until ? new Date(until).toLocaleString([], { ...(today ? {} : { weekday: "short" }), hour: "2-digit", minute: "2-digit" }) : undefined
+    const at = until ? whenText(until) : undefined
     session.notice?.(`Stopped at ${describeRule(stop)} (Stop after)${at ? `: goes on when the window resets, ${at}` : ": resume with the Pause bar when you want"}.`, "info")
     usedUp(session, stop)
   }
@@ -3264,7 +3269,8 @@ export function createSession(seed             ) {
     if (!id) return
     const all = { ...(config.sessionPauses ?? {}) }
     const p = store.pause
-    if (p) all[id] = { until: p.until, reason: p.reason, windows: p.windows, since: p.since, interrupted: !!p.interrupted }
+    // Plain copies (the store's own objects are proxies).
+    if (p) all[id] = { until: p.until, reason: p.reason, windows: p.windows?.map((w) => ({ key: w.key, resetsAt: w.resetsAt })), since: p.since, interrupted: !!p.interrupted }
     else delete all[id]
     config.sessionPauses = all
     saveConfig()
@@ -3316,8 +3322,10 @@ export function createSession(seed             ) {
     }
     const until = Math.max(...windows.map((w) => w.resetsAt)) + 30_000
     pause(until, "limit", windows.map((w) => ({ key: w.key, resetsAt: w.resetsAt })))
+    const top = windows.reduce((a, b) => (b.utilization > a.utilization ? b : a))
+    const name = top.key === "fiveHour" ? "5-hour" : top.key === "week" ? "weekly" : top.key.replace(/^scoped:/, "")
     pushNotice(
-      `Paused before the plan limit (${Math.round(Math.max(...windows.map((w) => w.utilization)))}% used, pausing at ${at}%); resumes at ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} with nothing extra sent. Resume to go on up to 100%.`,
+      `Stopped at ${Math.round(top.utilization)}% of the ${name} limit (Stop after: any limit at ${at}%). Goes on by itself ${whenText(until)}, with nothing extra sent; resume to go on up to 100%.`,
       "info",
     )
   }

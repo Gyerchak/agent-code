@@ -927,7 +927,7 @@ const WEB_SETTINGS = [
   { key: "subagents", title: "Subagents", fallback: true, restart: true },
   { key: "memoryUse", title: "Memory", fallback: true, restart: true },
   { key: "autoResume", title: "Auto-resume after a limit", fallback: true },
-  { key: "pauseNearLimit", title: "Pause before a limit", fallback: true },
+  { key: "pauseNearLimit", title: "Stop near any limit (Stop after)", fallback: true },
   { key: "smallSessions", title: "Small sessions (auto-compact)", fallback: true },
 ]
 
