@@ -100,7 +100,18 @@ function profileDir() {
   } catch {}
   mkdirSync(dir, { recursive: true })
   writeFileSync(lock(dir), String(process.pid))
+  profileInUse = dir
   return dir
+}
+
+let profileInUse
+/** On the way out: a second window's own profile copy goes (they piled up); the main one keeps its data. */
+function cleanProfile() {
+  if (!profileInUse) return
+  try {
+    if (profileInUse.endsWith(`-${process.pid}`)) rmSync(profileInUse, { recursive: true, force: true })
+    else rmSync(path.join(profileInUse, ".acode-web.pid"), { force: true })
+  } catch {}
 }
 
 function openWindow(url) {
@@ -142,6 +153,7 @@ const freePort = () =>
 const token = randomBytes(18).toString("base64url")
 // The address the browser opens (and that other users can see in the process list) carries a one-time code only.
 let code = randomBytes(12).toString("base64url")
+let codeSpent = false
 const port = await freePort()
 // A private folder for the note Agent Code leaves when it wants a restart (another user) or to quit.
 const control = path.join(mkdtempSync(path.join(os.tmpdir(), "acode-web-")), "control.json")
@@ -167,7 +179,7 @@ function startCore() {
   rmSync(control, { force: true })
   core = spawn(process.execPath, ["--experimental-ffi", "--no-warnings", index], {
     cwd,
-    env: { ...process.env, ...env, ACODE_HEADLESS: "1", ACODE_WEB_PORT: String(port), ACODE_WEB_TOKEN: token, ACODE_WEB_CODE: code, ACODE_WEB_CONTROL: control, ACODE_WEB_USERS: usersDir, ACODE_WEB_USER: user },
+    env: { ...process.env, ...env, ACODE_HEADLESS: "1", ACODE_WEB_PORT: String(port), ACODE_WEB_TOKEN: token, ACODE_WEB_CODE: codeSpent ? "" : code, ACODE_WEB_CONTROL: control, ACODE_WEB_USERS: usersDir, ACODE_WEB_USER: user },
     stdio: ["ignore", "ignore", "pipe"],
   })
   let ready = false
@@ -175,6 +187,8 @@ function startCore() {
     const text = chunk.toString()
     if (!ready && text.includes("ACODE_WEB_READY")) {
       ready = true
+      // The code in the window's address works once: later starts (another user, a reset) don't accept it again.
+      codeSpent = true
       started = Date.now()
       if (noWindow) console.log(`Agent Code web: http://127.0.0.1:${port}/#c=${code}`)
       else if (!window) {
@@ -190,7 +204,10 @@ function startCore() {
     }
   })
   core.on("exit", (exitCode) => {
-    if (quitting) return process.exit(0)
+    if (quitting) {
+      cleanProfile()
+      return process.exit(0)
+    }
     // Agent Code left a note: another user, a restart, or quit.
     let next
     try {
@@ -215,9 +232,15 @@ function startCore() {
 function quit() {
   if (quitting) return
   quitting = true
-  core?.kill("SIGTERM")
   window?.kill()
-  setTimeout(() => process.exit(0), 600)
+  // Agent Code ends itself first (it saves its tabs and settings; on Windows a kill can't be caught), and is ended
+  // for sure a moment later.
+  fetch(`http://127.0.0.1:${port}/api/web/quit`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" }).catch(() => {})
+  setTimeout(() => core?.kill("SIGTERM"), 3000).unref?.()
+  setTimeout(() => {
+    cleanProfile()
+    process.exit(0)
+  }, 3600)
 }
 
 // Whether the page is still open (for browsers that keep running after the window closes, e.g. on macOS, or that
@@ -234,6 +257,8 @@ setInterval(async () => {
       seenPage = true
       lastPage = Date.now()
     } else if (seenPage && Date.now() - lastPage > 40_000) quit()
+    // The window never showed the page (the browser failed, or the code was refused): don't run on unseen.
+    else if (!seenPage && Date.now() - started > 120_000) quit()
   } catch {}
 }, 5000).unref()
 

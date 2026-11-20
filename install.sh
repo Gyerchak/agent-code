@@ -37,7 +37,11 @@ export PATH
 bold "Node.js $("$NODE" --version) found."
 
 # 2. The code: from this copy of the repository, or downloaded from GitHub.
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo)"
+# Piped (curl … | sh) there is no script file: $0 is the shell, and the current folder is not this repository.
+case "$0" in
+  sh|bash|dash|zsh|-sh|-bash|*/sh|*/bash|*/dash|*/zsh) SCRIPT_DIR="" ;;
+  *) SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo)" ;;
+esac
 mkdir -p "$HOME_DIR"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/app/package.json" ]; then
   bold "Copying acode from $SCRIPT_DIR/app"
@@ -126,7 +130,7 @@ if [ "$ENGINE" != none ]; then
 Type=Application
 Name=Agent Code
 Comment=Every coding agent in one app (Claude Code, opencode, DeepSeek Harness, Codex)
-Exec=$BIN_DIR/acode-web %F
+Exec="$BIN_DIR/acode-web" %F
 Icon=${XDG_DATA_HOME:-$HOME/.local/share}/icons/agent-code.svg
 Terminal=false
 Categories=Development;

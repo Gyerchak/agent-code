@@ -50,6 +50,7 @@ export function spawnOptions(file) {
 /** The command that opens a URL or file in the desktop's default app. */
 export function openCommand(target) {
   if (isMac) return ["open", [target]]
-  if (isWindows) return ["cmd", ["/c", "start", "", target]]
+  // Not `cmd /c start`: cmd.exe would run whatever follows an "&" or "|" in a link from the chat.
+  if (isWindows) return ["rundll32", ["url.dll,FileProtocolHandler", target]]
   return ["xdg-open", [target]]
 }

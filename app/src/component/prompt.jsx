@@ -346,8 +346,10 @@ export function Prompt(props                                         ) {
    * ("/resume" resumes a paused tab; with nothing paused it is "Switch session"'s alias).
    */
   function localCommand(name) {
+    // Names are matched whatever the case ("/Models" is /models), as the suggestions are.
+    const typed = String(name ?? "").toLowerCase()
     const usable = allCommands().filter((item) => !item.enabled || item.enabled())
-    return usable.find((item) => item.slash === name) ?? usable.find((item) => item.slashAliases?.includes(name))
+    return usable.find((item) => item.slash?.toLowerCase() === typed) ?? usable.find((item) => item.slashAliases?.some((alias) => alias.toLowerCase() === typed))
   }
 
   // ---------------------------------------------------------------------------

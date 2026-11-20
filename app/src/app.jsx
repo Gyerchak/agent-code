@@ -1006,7 +1006,7 @@ function DialogModels() {
             if (adding && variantsOf(value).length) dialog.replace(() => <DialogFavoriteVariants model={value} title={option.title} />)
           },
         },
-        { keybind: "ctrl+v", label: "variants shown", run: (option) => { const value = option.value.split(FAV_VARIANT)[0]; if (favorites().includes(value) && variantsOf(value).length) dialog.replace(() => <DialogFavoriteVariants model={value} title={option.title.split(" · ")[0]} />) } },
+        { keybind: "ctrl+v", label: "variants shown", run: (option) => { const value = option.value.split(FAV_VARIANT)[0]; if (!favorites().includes(value) || !variantsOf(value).length) return false; dialog.replace(() => <DialogFavoriteVariants model={value} title={option.title.split(" · ")[0]} />) } },
         { keybind: "ctrl+up", label: "move up", run: (option) => void moveFavorite(option.value.split(FAV_VARIANT)[0], -1) },
         { keybind: "ctrl+down", label: "move down", run: (option) => void moveFavorite(option.value.split(FAV_VARIANT)[0], 1) },
         {
@@ -2437,12 +2437,6 @@ function DialogSettings() {
           saveConfig()
           openOrchestrator()
         }
-        // Subagent routing turned on for the first time: open its setup right away.
-        if (setting.key === "subagent.routing" && setting.get() && !config.subagentRouting?.configured) {
-          config.subagentRouting = { ...config.subagentRouting, configured: true }
-          saveConfig()
-          openRouting()
-        }
         if (setting.restart) {
           // These change Claude Code's system prompt / tools: restart idle tabs so they apply now.
           for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()
@@ -2477,7 +2471,9 @@ function restartForAccess(ids) {
 }
 
 /** Open the access settings on the focused tab's harness (or `engine`). */
+let accessTab
 function openAccess(engine, how = "replace") {
+  accessTab = accessEngine(engine ?? store.engine)
   const close = () => {
     if (!accessChanged.size) return
     restartForAccess(new Set(accessChanged))
@@ -2499,7 +2495,11 @@ const ACCESS_NOTES = {
  * a setting; "Sync to the other harnesses…" copies this harness's settings to the others you pick.
  */
 function DialogAccess(props) {
-  const [engine, setEngine] = createSignal(accessEngine(props.engine ?? store.engine))
+  const [engine, setEngineNow] = createSignal(accessTab ?? accessEngine(props.engine ?? store.engine))
+  const setEngine = (value) => {
+    accessTab = value
+    setEngineNow(value)
+  }
   const [tick, setTick] = createSignal(0)
   const installed = (id) => id === "claude" || !!harnessStatus().find((item) => item.id === id)?.installed
   const options = createMemo(() => {
@@ -2522,6 +2522,7 @@ function DialogAccess(props) {
   return (
     <DialogSelect
       title="Access"
+      memoryKey="access"
       tabs={ACCESS_ENGINES.map((item) => ({ key: item.id, title: item.name }))}
       tab={engine()}
       onTab={setEngine}
@@ -2602,7 +2603,9 @@ let routingChanged = false
  * Open orchestrator mode's settings on top of the current dialog, on its "Usage" tab or its "Subagent routing" tab;
  * idle tabs restart once it closes, if anything changed (subagent types and the prompt live in the start options).
  */
+let orchestratorTab = "usage"
 function openOrchestrator(back, tab = "usage") {
+  orchestratorTab = tab
   dialog.push(
     () => <DialogOrchestrator tab={tab} />,
     () => {
@@ -2667,7 +2670,12 @@ function DialogOrchestratorLimit(props) {
  * each kind of task and each complexity level (routing works with or without orchestrator mode).
  */
 function DialogOrchestrator(props) {
-  const [tab, setTab] = createSignal(props.tab === "routing" ? "routing" : "usage")
+  // The tab outlives this instance: a dialog pushed on top (a model, a number) draws this one anew when it closes.
+  const [tab, setTabNow] = createSignal(orchestratorTab === "routing" ? "routing" : "usage")
+  const setTab = (value) => {
+    orchestratorTab = value
+    setTabNow(value)
+  }
   const [tick, setTick] = createSignal(0)
   const refresh = () => setTick((value) => value + 1)
   const bump = (change) => {
@@ -2749,6 +2757,7 @@ function DialogOrchestrator(props) {
   return (
     <DialogSelect
       title="Orchestrator mode"
+      memoryKey="orchestrator"
       tabs={[
         { key: "usage", title: "Usage" },
         { key: "routing", title: "Subagent routing" },

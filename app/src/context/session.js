@@ -11,7 +11,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { execFile, execFileSync } from "node:child_process"
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeFileSync, statSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { diffLines, structuredPatch } from "diff"
 import path from "node:path"
 import { AcpClient, acpContentText, acpToolInput, acpToolName, opencodeApi } from "./acp"
@@ -25,7 +25,7 @@ import { stateDir } from "./paths"
 import { ensureBoxTrusted } from "./box"
 import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
-import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
+import { acpEffort, acpModels, acpModes, harnessById, harnessInfo, harnessLaunch } from "./harnesses"
 import { modelVariants } from "./variants"
 import { sessionSpend, spendSnapshot } from "./spendhistory"
 import { accessFor } from "./access"
@@ -898,6 +898,7 @@ export function stopLevel(key) {
 export function stopRuleFor(sessionID) {
   const all = config.stopAfter ?? {}
   const own = sessionID ? all.tabs?.[sessionID] : undefined
+  if (own?.off) return undefined
   return own ? { ...own, own: true } : all.every ? { ...all.every, own: false } : undefined
 }
 
@@ -907,9 +908,14 @@ export function setStopRule(sessionID, rule) {
   all.tabs = { ...(all.tabs ?? {}) }
   if (sessionID) {
     if (rule) all.tabs[sessionID] = rule
+    // "None for this tab" while there is a rule for every tab: kept as this tab's own (else that rule applies).
+    else if (all.every) all.tabs[sessionID] = { off: true }
     else delete all.tabs[sessionID]
-  } else if (rule) all.every = rule
-  else delete all.every
+  } else if (rule) {
+    all.every = rule
+    // A new rule for every tab is for every tab: earlier "none for this tab" choices go.
+    for (const [id, own] of Object.entries(all.tabs)) if (own?.off) delete all.tabs[id]
+  } else delete all.every
   config.stopAfter = all
   // "Resume at" is gone: pausing and resuming do that.
   delete config.resumeAt
@@ -933,7 +939,14 @@ export function describeRule(rule) {
 
 function usedUp(session, rule) {
   // A tab's own rule goes with it; the one for every tab goes once every open tab has had it.
-  if (rule.own) return setStopRule(session.store.sessionID, null)
+  if (rule.own) {
+    // Gone, not "none for this tab": the rule for every tab applies to it again.
+    const all = config.stopAfter ?? {}
+    const tabs = { ...(all.tabs ?? {}) }
+    delete tabs[session.store.sessionID]
+    config.stopAfter = { ...all, tabs }
+    return saveConfig()
+  }
   const all = config.stopAfter ?? {}
   if (!all.every) return
   const done = new Set([...(all.every.done ?? []), session.store.sessionID])
@@ -950,6 +963,11 @@ function checkStopRules() {
     if (!stop || (stop.done ?? []).includes(id)) continue
     let until
     let hit = false
+    if (stop.time && now - stop.time > 120_000) {
+      // Checked every 10 s while the tab is open: a time this far past was missed while it was closed (or paused).
+      usedUp(session, stop)
+      continue
+    }
     if (stop.time) hit = now >= stop.time
     else if (stop.window && stop.percent && !splitModel(session.store.model)) {
       const exact = planWindowOf(stop.window)
@@ -1943,13 +1961,12 @@ function rememberPromptParts(sessionId, parts) {
 function promptChange(sessionId, parts, from) {
   if (!sessionId) return undefined
   const before = config.sessionPrompt?.[sessionId] ?? (from ? config.sessionPrompt?.[from] : undefined)
-  rememberPromptParts(sessionId, parts)
   if (!before) return undefined
   const now = promptRecord(parts)
   const changed = parts.filter((part) => !before[part.id] || before[part.id].h !== now[part.id].h)
   const removed = Object.keys(before).filter((id) => !now[id])
   if (!changed.length && !removed.length) return undefined
-  const lines = ["[Agent Code] The user changed Agent Code's settings since this conversation began. Your system prompt still shows the earlier instructions; where they differ, these replace them."]
+  const lines = ["[Agent Code] The user changed Agent Code's settings since this conversation began. Your system prompt may still show the earlier instructions; where they differ, these replace them."]
   if (changed.length) lines.push("", ...changed.map((part) => part.text))
   if (removed.length) lines.push("", `No longer applies (ignore these parts of your system prompt): ${removed.map((id) => `"${before[id].title || id}"`).join(", ")}.`)
   return lines.join("\n")
@@ -2096,7 +2113,8 @@ export function cleanUserText(text) {
   let value = String(text ?? "")
   value = value.replace(/^\[Agent Code instructions[^\]]*\][\s\S]*?\[End of Agent Code instructions\]\s*/, "")
   value = value.replace(/^\[Agent Code\] This conversation went on with [\s\S]*?\[End of the earlier conversation\.\]\s*/, "")
-  value = value.replace(/^(\[Mode "[^"]*": [^\n]*\]\s*)+/, "")
+  // A mode's note can run over several lines; it ends at "]" before the message's blank line.
+  value = value.replace(/^(\[Mode "[^"]*": [\s\S]*?\](?:\n\n|\s*$))+/, "")
   return value
 }
 
@@ -2109,7 +2127,13 @@ function linkSessions(previous, next) {
   config.sessionChains = all
   // What was kept for the old session belongs to the conversation, so to the new session now (held messages would
   // otherwise go out again when the old one is opened).
-  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode"]) {
+  const rules = config.stopAfter?.tabs
+  if (rules && previous in rules) {
+    const moved = { ...rules, [next]: rules[previous] }
+    delete moved[previous]
+    config.stopAfter = { ...config.stopAfter, tabs: moved }
+  }
+  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause"]) {
     const record = config[key]
     if (!record || !(previous in record)) continue
     const moved = { ...record, [next]: record[previous] }
@@ -2167,10 +2191,15 @@ function writeHarnessInstructions(id, text, sessionId) {
   // One folder per conversation: tabs with different agent mixes don't overwrite each other's instructions.
   const root = path.join(stateDir, `${id}-agents`)
   const dir = path.join(root, String(sessionId ?? "new").replace(/[^a-zA-Z0-9_-]/g, "") || "new")
-  mkdirSync(dir, { recursive: true })
+  // Prune first (never this conversation's folder, nor one written in the last day: a running tab may read it), then
+  // write; the folder is touched so it counts as recent.
   try {
     const all = readdirSync(root).map((name) => ({ name, time: statSync(path.join(root, name)).mtimeMs })).sort((a, b) => b.time - a.time)
-    for (const old of all.slice(60)) rmSync(path.join(root, old.name), { recursive: true, force: true })
+    for (const old of all.slice(60)) if (path.join(root, old.name) !== dir && Date.now() - old.time > 86_400_000) rmSync(path.join(root, old.name), { recursive: true, force: true })
+  } catch {}
+  mkdirSync(dir, { recursive: true })
+  try {
+    utimesSync(dir, new Date(), new Date())
   } catch {}
   let own = ""
   try {
@@ -2353,9 +2382,11 @@ export function createSession(seed             ) {
   // engine, and linked to the new session once there is one.
   let handedFrom
   /** A session with earlier parts but nothing of its own yet (e.g. after a restart): its first message carries them. */
-  function pendingCarry() {
+  /** `sending`: how many of the tab's own messages are the ones going out now (already in the list). */
+  function pendingCarry(sending = 1) {
     if (carryNote) return carryNote
-    if (!store.messages.some((m) => m.fromChain === true) || store.messages.some((m) => m.type === "user" && !m.fromChain && !m.unsent)) return undefined
+    if (!store.messages.some((m) => m.fromChain === true)) return undefined
+    if (store.messages.filter((m) => m.type === "user" && !m.fromChain && !m.unsent).length > sending) return undefined
     const text = conversationText(store.messages)
     const name = store.engine ? (harnessById(store.engine)?.name ?? store.engine) : "Claude Code"
     return text ? `[Agent Code] This conversation went on with ${name} from here. Agent Code (the app this chat runs in) switched the model mid-conversation; this is the real earlier part of the same conversation with the same user, from Agent Code's own record. Treat it as what was said before, and answer the user's message that follows.\n\n${text}\n\n[End of the earlier conversation.]` : undefined
@@ -2551,7 +2582,7 @@ export function createSession(seed             ) {
     const append = instructionParts.length ? instructionParts.map((part) => part.text).join("\n\n") : undefined
     // A resumed conversation keeps the instructions it began with (Claude Code's recorded prompt): what changed since
     // goes in as one note. A new conversation records the current ones.
-    const goneNote = options.resume || options.continue ? promptChange(sessionKey, instructionParts, options.fork ? options.resume : undefined) : (rememberPromptParts(sessionKey, instructionParts), undefined)
+    const goneNote = options.resume || options.continue ? promptChange(sessionKey, instructionParts, options.fork ? options.resume : undefined) : undefined
     startedParts = instructionParts
     const disallowed = [
       ...(accessFor().askQuestions ? [] : ["AskUserQuestion"]),
@@ -2593,7 +2624,12 @@ export function createSession(seed             ) {
         forkSession: options.fork,
         sessionId: options.sessionId,
         pathToClaudeCodeExecutable: executable,
-        canUseTool: (toolName, toolInput, opts) => requestPermission(toolName, toolInput, opts),
+        canUseTool: (toolName, toolInput, opts) =>
+          requestPermission(toolName, toolInput, opts).then((answer) => {
+            // A subagent refused here never starts: its place under orchestrator mode's limit is free again.
+            if (answer?.behavior === "deny" && /^(Agent|Task)$/.test(toolName)) agentLimits.finished(opts.toolUseID)
+            return answer
+          }),
         onElicitation: (request, { signal }) => requestElicitation(request, signal),
         stderr: (data) => log("stderr", data),
         env: {
@@ -2613,11 +2649,15 @@ export function createSession(seed             ) {
     primeSubagentRead()
     loadThinking()
     restorePause()
-    if (goneNote && store.messages.length) appendContext(goneNote)
+    const noteSent = !!goneNote && store.messages.length > 0
+    if (noteSent) appendContext(goneNote)
     void pump(q, gen)
     try {
       const init = await q.initializationResult()
       if (gen !== generation) return
+      // What this conversation's recorded prompt holds now (under its own id, a fork's new one included). A note that
+      // couldn't go out isn't counted: the next start tries again.
+      if (!goneNote || noteSent) rememberPromptParts(store.sessionID ?? sessionKey, instructionParts)
       batch(() => {
         setStore("commands", reconcile(init.commands ?? []))
         if (!external) rememberClaudeModels(init.models ?? [])
@@ -2675,11 +2715,11 @@ export function createSession(seed             ) {
   }
 
   /** The chat of a harness that can't replay it, kept for the next time the tab opens. */
-  function saveAcpHistory() {
-    if (!oc?.id || !harnessById(oc.harness) || store.engine !== oc.harness) return
+  function saveAcpHistory(target = oc) {
+    if (!target?.id || !harnessById(target.harness) || store.engine !== target.harness) return
     const own = store.messages.filter((m) => !m.fromChain && !m.unsent)
     if (!own.some((m) => m.type === "user")) return
-    writeAcpHistory(oc.id, JSON.parse(JSON.stringify(own)))
+    writeAcpHistory(target.id, JSON.parse(JSON.stringify(own)))
   }
 
   function stop() {
@@ -2758,7 +2798,10 @@ export function createSession(seed             ) {
     if (store.status !== "running") setStore("status", "running")
     clearTimeout(wakeTimer)
     wakeTimer = setTimeout(() => {
-      if (!ocPrompting && store.status === "running") finishTurn({})
+      if (ocPrompting || store.status !== "running") return
+      finishTurn({})
+      // Prompts typed meanwhile were queued behind that turn: nothing else sends them.
+      if (ocQueue.length) void promptOpencode()
     }, 6000)
     wakeTimer.unref?.()
   }
@@ -2800,6 +2843,7 @@ export function createSession(seed             ) {
       request: (method, params) => acpRequest(gen, method, params),
       exit: (error) => {
         if (gen !== generation) return
+        const was = oc
         oc = undefined
         log(`${harness.id} exited`, error)
         batch(() => {
@@ -2808,6 +2852,8 @@ export function createSession(seed             ) {
           setStore("ready", false)
           setStore("fatal", error)
         })
+        // The kept chat (DeepSeek Harness can't reload its own) gets the turn that just ended too.
+        saveAcpHistory(was)
       },
     })
     oc = { client, id: resume ?? "", harness: harness.id, caps: {} }
@@ -2843,6 +2889,7 @@ export function createSession(seed             ) {
         }
       } else if (resume) {
         replaying = true
+        const shown = store.messages
         batch(() => {
           setStore("messages", [])
           setStore("children", {})
@@ -2851,6 +2898,8 @@ export function createSession(seed             ) {
           learn(await within(client.request("session/load", { sessionId: resume, cwd: store.cwd, mcpServers }), 180, "session/load"))
         } catch (error) {
           log(`${harness.id} load error`, error)
+          // What the tab showed stays, as the earlier part the new conversation is given (not lost).
+          setStore("messages", shown.map((m) => (m.unsent ? m : { ...m, fromChain: true })))
           pushNotice(`Could not reopen the ${harness.name} conversation (${errorMessage(error)}); starting a new one.`, "warning")
           id = undefined
         } finally {
@@ -3177,13 +3226,14 @@ export function createSession(seed             ) {
     if (!id) return undefined
     const parts = behaviourParts([], { sessionId: id, session: api }, new Set(["acode-memory", "acode-memory-tools", "planning"]))
     if (!parts.length) return undefined
-    if (!config.sessionPrompt?.[id]) {
-      rememberPromptParts(id, parts)
-      return `${HARNESS_INSTRUCTIONS_START}\n\n${parts.map((part) => part.text).join("\n\n")}\n\n${HARNESS_INSTRUCTIONS_END}`
-    }
+    // Counted as told only once the prompt went through (promptOpencode).
+    pendingInstructions = { id, parts }
+    if (!config.sessionPrompt?.[id]) return `${HARNESS_INSTRUCTIONS_START}\n\n${parts.map((part) => part.text).join("\n\n")}\n\n${HARNESS_INSTRUCTIONS_END}`
     const note = promptChange(id, parts)
+    if (!note) pendingInstructions = undefined
     return note ? `${HARNESS_INSTRUCTIONS_START}\n\n${note}\n\n${HARNESS_INSTRUCTIONS_END}` : undefined
   }
+  let pendingInstructions
 
   async function promptOpencode() {
     const session = oc
@@ -3197,7 +3247,7 @@ export function createSession(seed             ) {
     }
     const instructions = harnessInstructions()
     if (instructions) prompt.push({ type: "text", text: instructions })
-    const carry = pendingCarry()
+    const carry = pendingCarry(items.length)
     if (carry) prompt.push({ type: "text", text: carry })
     prompt.push({ type: "text", text: [modeNote, items.map((item) => item.text).join("\n\n")].filter(Boolean).join("\n\n") })
     carryNote = undefined
@@ -3207,9 +3257,12 @@ export function createSession(seed             ) {
     ensureTurn()
     let result
     let error
+    const told = instructions ? pendingInstructions : undefined
+    pendingInstructions = undefined
     try {
       ocPrompting = true
       result = await session.client.request("session/prompt", { sessionId: session.id, prompt })
+      if (told) rememberPromptParts(told.id, told.parts)
     } catch (failure) {
       error = errorMessage(failure)
     } finally {
@@ -3383,7 +3436,8 @@ export function createSession(seed             ) {
   let pauseWaiters = []
   let pauseTimer
   // A limit reset was used: a pause before the limit is over.
-  const onLimitReset = () => store.pause?.reason === "limit" && resume()
+  const onLimitReset = () =>
+    (store.pause?.reason === "limit" || (store.pause?.reason === "stop" && store.pause.windows?.some((w) => w.key === "fiveHour"))) && resume()
   limitResetListeners.add(onLimitReset)
   allSessions.add(self)
   // A new tab starts in the default mode (Chat); a restored one takes its session's own in load().
@@ -3507,7 +3561,7 @@ export function createSession(seed             ) {
 
   function send(text        , extra            = {}) {
     // A message from the user: orchestrator mode's per-message count starts again.
-    if (text !== "Continue where you stopped.") agentLimits.userMessage()
+    if (text !== "Continue where you stopped." && text !== RESUME_PROMPT) agentLimits.userMessage()
     // Writing to a paused tab means: go on.
     if (store.pause && !(store.pause.interrupted && text === "Continue where you stopped.")) resume()
     // Like opencode: a new prompt deletes the reverted messages for good.
@@ -3560,7 +3614,7 @@ export function createSession(seed             ) {
     // A mode's instruction goes to the model once, with the first prompt after switching to it.
     lastWork = Date.now()
     // The earlier conversation goes as a block of its own, before the message.
-    const carry = pendingCarry()
+    const carry = pendingCarry(1)
     if (carry) content.push({ type: "text", text: carry })
     const forModel = [modeNote, text].filter(Boolean).join("\n\n")
     carryNote = undefined
@@ -3617,6 +3671,7 @@ export function createSession(seed             ) {
           saveUnsent()
           batch(() => {
             finishTurn({})
+            saveAcpHistory(session)
             setStore("ready", false)
             setStore("dormant", true)
           })
@@ -3689,7 +3744,7 @@ export function createSession(seed             ) {
     if (crossing && previous !== value) {
       // Mid-turn the process can't be swapped: do it as soon as the turn ends.
       if (!(await restart())) {
-        restartAfterTurn = !!current
+        restartAfterTurn = !!(current || oc)
         log("model change waits for the next start", value)
       }
       return
@@ -3940,7 +3995,11 @@ export function createSession(seed             ) {
         setStore("view", "session")
         setStore("engine", engine)
         if (used) setStore("model", used)
-        if (harnessModel(store.model)?.harness.id !== engine) setStore("model", "opencode-zen/big-pickle")
+        // No model on record: one of this harness's own (opencode's free default for opencode).
+        if (harnessModel(store.model)?.harness.id !== engine) {
+          const first = harnessInfo(engine)?.models?.[0]?.id
+          setStore("model", engine !== "opencode" && first ? `${engine}/${first}` : "opencode-zen/big-pickle")
+        }
         setStore("effort", sessionEffort(id, store.model))
       })
       restorePause()
@@ -4198,7 +4257,7 @@ export function createSession(seed             ) {
     opts                                                                                            ,
   )                            {
     const access = accessFor(store.engine)
-    if (!access.web && /^(web_?fetch|web_?search|fetch|websearch)$/i.test(String(toolName))) {
+    if (!access.web && (/^(web_?fetch|web_?search|fetch|websearch)$/i.test(String(toolName)) || /^mcp__.+__(fetch|web_?search|browse|scrape|crawl)/i.test(String(toolName)))) {
       return Promise.resolve({ behavior: "deny", message: "The user has turned web access off for this harness.", toolUseID: opts.toolUseID })
     }
     if (toolName === "AskUserQuestion" && !access.askQuestions) {

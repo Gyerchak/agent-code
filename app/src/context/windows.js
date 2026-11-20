@@ -17,9 +17,14 @@ let registered = false
 const alive = (pid) => {
   try {
     process.kill(pid, 0)
-    return true
   } catch (error) {
-    return error?.code === "EPERM"
+    if (error?.code !== "EPERM") return false
+  }
+  // A process id used again since (after a crash or a reboot) isn't an Agent Code window.
+  try {
+    return /node|acode|agent-code/i.test(readFileSync(`/proc/${pid}/cmdline`, "utf8"))
+  } catch {
+    return true
   }
 }
 

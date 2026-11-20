@@ -47,11 +47,14 @@ function toast(text, ms = 3200) {
 // ---------------------------------------------------------------------------------------------------- markdown
 const escape = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c])
 function inline(text) {
-  return escape(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
+  // Code spans first, kept aside: emphasis and links apply only outside them (`*args, **kwargs` stays as typed).
+  const spans = []
+  const marked = escape(text).replace(/`([^`]+)`/g, (_, code) => `\u0000${spans.push(code) - 1}\u0000`)
+  return marked
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\u0000(\d+)\u0000/g, (_, index) => `<code>${spans[Number(index)]}</code>`)
 }
 function markdown(source) {
   const out = []
@@ -343,8 +346,13 @@ function renderComposer() {
   send.classList.toggle("stop", running)
   send.title = running ? "Stop" : "Send (Enter; Shift+Enter: new line)"
   const mode = $("mode")
-  mode.innerHTML = (state.boot?.agents ?? []).map((agent) => `<option value="${escape(agent.id)}">${escape(agent.name)}</option>`).join("")
-  mode.value = tab?.agent ?? state.newAgent ?? state.boot?.defaultAgent ?? "chat"
+  // Lists are rebuilt only when they change (a rebuild closes a list that is open, while a reply streams).
+  const modes = (state.boot?.agents ?? []).map((agent) => `<option value="${escape(agent.id)}">${escape(agent.name)}</option>`).join("")
+  if (mode.dataset.list !== modes) {
+    mode.innerHTML = modes
+    mode.dataset.list = modes
+  }
+  if (document.activeElement !== mode) mode.value = tab?.agent ?? state.newAgent ?? state.boot?.defaultAgent ?? "chat"
   mode.classList.toggle("mode-chat", mode.value === "chat")
   const model = $("model")
   if (!model.dataset.filled) {
@@ -360,8 +368,12 @@ function renderComposer() {
   model.value = tab?.modelValue ?? state.newModel ?? state.boot?.defaultModel ?? model.options[0]?.value ?? ""
   const effort = $("effort")
   const levels = tab?.efforts ?? []
-  effort.innerHTML = `<option value="">default</option>${levels.map((level) => `<option>${escape(level)}</option>`).join("")}`
-  effort.value = tab?.effort ?? ""
+  const efforts = `<option value="">default</option>${levels.map((level) => `<option>${escape(level)}</option>`).join("")}`
+  if (effort.dataset.list !== efforts) {
+    effort.innerHTML = efforts
+    effort.dataset.list = efforts
+  }
+  if (document.activeElement !== effort) effort.value = tab?.effort ?? ""
   effort.classList.toggle("hidden", !levels.length)
   $("title").textContent = tab?.title ?? "New chat"
   $("engine").textContent = tab ? `${tab.engine === "claude" ? "Claude Code" : tab.engine} · ${tab.model}${tab.fatal ? " · stopped" : tab.ready ? "" : " · starting"}` : ""
@@ -389,11 +401,16 @@ function finishBoot() {
   document.title = `Agent Code${state.boot.box ? " · box" : ""}`
 }
 async function refreshTab() {
-  if (!state.active) return
+  const key = state.active
+  if (!key) return
   try {
-    state.tab = await get(`web/tab/${state.active}`)
+    const tab = await get(`web/tab/${key}`)
+    // Another tab was picked while this one loaded: its answer is stale.
+    if (state.active !== key) return
+    state.tab = tab
   } catch {
-    state.tab = undefined
+    // A failed load keeps what is shown (a reconnect brings it up to date).
+    if (state.active !== key) return
   }
   render()
 }
@@ -407,7 +424,9 @@ async function selectTab(key) {
   state.composingNew = false
   state.active = key
   await post("web/focus", { key })
-  await refreshTab()
+  // Access settings are the focused tab's harness's: the settings come again with the tab.
+  await Promise.all([refreshTab(), refreshBoot().catch(() => {})])
+  renderPanels?.()
   $("input").focus()
 }
 async function closeTab(key) {
@@ -756,7 +775,16 @@ function listen() {
   })
   source.addEventListener("tabs", () => later("tabs", () => refreshBoot().then(render)))
   source.onerror = () => {
-    // Agent Code restarting (another user, a reset): reconnects by itself.
+    // Agent Code restarting (another user, a reset), sleep, a network blip: the browser reconnects by itself.
+  }
+  // Each (re)connection: whatever changed meanwhile is fetched (nothing is sent again for an idle chat).
+  let connected = false
+  source.onopen = () => {
+    if (!connected) return void (connected = true)
+    void refreshBoot()
+      .then(() => refreshTab())
+      .then(render)
+      .catch(() => {})
   }
   // Limits and costs change without chat events too.
   setInterval(() => refreshBoot().then(() => (renderPanels(), renderTabs())).catch(() => {}), 15000)

@@ -60,7 +60,7 @@ try {
 
 # 4. The command: a small acode.cmd in a folder on the user's PATH.
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-Set-Content -Encoding ASCII -Path (Join-Path $BinDir "acode.cmd") -Value "@echo off`r`ncall `"$app\bin\acode.cmd`" %*"
+Set-Content -Encoding Oem -Path (Join-Path $BinDir "acode.cmd") -Value "@echo off`r`ncall `"$app\bin\acode.cmd`" %*"
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not ($userPath -split ";" | Where-Object { $_ -eq $BinDir })) {
   [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $BinDir), "User")
@@ -69,7 +69,7 @@ if (-not ($userPath -split ";" | Where-Object { $_ -eq $BinDir })) {
 Say "Installed: $BinDir\acode.cmd"
 
 # 5. The web app (acode-web): Agent Code in a browser window. $env:ACODE_BROWSER = chromium | firefox | none.
-Set-Content -Encoding ASCII -Path (Join-Path $BinDir "acode-web.cmd") -Value "@echo off`r`nnode `"$app\web\launch.mjs`" %*"
+Set-Content -Encoding Oem -Path (Join-Path $BinDir "acode-web.cmd") -Value "@echo off`r`nnode `"$app\web\launch.mjs`" %*"
 $engine = $env:ACODE_BROWSER
 if (-not $engine) {
   $answer = Read-Host "Web app browser engine: [1] Chromium-based (Edge/Chrome)  [2] Firefox  [3] skip  (Enter = 1)"

@@ -20,7 +20,7 @@ import { builtins } from "./feature-plugins/builtins"
 import { provideHostModules } from "./plugin/loader"
 import { registerBuiltin, reportSlotError, startPlugins, stopPlugins } from "./plugin/runtime"
 import { setupSlots } from "./plugin/slots"
-import { autostartPhoneServer, stopPhoneServer, startWebServer } from "./context/remote"
+import { autostartPhoneServer, stopPhoneServer, setWebShutdown, startWebServer } from "./context/remote"
 
 function parseArgs(argv          ) {
   const args                                                                                                                     = {}
@@ -190,6 +190,7 @@ void startPlugins(renderer).catch((error) => log("plugins error", error))
 // The phone server (/phone), when it is switched on.
 autostartPhoneServer()
 // The web app's own server (acode-web starts Agent Code with these).
+if (headless) setWebShutdown(shutdown)
 if (headless) void startWebServer(memory, webEnv).catch((error) => {
   log("web server", error)
   process.exit(1)

@@ -33,14 +33,19 @@ export const dialog = {
       setDialogStore("stack", [{ element, onClose }])
     })
   },
-  push(element                   , onClose             ) {
+  /** On top of the open dialog; with none open, `size` sets the width (else the last dialog's width stayed). */
+  push(element                   , onClose             , size             ) {
+    if (!dialogStore.stack.length) setDialogStore("size", size ?? "medium")
     setDialogStore("stack", (stack) => [...stack, { element, onClose }])
   },
   pop() {
     const top = dialogStore.stack.at(-1)
     top?.onClose?.()
     setDialogStore("stack", (stack) => stack.slice(0, -1))
-    if (dialogStore.stack.length === 0) setTimeout(() => refocus?.(), 1)
+    if (dialogStore.stack.length === 0) {
+      setDialogStore("size", "medium")
+      setTimeout(() => refocus?.(), 1)
+    }
   },
   clear() {
     for (const item of dialogStore.stack) item.onClose?.()
@@ -224,6 +229,24 @@ export function DialogSelect   (props
       { defer: true },
     ),
   )
+  // Rows that come or go (a switch flipped, a row hidden) don't move the cursor to another row: it stays on the same
+  // value. (It used to stay on the same index, where the next row then was — a second Enter hit that one.)
+  let cursorValue
+  createEffect(() => {
+    cursorValue = flat()[store.selected]?.value ?? cursorValue
+  })
+  createEffect(
+    on(
+      flat,
+      (list) => {
+        if (store.filter.trim() || cursorValue === undefined) return
+        const index = list.findIndex((option) => option.value === cursorValue)
+        if (index >= 0 && index !== store.selected) setStore("selected", index)
+        else if (index < 0 && store.selected >= list.length) setStore("selected", Math.max(0, list.length - 1))
+      },
+      { defer: true },
+    ),
+  )
   // `tabs` / `tab` / `onTab`: pages of one dialog (tab and shift+tab, or a click on a name); a new page starts at its top.
   createEffect(
     on(
@@ -322,7 +345,9 @@ export function DialogSelect   (props
       for (const action of props.actions ?? []) {
         if (action.keybind.includes("+") && keyMatches(event, action.keybind)) {
           const option = selected()
-          if (option) action.run(option)
+          // An action with nothing to do here (it returns false) lets the key through: ctrl+v still pastes.
+          if (option && action.run(option) === false) continue
+          if (!option) continue
           return true
         }
       }

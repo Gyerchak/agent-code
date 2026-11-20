@@ -10,7 +10,7 @@ import { readAttachment } from "./attachments"
 import { config, saveConfig } from "./config"
 import { log } from "./log"
 import { stateDir } from "./paths"
-import { findBinary, openCommand } from "./platform"
+import { findBinary, openCommand, spawnOptions } from "./platform"
 // tabs before session: tabs.js has to load first (it imports session.js, which reaches back to it).
 import { active as activeTab, newSession, tabs } from "./tabs"
 import { accessEngine, accessEngineName, accessFor, setAccess } from "./access"
@@ -322,9 +322,9 @@ async function handleApi(request, response, url) {
     response.writeHead(200, {
       "content-type": FILE_MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream",
       "content-length": statSync(file).size,
-      "content-disposition": `${url.searchParams.get("download") ? "attachment" : "inline"}; filename="${path.basename(file).replace(/"/g, "")}"`,
+      "content-disposition": `${url.searchParams.get("download") ? "attachment" : "inline"}; filename="${path.basename(file).replace(/[^\x20-\x7e]|"/g, "_")}"; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`,
     })
-    return createReadStream(file).pipe(response)
+    return createReadStream(file).on("error", () => response.destroy()).pipe(response)
   }
   return json(response, 404, { error: "unknown" })
 }
@@ -363,7 +363,9 @@ function checkChanges() {
     const messages = session.store.messages
     const last = messages.at(-1)
     const lastPart = last?.type === "assistant" ? last.parts.at(-1) : undefined
-    const sig = `${messages.length}:${last?.type === "assistant" ? last.parts.length : 0}:${lastPart?.type === "text" ? lastPart.text.length : (lastPart?.status ?? "")}:${session.store.status}:${session.store.permissions.length}:${!!session.store.pause}`
+    const grows = lastPart?.type === "text" || lastPart?.type === "reasoning" ? (lastPart.text?.length ?? 0) : (lastPart?.status ?? "")
+    const flags = messages.filter((m) => m.type === "user" && (m.queued || m.unsent)).length
+    const sig = `${messages.length}:${last?.type === "assistant" ? last.parts.length : 0}:${grows}:${last?.error ?? ""}:${flags}:${session.store.status}:${session.store.permissions.length}:${!!session.store.pause}`
     if (signatures.get(session.key) !== sig) {
       signatures.set(session.key, sig)
       broadcast("tab", { key: session.key })
@@ -392,7 +394,7 @@ async function handle(request, response) {
       return response.end()
     }
     response.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" })
-    createReadStream(file).pipe(response)
+    createReadStream(file).on("error", () => response.destroy()).pipe(response)
   } catch (error) {
     log("phone server error", error)
     if (!response.headersSent) json(response, 500, { error: String(error?.message ?? error) })
@@ -1020,7 +1022,12 @@ function webRelaunch(next) {
   } catch (error) {
     log("web control", error)
   }
-  setTimeout(() => process.kill(process.pid, "SIGTERM"), 150)
+  setTimeout(() => (webShutdown ? void webShutdown(0) : process.kill(process.pid, "SIGTERM")), 150)
+}
+let webShutdown
+/** Agent Code's own exit (saves tabs and the config): web restarts and quits go through it. */
+export function setWebShutdown(fn) {
+  webShutdown = fn
 }
 
 const rgb = (color) => {
@@ -1177,7 +1184,17 @@ async function webApi(request, response, url, parts) {
       const where = path.resolve(String(body.dir || app.cwd).replace(/^~(?=$|\/)/, os.homedir()))
       if (!existsSync(where) || !statSync(where).isDirectory()) return json(response, 400, { error: `No such folder: ${where}` })
       const tool = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acode-box")
-      const result = spawnSync(tool, [], { cwd: where, encoding: "utf8", timeout: 60_000 })
+      // Not spawnSync: the server (events, the screen, the launcher's checks) keeps answering meanwhile.
+      const result = await new Promise((resolve) => {
+        let stdout = ""
+        let stderr = ""
+        const child = spawn(tool, [], { cwd: where, ...spawnOptions(tool) })
+        const timer = setTimeout(() => child.kill(), 60_000)
+        child.stdout?.on("data", (data) => (stdout += data))
+        child.stderr?.on("data", (data) => (stderr += data))
+        child.on("error", (error) => (clearTimeout(timer), resolve({ status: 1, stdout, stderr: `${stderr}${error.message}` })))
+        child.on("close", (status) => (clearTimeout(timer), resolve({ status, stdout, stderr })))
+      })
       const dir = path.join(where, "acode-box")
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(-1500)
       if (result.status !== 0) return json(response, 500, { error: output || "acode-box failed" })
@@ -1199,6 +1216,12 @@ async function webApi(request, response, url, parts) {
 
 async function handleWeb(request, response) {
   const url = new URL(request.url ?? "/", "http://acode")
+  // DNS rebinding: a page on another site whose name points at 127.0.0.1 would send its own Host.
+  const host = String(request.headers.host ?? "").replace(/:\d+$/, "")
+  if (host && !["127.0.0.1", "localhost", "[::1]"].includes(host)) {
+    response.writeHead(403)
+    return response.end()
+  }
   try {
     if (url.pathname === "/api/web/claim" && request.method === "POST") {
       // The address the browser opens carries a one-time code (visible to other users in the process list), never
@@ -1224,7 +1247,7 @@ async function handleWeb(request, response) {
       return response.end()
     }
     response.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" })
-    createReadStream(file).pipe(response)
+    createReadStream(file).on("error", () => response.destroy()).pipe(response)
   } catch (error) {
     log("web server error", error)
     if (!response.headersSent) json(response, 500, { error: String(error?.message ?? error) })

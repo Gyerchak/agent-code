@@ -203,6 +203,12 @@ export function Session() {
     return point && !store.child ? store.messages.findIndex((m) => m.id === point) : -1
   })
 
+  // A revert to a prompt older than the drawn window: draw back to it, or its banner (restore with /redo) never shows.
+  createEffect(() => {
+    const index = revertIndex()
+    if (index >= 0 && index < windowStart()) setShown(transcript().length - index + 5)
+  })
+
   const updateAway = () => {
     if (!scroll) return
     const away = scroll.scrollTop + scroll.viewport.height < scroll.scrollHeight - 2

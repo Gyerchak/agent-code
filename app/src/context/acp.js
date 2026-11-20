@@ -46,6 +46,9 @@ export class AcpClient {
       this.stderr = (this.stderr + data).slice(-4000)
     })
     this.proc.on("error", (error) => this.ended(error.message))
+    // Writing to a harness that just died fails with EPIPE: without a listener that is an uncaught error, which ends
+    // all of Agent Code. The exit handler reports the death.
+    this.proc.stdin?.on("error", () => {})
     this.proc.on("exit", (code) => this.ended(`${this.label} exited (${code ?? "signal"})${this.lastError()}`))
   }
 
@@ -119,6 +122,14 @@ export class AcpClient {
       this.proc.stdin?.end()
       this.proc.kill()
     } catch {}
+    // A harness that ignores SIGTERM is ended for sure.
+    const proc = this.proc
+    setTimeout(() => {
+      if (proc.exitCode === null && proc.signalCode === null)
+        try {
+          proc.kill("SIGKILL")
+        } catch {}
+    }, 4000).unref?.()
   }
 }
 

@@ -190,9 +190,17 @@ export function listSavedSettings() {
     .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
 }
 
+// Every per-conversation record ("session…": engines, chains, held messages, pauses, drafts, instructions…) is state,
+// not a setting: a reset or a restored save must not drop it or bring back an old copy.
+const isState = (key) => STATE_KEYS.has(key) || key.startsWith("session") || key === "codeModeSessions"
+
 function replaceSettings(next) {
-  for (const key of Object.keys(config)) if (!STATE_KEYS.has(key)) delete config[key]
-  for (const [key, value] of Object.entries(next ?? {})) if (!STATE_KEYS.has(key)) config[key] = structuredClone(value)
+  const tabRules = config.stopAfter?.tabs
+  for (const key of Object.keys(config)) if (!isState(key)) delete config[key]
+  for (const [key, value] of Object.entries(next ?? {})) if (!isState(key)) config[key] = structuredClone(value)
+  // Stop after: the rule for every tab is a setting, each tab's own rule is that tab's.
+  if (tabRules) config.stopAfter = { ...(config.stopAfter ?? {}), tabs: tabRules }
+  else if (config.stopAfter) config.stopAfter = { ...config.stopAfter, tabs: {} }
   saveConfig()
 }
 
@@ -249,24 +257,37 @@ function merge(before                     , mine                     , disk     
  * Several Agent Code windows share config.json: each writes only what it changed onto the file as it is now
  * (and takes the others' changes), so one window no longer reverts another's settings or saved tabs.
  */
+let unreadable = 0
 function writeConfig() {
   timer = undefined
+  let disk                      = {}
   try {
-    let disk                      = {}
-    try {
-      disk = read()
-    } catch {}
+    disk = read()
+  } catch (error) {
+    // There but unreadable right now (another program mid-write): try again shortly instead of replacing the whole
+    // file with only this window's changes.
+    if (existsSync(file) && ++unreadable <= 20) {
+      timer = setTimeout(writeConfig, 250)
+      return
+    }
+    if (existsSync(file)) log("config unreadable, writing this window's copy", error)
+    disk = copy(config)
+  }
+  unreadable = 0
+  try {
     const merged = merge(base, config                       , disk)
-    for (const key of Object.keys(config)) if (!(key in merged)) delete (config       )[key]
-    Object.assign(config, copy(merged))
-    base = copy(merged)
     mkdirSync(configDir, { recursive: true })
     // Write-then-rename: a crash mid-write can't leave a cut-off config.
     const temp = `${file}.${process.pid}.tmp`
     writeFileSync(temp, JSON.stringify(merged, null, 2) + "\n")
     renameSync(temp, file)
+    // Only once it is on disk: a failed write leaves the change pending, and it is tried again.
+    for (const key of Object.keys(config)) if (!(key in merged)) delete (config       )[key]
+    Object.assign(config, copy(merged))
+    base = copy(merged)
   } catch (error) {
     log("config write failed", error)
+    timer = setTimeout(writeConfig, 3000)
   }
 }
 
