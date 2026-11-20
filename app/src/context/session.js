@@ -846,47 +846,24 @@ function applyUsage(usage) {
 
 export const LEVELS = ["low", "medium", "high", "xhigh", "max"]
 
-// Stop after → near any limit (it was "Auto-pause"), per tab and for every tab: a tab's own setting
-// (config.sessionAutoPause[session id]) comes first; the one for every tab (config.pauseNearLimit / config.pauseAt)
-// applies where a tab has none.
-export function autoPauseFor(sessionID) {
-  const own = (sessionID && config.sessionAutoPause?.[sessionID]) || {}
-  return {
-    on: own.on ?? config.pauseNearLimit !== false,
-    at: own.at ?? config.pauseAt ?? 95,
-    own: own.on !== undefined || own.at !== undefined,
-  }
-}
-
-/** Change a tab's own auto-pause (`null` for a field: follow the setting for every tab again). */
-export function setSessionAutoPause(sessionID, change) {
-  if (!sessionID) return
-  const all = { ...(config.sessionAutoPause ?? {}) }
-  const next = { ...(all[sessionID] ?? {}) }
-  for (const [key, value] of Object.entries(change)) {
-    if (value === null || value === undefined) delete next[key]
-    else next[key] = value
-  }
-  if (Object.keys(next).length) all[sessionID] = next
-  else delete all[sessionID]
-  const keys = Object.keys(all)
-  for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
-  config.sessionAutoPause = all
-  saveConfig()
-}
-
 // ---------------------------------------------------------------------------
-// Stop after (sidebar, above Pause): stop a tab (or every tab) when a plan window reaches an exact level — the
-// 5-hour limit first of all — or at a time. A limit stop pauses until that window resets and then goes on by itself;
-// a time stop pauses until you resume. A tab's own rule comes first, then the one for every tab; a rule is used up
-// once it has stopped the tab.
+// Schedules (sidebar: Schedules, Resume at, Stop at, Break). What each tab is planned to do, stored per session
+// (config.sessionSchedules[id]); a session with none yet starts from its earlier settings, else from the schedule
+// for new sessions (config.newSessionSchedule). Entries:
+//   { kind: "stop", at }                  stop at a time (then paused until a resume, or by hand)
+//   { kind: "stop", window, percent }     stop once when a plan limit reaches a level (goes on when it resets)
+//   { kind: "stop", guard }               stop near any limit, each time (checked before each step)
+//   { kind: "resume", at }                resume at a time; also holds back the automatic continue after a limit
+//                                         and a limit pause's own end until then (it delays them, never earlier)
+//   a break: a "stop" and a "resume" with the same `group` (stop now or at a time, then resume or not)
+// `frozen`: kept, not acted on.
 // ---------------------------------------------------------------------------
 
 const PLAN_WINDOWS = { fiveHour: "5-hour", week: "weekly", fable: "Fable" }
 const fableWindow = () => (limits.scoped ?? []).find((window) => /fable/i.test(window.name ?? ""))
 export const planWindowOf = (key) => (key === "fable" ? fableWindow() : limits[key])
 export const hasFableWindow = () => !!fableWindow()
-/** How full a plan window is now, as Stop after sees it: the live estimate; 0 once the window has reset; undefined
+/** How full a plan window is now, as a stop sees it: the live estimate; 0 once the window has reset; undefined
  *  before the first reading. */
 export function stopLevel(key) {
   const exact = planWindowOf(key)
@@ -895,100 +872,122 @@ export function stopLevel(key) {
   return liveWindow(exact, key === "fable" ? "week" : key)?.utilization ?? 0
 }
 
-export function stopRuleFor(sessionID) {
-  const all = config.stopAfter ?? {}
-  const own = sessionID ? all.tabs?.[sessionID] : undefined
-  if (own?.off) return undefined
-  return own ? { ...own, own: true } : all.every ? { ...all.every, own: false } : undefined
-}
-
-/** Set (or with `null`, clear) the stop rule of one tab (its session id) or, with no id, of every tab. */
-export function setStopRule(sessionID, rule) {
-  const all = { tabs: {}, ...(config.stopAfter ?? {}) }
-  all.tabs = { ...(all.tabs ?? {}) }
-  if (sessionID) {
-    if (rule) all.tabs[sessionID] = rule
-    // "None for this tab" while there is a rule for every tab: kept as this tab's own (else that rule applies).
-    else if (all.every) all.tabs[sessionID] = { off: true }
-    else delete all.tabs[sessionID]
-  } else if (rule) {
-    all.every = rule
-    // A new rule for every tab is for every tab: earlier "none for this tab" choices go.
-    for (const [id, own] of Object.entries(all.tabs)) if (own?.off) delete all.tabs[id]
-  } else delete all.every
-  config.stopAfter = all
-  // "Resume at" is gone: pausing and resuming do that.
-  delete config.resumeAt
-  saveConfig()
-  setTimeout(checkStopRules, 0)
-}
-
-/** A time to show: "14:30" today, "Tue 01:00" on another day (a weekly reset can be days away). */
+/** A time to show: "14:30" today, "Tue 01:00" on another day. */
 export function whenText(ms) {
   const today = new Date(ms).toDateString() === new Date().toDateString()
   return new Date(ms).toLocaleString([], { ...(today ? {} : { weekday: "short" }), hour: "2-digit", minute: "2-digit" })
 }
 
-/** "5-hour 80%", "14:30". */
-export function describeRule(rule) {
-  if (!rule) return undefined
-  if (rule.time) return new Date(rule.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-  if (rule.window && rule.percent) return `${PLAN_WINDOWS[rule.window]} ${rule.percent}%`
-  return undefined
+/** How long until a time: "now", "in 25 min", "in 3 h 10 min", "in 2 days". */
+export function untilText(ms) {
+  const minutes = Math.round((ms - Date.now()) / 60_000)
+  if (minutes < 1) return "now"
+  if (minutes < 60) return `in ${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `in ${hours} h${minutes % 60 ? ` ${minutes % 60} min` : ""}`
+  return `in ${Math.round(hours / 24)} days`
 }
 
-function usedUp(session, rule) {
-  // A tab's own rule goes with it; the one for every tab goes once every open tab has had it.
-  if (rule.own) {
-    // Gone, not "none for this tab": the rule for every tab applies to it again.
-    const all = config.stopAfter ?? {}
-    const tabs = { ...(all.tabs ?? {}) }
-    delete tabs[session.store.sessionID]
-    config.stopAfter = { ...all, tabs }
-    return saveConfig()
+let entryCount = 0
+export const newEntryId = () => `e${Date.now().toString(36)}${(entryCount++).toString(36)}`
+
+/** The schedule a new session starts with (by default: stop near any limit at 95%, as "Auto-pause" did). */
+export function templateSchedule() {
+  if (Array.isArray(config.newSessionSchedule)) return config.newSessionSchedule
+  return config.pauseNearLimit === false ? [] : [{ id: "template-guard", kind: "stop", guard: config.pauseAt ?? 95 }]
+}
+
+/** A tab's schedule (undefined id: the one for new sessions). */
+export function scheduleOf(sessionID) {
+  if (!sessionID) return templateSchedule()
+  const own = config.sessionSchedules?.[sessionID]
+  if (own) return own
+  // Not set up yet: its earlier settings (its own auto-pause, a Stop after rule), else the one for new sessions.
+  const auto = config.sessionAutoPause?.[sessionID]
+  const rule = config.stopAfter?.tabs?.[sessionID]
+  if (!auto && !rule) return templateSchedule()
+  const list = []
+  if (auto?.on ?? config.pauseNearLimit !== false) list.push({ id: `${sessionID}-guard`, kind: "stop", guard: auto?.at ?? config.pauseAt ?? 95 })
+  if (rule && !rule.off) list.push({ id: `${sessionID}-rule`, kind: "stop", ...(rule.time ? { at: rule.time } : { window: rule.window, percent: rule.percent }) })
+  return list
+}
+
+/** Store a tab's schedule (no id: the one for new sessions). */
+export function setSchedule(sessionID, list) {
+  if (!sessionID) config.newSessionSchedule = list
+  else {
+    const all = { ...(config.sessionSchedules ?? {}) }
+    delete all[sessionID]
+    all[sessionID] = list
+    const keys = Object.keys(all)
+    for (const old of keys.slice(0, Math.max(0, keys.length - 500))) delete all[old]
+    config.sessionSchedules = all
   }
-  const all = config.stopAfter ?? {}
-  if (!all.every) return
-  const done = new Set([...(all.every.done ?? []), session.store.sessionID])
-  config.stopAfter = { ...all, every: { ...all.every, done: [...done] } }
   saveConfig()
+  setTimeout(checkSchedules, 0)
 }
 
-function checkStopRules() {
+/** What an entry does, in a few words ("Stop at 22:00", "Resume at Wed 09:00"). */
+export function describeEntry(entry) {
+  if (entry.kind === "resume") return `Resume at ${whenText(entry.at)}`
+  if (entry.guard) return `Stop near any limit at ${entry.guard}%`
+  if (entry.window) return `Stop at ${PLAN_WINDOWS[entry.window]} ${entry.percent}%`
+  return `Stop at ${whenText(entry.at)}`
+}
+
+/** The near-any-limit stop of a tab ({ on, at }): its lowest active level. */
+export function guardFor(sessionID) {
+  const levels = scheduleOf(sessionID).filter((entry) => !entry.frozen && entry.kind === "stop" && entry.guard).map((entry) => entry.guard)
+  return levels.length ? { on: true, at: Math.min(...levels) } : { on: false, at: 95 }
+}
+
+/** The next planned resume (not a break's): automatic continues wait for it. */
+export function resumeHold(sessionID, now = Date.now()) {
+  const times = scheduleOf(sessionID)
+    .filter((entry) => !entry.frozen && entry.kind === "resume" && !entry.group && entry.at > now)
+    .map((entry) => entry.at)
+  return times.length ? Math.min(...times) : undefined
+}
+
+function checkSchedules() {
   const now = Date.now()
   for (const session of allSessions) {
-    if (session.disposed || !session.store.sessionID || session.store.pause) continue
     const id = session.store.sessionID
-    const stop = stopRuleFor(id)
-    if (!stop || (stop.done ?? []).includes(id)) continue
-    let until
-    let hit = false
-    if (stop.time && now - stop.time > 120_000) {
-      // Checked every 10 s while the tab is open: a time this far past was missed while it was closed (or paused).
-      usedUp(session, stop)
-      continue
+    if (session.disposed || !id) continue
+    const list = scheduleOf(id)
+    if (!list.length) continue
+    let keep = list
+    const drop = (entry) => (keep = keep.filter((item) => item !== entry))
+    for (const entry of list) {
+      if (entry.frozen) continue
+      if (entry.kind === "stop" && entry.at) {
+        if (now < entry.at) continue
+        drop(entry)
+        // Checked every 10 s while the tab is open: a time this far past was missed while it was closed.
+        if (now - entry.at > 120_000 || session.store.pause) continue
+        const back = entry.group ? list.find((item) => item.group === entry.group && item.kind === "resume" && !item.frozen)?.at : undefined
+        session.pause(back, entry.group ? "break" : "stop", undefined, entry.group)
+        session.notice?.(`${entry.group ? "Break" : "Stopped"} (schedule)${back ? `: goes on ${whenText(back)}` : ": resume when you want"}.`, "info")
+      } else if (entry.kind === "stop" && entry.window && entry.percent) {
+        if (splitModel(session.store.model) || session.store.pause || (stopLevel(entry.window) ?? 0) < entry.percent) continue
+        drop(entry)
+        const exact = planWindowOf(entry.window)
+        const until = exact?.resetsAt && exact.resetsAt > now ? exact.resetsAt + 30_000 : undefined
+        session.pause(until, "stop", [{ key: entry.window, resetsAt: exact?.resetsAt }])
+        session.notice?.(`Stopped at ${PLAN_WINDOWS[entry.window]} ${entry.percent}% (schedule)${until ? `: goes on when it resets, ${whenText(until)}` : ""}.`, "info")
+      } else if (entry.kind === "resume" && entry.at && now >= entry.at) {
+        drop(entry)
+        const pause = session.store.pause
+        if (!pause || (entry.group && pause.reason !== "break")) continue
+        // A limit not reset yet: a planned resume can't come earlier than the limit allows.
+        if (pause.reason === "limit" && pause.until && pause.until > now) continue
+        session.resume()
+      }
     }
-    if (stop.time) hit = now >= stop.time
-    else if (stop.window && stop.percent && !splitModel(session.store.model)) {
-      const exact = planWindowOf(stop.window)
-      hit = (stopLevel(stop.window) ?? 0) >= stop.percent
-      // A limit stop goes on by itself when that window resets.
-      if (exact?.resetsAt && exact.resetsAt > now) until = exact.resetsAt + 30_000
-    }
-    if (!hit) continue
-    session.pause(until, "stop", stop.window ? [{ key: stop.window, ...planWindowOf(stop.window) }] : undefined)
-    const at = until ? whenText(until) : undefined
-    session.notice?.(`Stopped at ${describeRule(stop)} (Stop after)${at ? `: goes on when the window resets, ${at}` : ": resume with the Pause bar when you want"}.`, "info")
-    usedUp(session, stop)
+    if (keep !== list) setSchedule(id, keep)
   }
-  // A rule for every tab that every open tab has had is finished.
-  const every = config.stopAfter?.every
-  if (every?.done && [...allSessions].every((session) => session.disposed || every.done.includes(session.store.sessionID))) setStopRule(undefined, null)
 }
-setInterval(checkStopRules, 10_000).unref?.()
-
-/** Tabs (by session id) with their own auto-pause setting. */
-export const autoPauseOverrides = () => Object.keys(config.sessionAutoPause ?? {})
+setInterval(checkSchedules, 10_000).unref?.()
 const FABLE_RESUME_PROMPT = "The Fable limit was reached, so this session moved to another model. Continue the work from where it stopped."
 const allSessions = new Set()
 
@@ -1256,6 +1255,15 @@ async function fireAutoResume(session         ) {
     waitingResume.add(session)
     return
   }
+  const hold = !session.heldResume ? resumeHold(session.store.sessionID) : undefined
+  if (hold) {
+    session.heldResume = hold
+    log("auto-resume held by a planned resume", session.store.sessionID, new Date(hold).toISOString())
+    setResumeAt(session, hold)
+    waitingResume.add(session)
+    return
+  }
+  session.heldResume = undefined
   log("auto-resume fires", session.store.sessionID, session.store.model)
   resumingNow.set(session, { fired: Date.now(), ran: false })
   try {
@@ -2133,7 +2141,7 @@ function linkSessions(previous, next) {
     delete moved[previous]
     config.stopAfter = { ...config.stopAfter, tabs: moved }
   }
-  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause"]) {
+  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause", "sessionSchedules"]) {
     const record = config[key]
     if (!record || !(previous in record)) continue
     const moved = { ...record, [next]: record[previous] }
@@ -3437,29 +3445,43 @@ export function createSession(seed             ) {
   let pauseTimer
   // A limit reset was used: a pause before the limit is over.
   const onLimitReset = () =>
-    (store.pause?.reason === "limit" || (store.pause?.reason === "stop" && store.pause.windows?.some((w) => w.key === "fiveHour"))) && resume()
+    (store.pause?.reason === "limit" || (store.pause?.reason === "stop" && store.pause.windows?.some((w) => w.key === "fiveHour"))) && resume(true)
   limitResetListeners.add(onLimitReset)
   allSessions.add(self)
   // A new tab starts in the default mode (Chat); a restored one takes its session's own in load().
   applyDefaultMode()
 
   /** Pause until `until` (ms; undefined = until resumed by hand). */
-  function pause(until, reason = "user", windows) {
+  function pause(until, reason = "user", windows, group) {
     clearTimeout(pauseTimer)
     const stopped = !!oc && store.status === "running"
-    setStore("pause", { until, reason, windows, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
-    if (until) pauseTimer = setTimeout(() => resume(), Math.max(1000, until - Date.now()))
+    log("pause", store.sessionID, reason, until ? new Date(until).toISOString() : "until resumed")
+    setStore("pause", { until, reason, windows, group, since: Date.now(), holding: false, interrupted: stopped || store.pause?.interrupted })
+    if (until) pauseTimer = setTimeout(() => resume(true), Math.max(1000, until - Date.now()))
     rememberPause()
     if (stopped) void interrupt()
     emit("pause", { until, reason })
   }
 
   /** Let a paused turn go on (or, for a harness that was stopped, continue it with one short message). */
-  function resume() {
+  /** `auto`: the pause's own end (its time, a limit's reset), not the user nor a planned resume. */
+  function resume(auto = false) {
     clearTimeout(pauseTimer)
     const was = store.pause
     if (!was) return
+    // An automatic end waits for a resume planned later (once): planned resumes only delay, never come earlier.
+    const hold = auto && was.reason !== "break" && !was.held ? resumeHold(store.sessionID) : undefined
+    if (hold && hold > Date.now() + 1000) {
+      setStore("pause", { ...was, until: hold, held: true })
+      rememberPause()
+      pauseTimer = setTimeout(() => resume(true), Math.max(1000, hold - Date.now()))
+      log("pause held by a planned resume", store.sessionID, new Date(hold).toISOString())
+      return
+    }
+    log("resume", store.sessionID, was.reason)
     setStore("pause", undefined)
+    // A break that ends (at its time or by hand): what is left of it in the schedule goes too.
+    if (was.group && store.sessionID) setSchedule(store.sessionID, scheduleOf(store.sessionID).filter((entry) => entry.group !== was.group))
     rememberPause()
     // Resumed by hand before the reset: the user chose to go on up to 100 % of these windows.
     if (was.reason === "limit" && (!was.until || Date.now() < was.until - 30_000)) {
@@ -3478,7 +3500,7 @@ export function createSession(seed             ) {
     const all = { ...(config.sessionPauses ?? {}) }
     const p = store.pause
     // Plain copies (the store's own objects are proxies).
-    if (p) all[id] = { until: p.until, reason: p.reason, windows: p.windows?.map((w) => ({ key: w.key, resetsAt: w.resetsAt })), since: p.since, interrupted: !!p.interrupted }
+    if (p) all[id] = { until: p.until, reason: p.reason, group: p.group, held: p.held, windows: p.windows?.map((w) => ({ key: w.key, resetsAt: w.resetsAt })), since: p.since, interrupted: !!p.interrupted }
     else delete all[id]
     config.sessionPauses = all
     saveConfig()
@@ -3496,7 +3518,7 @@ export function createSession(seed             ) {
       return
     }
     setStore("pause", { ...saved, holding: false })
-    if (saved.until) pauseTimer = setTimeout(() => resume(), Math.max(1000, saved.until - Date.now()))
+    if (saved.until) pauseTimer = setTimeout(() => resume(true), Math.max(1000, saved.until - Date.now()))
   }
 
   function waitWhilePaused(signal) {
@@ -3513,7 +3535,7 @@ export function createSession(seed             ) {
    * resets. Resuming by hand goes on up to 100 %: that window doesn't pause again until it resets.
    */
   function pauseNearLimit() {
-    const rule = autoPauseFor(store.sessionID)
+    const rule = guardFor(store.sessionID)
     if (!rule.on || splitModel(store.model) || store.pause) return
     const at = rule.at
     const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
@@ -5782,15 +5804,18 @@ function convertHistory(history                                                )
       if (text.startsWith("<local-command-caveat>")) continue
       if (turn) turn.end = turn.end ?? turn.start
       turn = undefined
-      out.push({ type: "user", id: entry.uuid, text: cleanUserText(text), files: [], attachments: attachments.length ? attachments : undefined })
+      out.push({ type: "user", id: entry.uuid, text: cleanUserText(text), files: [], attachments: attachments.length ? attachments : undefined, time: Date.parse(entry.timestamp ?? "") || undefined })
       continue
     }
     if (entry.type === "assistant") {
       if (!turn) {
-        turn = { type: "assistant", id: randomUUID(), parts: [], agent: "build", model: msg?.model && msg.model !== "<synthetic>" ? msg.model : "", start: 0, end: 0 }
+        const at = Date.parse(entry.timestamp ?? "") || 0
+        turn = { type: "assistant", id: randomUUID(), parts: [], agent: "build", model: msg?.model && msg.model !== "<synthetic>" ? msg.model : "", start: at, end: at }
         out.push(turn)
       }
       turn.sdkUuid = entry.uuid
+      // The reply's last entry is when it ended.
+      turn.end = Date.parse(entry.timestamp ?? "") || turn.end
       if (msg?.model === "<synthetic>") {
         // Claude Code's stand-in reply for a failed request (usage limit, API error): it is the turn's error.
         const text = syntheticText(msg)

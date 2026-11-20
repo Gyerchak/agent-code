@@ -147,6 +147,7 @@ function plainMessages(session) {
         id: message.id,
         model: message.model,
         done: message.end !== undefined,
+        time: message.end || message.start || undefined,
         error: message.error,
         parts: message.parts
           .filter((part) => part.type === "text" || part.type === "tool")
@@ -932,14 +933,13 @@ const WEB_SETTINGS = [
   { key: "subagents", title: "Subagents", fallback: true, restart: true },
   { key: "memoryUse", title: "Memory", fallback: true, restart: true },
   { key: "autoResume", title: "Auto-resume after a limit", fallback: true },
-  { key: "pauseNearLimit", title: "Stop near any limit (Stop after)", fallback: true },
   { key: "smallSessions", title: "Small sessions (auto-compact)", fallback: true },
 ]
 
 function webMessages(session) {
   return session.store.messages.slice(-300).filter((message) => !message.repeat).map((message) => {
     if (message.type === "user")
-      return { type: "user", id: message.id, text: message.text, queued: !!message.queued, unsent: !!message.unsent, attachments: (message.attachments ?? []).map((item) => ({ name: item.name, kind: item.kind })) }
+      return { type: "user", id: message.id, time: message.time, text: message.text, queued: !!message.queued, unsent: !!message.unsent, attachments: (message.attachments ?? []).map((item) => ({ name: item.name, kind: item.kind })) }
     if (message.type === "assistant")
       return {
         type: "assistant",
@@ -948,6 +948,7 @@ function webMessages(session) {
         agent: message.agent,
         effort: message.effort,
         done: message.end !== undefined,
+        time: message.end || message.start || undefined,
         ms: message.end && message.start ? message.end - message.start : 0,
         error: message.error,
         parts: message.parts.map((part) => {

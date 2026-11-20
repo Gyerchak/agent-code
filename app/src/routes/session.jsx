@@ -19,6 +19,17 @@ import { ElicitationPrompt, PermissionPrompt, QuestionPrompt } from "./permissio
 import { Slot } from "../plugin/slots"
 import { CodeModeView } from "../component/codeterm"
 
+/** When a message was sent: "14:32" today, "Wed 14:32" this week, "19 Nov 14:32" before. */
+export function messageTime(ms) {
+  if (!ms) return ""
+  const date = new Date(ms)
+  const now = new Date()
+  const clock = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+  if (date.toDateString() === now.toDateString()) return clock
+  if (now.getTime() - date.getTime() < 6 * 86_400_000) return `${date.toLocaleDateString([], { weekday: "short" })} ${clock}`
+  return `${date.toLocaleDateString([], { day: "numeric", month: "short" })} ${clock}`
+}
+
 export function duration(ms        ) {
   if (ms < 1000) return `${ms}ms`
   const seconds = ms / 1000
@@ -607,6 +618,11 @@ function UserMessageView(props                          ) {
               <For each={props.message.attachments ?? []}>{(item) => <AttachmentPreview item={item} background={hover() ? theme.backgroundElement : theme.backgroundPanel} />}</For>
             </box>
           </Show>
+          <Show when={props.message.time}>
+            <text fg={theme.textMuted} wrapMode="none">
+              {messageTime(props.message.time)}
+            </text>
+          </Show>
           <Show when={props.message.files.length || props.message.queued || props.message.unsent}>
             <box flexDirection="row" paddingTop={1} gap={1} flexWrap="wrap">
               <Show when={props.message.unsent}>
@@ -838,6 +854,9 @@ function AssistantFooter(props                               ) {
           </Show>
           <Show when={speed() && dimensions().width >= 60}>
             <span style={{ fg: theme.textMuted }}> · {speed()}</span>
+          </Show>
+          <Show when={(props.message.end || props.message.start) && dimensions().width >= 44}>
+            <span style={{ fg: theme.textMuted }}> · {messageTime(props.message.end || props.message.start)}</span>
           </Show>
           <Show when={props.message.interrupted}>
             <span style={{ fg: theme.textMuted }}> · interrupted</span>

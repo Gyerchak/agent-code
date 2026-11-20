@@ -5,7 +5,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { catalog, planTitle } from "../context/catalog"
 import { providerKind } from "../context/providers"
-import { autoPauseFor, describeRule, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, stopRuleFor, subagentRouting, whenText } from "../context/session"
+import { describeEntry, fableFallback, fableUpgrade, limits, liveWindow, orchestrator, scheduleOf, subagentRouting, untilText, whenText } from "../context/session"
 import { active, store } from "../context/tabs"
 import { theme, syntax } from "../context/theme"
 import { runCommand } from "../context/keymap"
@@ -440,32 +440,122 @@ export function PluginsSection() {
 
 const clockTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 
-/** The pause bar: pause the work (nothing is sent while paused) or, while paused, resume it. */
-export function PauseBar() {
+/** One schedule row: a click runs `click`, a right click `right` (freeze / unfreeze); ctrl+click `ctrl`. */
+function PlanRow(props) {
   const [hover, setHover] = createSignal(false)
-  const paused = () => store.pause
-  const label = () => {
-    const p = paused()
-    if (!p) return store.status === "running" ? "⏸  Pause" : "⏸  Pause (nothing running)"
-    const when = p.until ? `resumes ${whenText(p.until)}` : "until you resume"
-    return `▶  ${p.reason === "limit" || p.reason === "stop" ? "Stopped" : "Paused"} · ${when}`
-  }
   return (
     <box
       flexShrink={0}
       paddingLeft={1}
-      backgroundColor={hover() ? theme.backgroundElement : paused() ? theme.backgroundElement : theme.backgroundPanel}
+      backgroundColor={hover() || props.highlight ? theme.backgroundElement : theme.backgroundPanel}
       onMouseOver={() => setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => (paused() ? active().resume() : actions.pause())}
+      onMouseUp={(event) => runCommand(event?.button === 2 ? props.right : event?.modifiers?.ctrl && props.ctrl ? props.ctrl : props.click)}
     >
-      <text fg={paused() ? theme.warning : store.status === "running" ? theme.text : theme.textMuted} wrapMode="none" truncate>
-        {label()}
-        <Show when={paused() && hover()}>
-          <span style={{ fg: theme.textMuted }}>{paused().reason === "limit" ? " (click to go on to 100%)" : " (click to resume)"}</span>
+      <text fg={props.on ? theme.text : theme.textMuted} wrapMode="none" truncate>
+        <span style={{ fg: props.on ? (props.color ?? theme.warning) : theme.textMuted }}>{props.icon}</span>
+        {`  ${props.label}`}
+        <Show when={props.extra}>
+          <span style={{ fg: theme.textMuted }}>{props.extra}</span>
+        </Show>
+        <Show when={hover() && props.hint}>
+          <span style={{ fg: theme.textMuted }}>{` (${props.hint})`}</span>
         </Show>
       </text>
     </box>
+  )
+}
+
+const planned = () => (configRevision(), scheduleOf(store.sessionID))
+const nextOf = (list) => list.filter((entry) => entry.at).sort((a, b) => a.at - b.at)[0]
+
+/** Schedules: how much is planned for this tab; a click lists it all, a right click freezes / unfreezes it all. */
+export function SchedulesRow() {
+  const live = () => planned().filter((entry) => !entry.frozen)
+  const frozen = () => planned().length - live().length
+  const count = () => new Set(live().map((entry) => entry.group ?? entry.id)).size
+  return (
+    <PlanRow
+      icon="☰"
+      on={count() > 0}
+      color={theme.primary}
+      label={`Schedules · ${count() ? `${count()} planned` : "none"}`}
+      extra={frozen() ? ` · ${frozen()} frozen` : ""}
+      hint="list · right click: freeze all"
+      click="schedules"
+      right="schedule.freeze.all"
+    />
+  )
+}
+
+/** Resume at: the next planned resume (a break's own is on the Break row). */
+export function ResumeRow() {
+  const all = () => planned().filter((entry) => entry.kind === "resume" && !entry.group)
+  const next = () => nextOf(all().filter((entry) => !entry.frozen))
+  return (
+    <PlanRow
+      icon="⏵"
+      on={!!next()}
+      color={theme.success}
+      label={next() ? `Resume at ${whenText(next().at)}` : all().length ? "Resume at: frozen" : "Resume at: none"}
+      extra={next() ? ` · ${untilText(next().at)}` : ""}
+      hint="plan · right click: freeze"
+      click="schedule.resume"
+      right="schedule.freeze.resume"
+    />
+  )
+}
+
+/** Stop at: the closest planned stop (a time, then a limit level, then near any limit). */
+export function StopAfterRow() {
+  const all = () => planned().filter((entry) => entry.kind === "stop" && !entry.group)
+  const live = () => all().filter((entry) => !entry.frozen)
+  const first = () => nextOf(live()) ?? live().find((entry) => entry.window) ?? live().find((entry) => entry.guard)
+  const guard = () => live().find((entry) => entry.guard)
+  return (
+    <PlanRow
+      icon="⏹"
+      on={!!first()}
+      label={first() ? describeEntry(first()) : all().length ? "Stop at: frozen" : "Stop at: none"}
+      extra={first()?.at ? ` · ${untilText(first().at)}${guard() ? ` · any ${guard().guard}%` : ""}` : first() && !first().guard && guard() ? ` · any ${guard().guard}%` : ""}
+      hint="plan · right click: freeze"
+      click="schedule.stop"
+      right="schedule.freeze.stop"
+    />
+  )
+}
+
+/**
+ * Break (it was "Pause"): stop, then resume. Not on a break: a click plans one (when to stop, when to go on),
+ * ctrl+click stops at once; the next planned break shows. On one (or stopped): a click goes on now.
+ */
+export function PauseBar() {
+  const paused = () => store.pause
+  const breaks = () => planned().filter((entry) => entry.group && !entry.frozen)
+  const nextBreak = () => {
+    const stop = nextOf(breaks().filter((entry) => entry.kind === "stop"))
+    if (!stop) return undefined
+    const back = breaks().find((entry) => entry.group === stop.group && entry.kind === "resume")
+    return ` · ${whenText(stop.at)} → ${back ? whenText(back.at) : "until resumed"}`
+  }
+  const label = () => {
+    const p = paused()
+    if (!p) return "Break"
+    const when = p.until ? `until ${whenText(p.until)}` : "until you resume"
+    return `${p.reason === "break" ? "On break" : p.reason === "limit" || p.reason === "stop" ? "Stopped" : "Paused"} · ${when}`
+  }
+  return (
+    <PlanRow
+      icon={paused() ? "▶" : "⏸"}
+      on={!!paused() || !!nextBreak()}
+      highlight={!!paused()}
+      label={label()}
+      extra={paused() ? "" : nextBreak() ?? ""}
+      hint={paused() ? (paused().reason === "limit" ? "click: go on to 100%" : "click: go on now") : "plan · ctrl+click: now · right click: freeze"}
+      click="session.pause"
+      ctrl={paused() ? "session.pause" : "pause.now"}
+      right="schedule.freeze.break"
+    />
   )
 }
 
@@ -555,43 +645,6 @@ export function OrchestratorToggle() {
   )
 }
 
-/**
- * The Stop after row above Pause: the stop near any limit and a one-time stop, as set for this tab. A click opens
- * Stop after; a right click turns the stop near any limit on or off for this tab.
- */
-export function StopAfterRow() {
-  const [hover, setHover] = createSignal(false)
-  const once = () => (configRevision(), stopRuleFor(store.sessionID))
-  const near = () => (configRevision(), autoPauseFor(store.sessionID))
-  const active = () => !!once() || near().on
-  const text = () => {
-    const parts = []
-    if (once()) parts.push(describeRule(once()))
-    if (near().on) parts.push(once() ? `any ${near().at}%` : `${near().at}% of any limit`)
-    return parts.length ? `  Stop at ${parts.join(" · ")}` : "  Stop after: off"
-  }
-  return (
-    <box
-      flexShrink={0}
-      paddingLeft={1}
-      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
-      onMouseOver={() => setHover(true)}
-      onMouseOut={() => setHover(false)}
-      onMouseUp={(event) => runCommand(event?.button === 2 ? "pause.limit.toggle" : "plan.stopafter")}
-    >
-      <text fg={active() ? theme.text : theme.textMuted} wrapMode="none" truncate>
-        <span style={{ fg: active() ? theme.warning : theme.textMuted }}>⏹</span>
-        {text()}
-        <Show when={once()?.own || near().own}>
-          <span style={{ fg: theme.textMuted }}> · this tab</span>
-        </Show>
-        <Show when={hover()}>
-          <span style={{ fg: theme.textMuted }}> (click: set · right click: any limit on/off)</span>
-        </Show>
-      </text>
-    </box>
-  )
-}
 
 /** The phone app, where it is seen every day: whether its server runs and how many phones are on; a click opens it. */
 export function PhoneRow() {
@@ -654,6 +707,8 @@ export function SidebarFooter() {
   return (
     <>
       <box flexShrink={0}>
+        <SchedulesRow />
+        <ResumeRow />
         <StopAfterRow />
         <PauseBar />
         <AutoResumeToggle />

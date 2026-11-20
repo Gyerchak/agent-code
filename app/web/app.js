@@ -206,6 +206,16 @@ function renderPart(part, key) {
   return keepOpen(box, key)
 }
 
+/** When a message was sent: "14:32" today, "Wed 14:32" this week, "19 Nov 14:32" before. */
+function messageTime(ms) {
+  const date = new Date(ms)
+  const now = new Date()
+  const clock = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+  if (date.toDateString() === now.toDateString()) return clock
+  if (now - date < 6 * 86_400_000) return `${date.toLocaleDateString([], { weekday: "short" })} ${clock}`
+  return `${date.toLocaleDateString([], { day: "numeric", month: "short" })} ${clock}`
+}
+
 function renderMessages() {
   const tab = state.tab
   const box = $("messages")
@@ -220,6 +230,12 @@ function renderMessages() {
       const div = document.createElement("div")
       div.className = `msg-user${message.unsent ? " unsent" : ""}`
       div.textContent = message.text
+      if (message.time) {
+        const when = document.createElement("span")
+        when.className = "time"
+        when.textContent = messageTime(message.time)
+        div.append(when)
+      }
       if (message.unsent || message.queued) {
         const tag = document.createElement("span")
         tag.className = "tag"
@@ -261,7 +277,7 @@ function renderMessages() {
       if (message.done) {
         const foot = document.createElement("div")
         foot.className = "foot"
-        foot.innerHTML = `<b>${escape(agentName(message.agent))}</b> · ${escape(prettyModel(message.model))}${message.ms ? ` · ${(message.ms / 1000).toFixed(1)}s` : ""}`
+        foot.innerHTML = `<b>${escape(agentName(message.agent))}</b> · ${escape(prettyModel(message.model))}${message.ms ? ` · ${(message.ms / 1000).toFixed(1)}s` : ""}${message.time ? ` · ${messageTime(message.time)}` : ""}`
         div.append(foot)
       } else if (!message.parts.length) {
         const wait = document.createElement("div")

@@ -44,7 +44,7 @@ import {
   toggleThinking,
 } from "./context/app"
 import { allCommands, dispatchKey, leaderActive, onCommandError, runCommand, shortcut, useLayer } from "./context/keymap"
-import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, autoPauseFor, autoPauseOverrides, setSessionAutoPause, describeRule, hasFableWindow, setStopRule, stopLevel, stopRuleFor, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
+import { AGENTS, agentIndex, agentList, autoResumeChanged, claudeModelList, FABLE_FAMILIES, fableFallback, fableUpgrade, limits, limitWasReset, onSessionEvent, ORCH_DELEGATION, ORCH_POOLS, ORCH_STRATEGIES, orchestrator, describeEntry, guardFor, hasFableWindow, newEntryId, scheduleOf, setSchedule, stopLevel, untilText, whenText, pollPlanUsage, ROUTE_KINDS, ROUTE_LEVELS, strongerModel, subagentRouting, useLimitReset } from "./context/session"
 import {
   active,
   app,
@@ -77,6 +77,7 @@ import {
   tabs,
   toggleMcp,
   undo,
+  app as folderApp,
 } from "./context/tabs"
 import { agentColor, setTheme, themeName, themeList, theme } from "./context/theme"
 import { log, logFile } from "./context/log"
@@ -450,172 +451,402 @@ function selectAll(renderer) {
 }
 
 /** "HH:MM" or a number of minutes → a time (ms), or undefined. */
-function parseWhen(text) {
+function parseWhen(text, from = Date.now()) {
   const value = text.trim()
   const clock = value.match(/^(\d{1,2}):(\d{2})$/)
   if (clock) {
-    const date = new Date()
+    const date = new Date(from)
     date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
-    if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
+    if (date.getTime() <= from) date.setDate(date.getDate() + 1)
     return date.getTime()
   }
-  if (/^\d+$/.test(value)) return Date.now() + Number(value) * 60_000
+  if (/^\d+$/.test(value)) return from + Number(value) * 60_000
   return undefined
 }
 
 const WINDOW_TITLES = { fiveHour: "5-hour limit", week: "weekly limit", fable: "Fable limit" }
 
+// ---------------------------------------------------------------------------
+// Schedules (sidebar rows above Access: Schedules, Resume at, Stop at, Break)
+// ---------------------------------------------------------------------------
+
+/** "stop", "resume" or "break" (a break's stop and resume share a group). */
+const kindOf = (entry) => (entry.group ? "break" : entry.kind)
+/** Planned times first, then limit levels, then the near-any-limit stop. */
+const entryOrder = (a, b) => (a.at ?? Infinity) - (b.at ?? Infinity) || (a.guard ? 1 : 0) - (b.guard ? 1 : 0)
+
+/** Add entries to the focused tab's schedule (`replace`: entry ids that go). */
+function addToSchedule(entries, replace = []) {
+  const sid = store.sessionID
+  setSchedule(sid, [...scheduleOf(sid).filter((entry) => !replace.includes(entry.id)), ...entries])
+}
+
+/** A time typed in a prompt (HH:MM, or minutes after `from`), handed to `then`. */
+function askTime(title, then, from) {
+  dialog.push(() => (
+    <DialogPrompt
+      title={title}
+      placeholder="e.g. 23:30, or 90 (minutes)"
+      onConfirm={(text) => {
+        const time = parseWhen(text, from)
+        if (!time) return toast.show({ variant: "warning", message: "Write a time like 23:30 or a number of minutes" })
+        dialog.pop()
+        then(time)
+      }}
+    />
+  ))
+}
+
+/** Freeze (or, when all are frozen, unfreeze) the planned entries of one kind ("all" for everything). */
+function freezeKind(kind) {
+  const sid = store.sessionID
+  const list = scheduleOf(sid)
+  const hit = (entry) => kind === "all" || kindOf(entry) === kind
+  const chosen = list.filter(hit)
+  if (!chosen.length) return toast.show({ variant: "info", message: "Nothing planned there yet" })
+  const freeze = chosen.some((entry) => !entry.frozen)
+  setSchedule(sid, list.map((entry) => (hit(entry) ? { ...entry, frozen: freeze || undefined } : entry)))
+  toast.show({ variant: "info", message: `${freeze ? "Frozen (kept, not acted on)" : "Active again"}: ${chosen.length} planned ${kind === "all" ? "" : `${kind} `}entr${chosen.length === 1 ? "y" : "ies"}` })
+}
+
+const openSchedules = () => dialog.push(() => <DialogSchedules />, undefined, "large")
+
 /**
- * Stop after (sidebar, above Pause). On top, the stop near any limit (it was "Auto-pause"): each time a plan window —
- * 5-hour, weekly, or the model's own (Fable) — reaches its level, the tab stops until that window resets and then goes
- * on by itself; resuming by hand goes on up to 100 % of that window. Below, a one-time stop at an exact level of one
- * limit, or at a time. Enter sets this tab; the "every tab" cell (right-click, ctrl+o) every tab. A tab's own setting
- * comes first.
+ * Everything planned for this tab: stops, resumes, breaks. Enter freezes or unfreezes one (kept, not acted on);
+ * ctrl+e (or a right click) edits it, ctrl+d deletes it; below, add more, or push them to other sessions.
  */
-function DialogStopAfter() {
+function DialogSchedules() {
   const [tick, setTick] = createSignal(0)
-  const sid = () => store.sessionID
-  // The live level (the last reading plus what was spent since), as the stop check sees it. The limits show even
-  // before the first reading (then without "now").
+  const refresh = () => setTick((n) => n + 1)
+  const list = () => (tick(), configRevision(), scheduleOf(store.sessionID))
+  const options = createMemo(() => {
+    const all = list()
+    const rows = []
+    const seen = new Set()
+    for (const entry of [...all].sort(entryOrder)) {
+      if (entry.group) {
+        if (seen.has(entry.group)) continue
+        seen.add(entry.group)
+        const parts = all.filter((item) => item.group === entry.group)
+        const stop = parts.find((item) => item.kind === "stop")
+        const back = parts.find((item) => item.kind === "resume")
+        const frozen = parts.every((item) => item.frozen)
+        rows.push({
+          title: `Break ${stop ? whenText(stop.at) : "(on now)"} → ${back ? whenText(back.at) : "until you resume"}`,
+          value: `group:${entry.group}`,
+          category: "Breaks",
+          footer: frozen ? "frozen" : untilText((stop ?? back).at),
+          gutter: <text fg={frozen ? theme.textMuted : theme.success}>{frozen ? "[ ]" : "[x]"}</text>,
+        })
+        continue
+      }
+      rows.push({
+        title: describeEntry(entry),
+        value: `entry:${entry.id}`,
+        category: entry.kind === "resume" ? "Resume at" : "Stops",
+        description: entry.guard ? "each time" : entry.window ? "once" : undefined,
+        footer: entry.frozen ? "frozen" : entry.at ? untilText(entry.at) : "",
+        gutter: <text fg={entry.frozen ? theme.textMuted : theme.success}>{entry.frozen ? "[ ]" : "[x]"}</text>,
+      })
+    }
+    return [
+      ...rows,
+      { title: "Plan a stop…", value: "add:stop", category: "Add", description: "a time, a limit level, or near any limit each time", gutter: <text fg={theme.textMuted}>{" + "}</text> },
+      { title: "Plan a resume…", value: "add:resume", category: "Add", description: "automatic continues wait for it, never earlier", gutter: <text fg={theme.textMuted}>{" + "}</text> },
+      { title: "Plan a break…", value: "add:break", category: "Add", description: "stop now or later, then resume (or not)", gutter: <text fg={theme.textMuted}>{" + "}</text> },
+      { title: "Push to other sessions…", value: "push", category: "Other sessions", description: "open tabs, all sessions, new ones — all or one kind", gutter: <text fg={theme.textMuted}>{" ⇉ "}</text> },
+      ...(all.length ? [{ title: "Delete everything planned here", value: "clear", category: "Other sessions", gutter: <text fg={theme.textMuted}>{" ✕ "}</text> }] : []),
+    ]
+  })
+  const idsOf = (value) => {
+    const [type, id] = value.split(":")
+    if (type === "group") return list().filter((entry) => entry.group === id).map((entry) => entry.id)
+    if (type === "entry") return [id]
+    return []
+  }
+  const remove = (value) => {
+    const ids = idsOf(value)
+    if (!ids.length) return false
+    setSchedule(store.sessionID, list().filter((entry) => !ids.includes(entry.id)))
+    refresh()
+  }
+  const editRow = (value) => {
+    const ids = idsOf(value)
+    if (!ids.length) return false
+    const entry = list().find((item) => item.id === ids[0])
+    if (entry.group) dialog.push(() => <DialogBreak edit={entry.group} onDone={refresh} />)
+    else if (entry.kind === "resume") dialog.push(() => <DialogAddResume edit={entry} onDone={refresh} />)
+    else dialog.push(() => <DialogAddStop edit={entry} onDone={refresh} />)
+  }
+  return (
+    <DialogSelect
+      title="Schedules · this tab"
+      memoryKey="schedules"
+      options={options()}
+      emptyText="Nothing planned"
+      onSelect={(option) => {
+        const [type, id] = option.value.split(":")
+        if (type === "add") {
+          if (id === "stop") return dialog.push(() => <DialogAddStop onDone={refresh} />)
+          if (id === "resume") return dialog.push(() => <DialogAddResume onDone={refresh} />)
+          return dialog.push(() => <DialogBreak onDone={refresh} />)
+        }
+        if (type === "push") return dialog.push(() => <DialogPushSchedules />)
+        if (type === "clear") {
+          setSchedule(store.sessionID, [])
+          toast.show({ variant: "info", message: "Nothing planned for this tab now" })
+          return refresh()
+        }
+        const ids = idsOf(option.value)
+        const freeze = list().some((entry) => ids.includes(entry.id) && !entry.frozen)
+        setSchedule(store.sessionID, list().map((entry) => (ids.includes(entry.id) ? { ...entry, frozen: freeze || undefined } : entry)))
+        refresh()
+      }}
+      onRightClick={(option) => editRow(option.value)}
+      actions={[
+        { keybind: "ctrl+e", label: "edit", run: (option) => editRow(option.value) },
+        { keybind: "ctrl+d", label: "delete", run: (option) => remove(option.value) },
+      ]}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>freeze / unfreeze · right click: edit</span>
+        </text>
+      }
+    />
+  )
+}
+
+/**
+ * Plan a stop: near any limit each time (one per tab), once at an exact limit level, or at a time. `edit`: the entry
+ * it replaces.
+ */
+function DialogAddStop(props) {
+  const sid = store.sessionID
   const known = (key) => stopLevel(key) !== undefined
   const used = (key) => Math.round(stopLevel(key) ?? 0)
-  const forEvery = (every) => every || !sid()
-  const who = (every) => (forEvery(every) ? "every tab" : "this tab")
-  const once = (rule, every) => {
-    setStopRule(forEvery(every) ? undefined : sid(), rule)
-    dialog.clear()
-    toast.show({ variant: "info", message: rule ? `Stop once at ${describeRule(rule)} · ${who(every)}` : `No one-time stop · ${who(every)}` })
+  const guard = guardFor(sid)
+  const done = (entries, message, replace = []) => {
+    addToSchedule(entries, [...(props.edit ? [props.edit.id] : []), ...replace])
+    toast.show({ variant: "info", message })
+    props.onDone?.()
+    dialog.pop()
   }
-  // The stop near any limit: this tab's own setting, or the one for every tab.
-  const near = (change, every) => {
-    if (forEvery(every)) {
-      if (change.on !== undefined) config.pauseNearLimit = change.on
-      if (change.at !== undefined) config.pauseAt = change.at
-      saveConfig()
-    } else setSessionAutoPause(sid(), change)
-    const now = forEvery(every) ? { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 } : autoPauseFor(sid())
-    toast.show({ variant: "info", message: now.on ? `Stop near any limit: at ${now.at}% · ${who(every)}` : `Stop near any limit: off · ${who(every)}` })
-    setTick((value) => value + 1)
+  const setGuard = (level) => {
+    const old = scheduleOf(sid).filter((entry) => entry.kind === "stop" && entry.guard).map((entry) => entry.id)
+    done(level ? [{ id: newEntryId(), kind: "stop", guard: level }] : [], level ? `Stop near any limit at ${level}% · each time` : "No stop near the limits", old)
   }
-  const nearExact = (every) =>
-    dialog.replace(() => (
+  const exact = (key) =>
+    dialog.push(() => (
       <DialogPrompt
-        title={`Stop ${who(every)} near any limit at what %?`}
-        placeholder="e.g. 93 (from 50 to 100)"
-        onConfirm={(value) => {
-          const level = Number(value.trim().replace("%", ""))
-          if (!Number.isFinite(level) || level < 50 || level > 100) return toast.show({ variant: "warning", message: "Write a level from 50 to 100" })
-          near({ on: true, at: Math.round(level * 10) / 10 }, every)
-          dialog.replace(() => <DialogStopAfter />, undefined, "large")
-        }}
-      />
-    ))
-  const exact = (key, every) =>
-    dialog.replace(() => (
-      <DialogPrompt
-        title={`Stop ${who(every)} once at what % of the ${WINDOW_TITLES[key]}?`}
+        title={`Stop once at what % of the ${WINDOW_TITLES[key]}?`}
         placeholder={known(key) ? `now ${used(key)}% · e.g. ${Math.min(100, used(key) + 15)}, or +10 for 10% more` : "e.g. 85"}
         onConfirm={(value) => {
           const text = value.trim()
           const more = text.match(/^\+\s*(\d+(?:\.\d+)?)\s*%?$/)
           if (more && !known(key)) return toast.show({ variant: "warning", message: "The level now isn't read yet: write the % to stop at" })
           const level = more ? used(key) + Number(more[1]) : Number(text.replace("%", ""))
-          if (!Number.isFinite(level) || level <= used(key) || level > 100)
-            return toast.show({ variant: "warning", message: `Write a level above the ${used(key)}% used now (up to 100), or +N` })
-          once({ window: key, percent: Math.round(level * 10) / 10 }, every)
+          if (!Number.isFinite(level) || level <= used(key) || level > 100) return toast.show({ variant: "warning", message: `Write a level above the ${used(key)}% used now (up to 100), or +N` })
+          dialog.pop()
+          done([{ id: newEntryId(), kind: "stop", window: key, percent: Math.round(level * 10) / 10 }], `Stop once at ${WINDOW_TITLES[key]} ${Math.round(level * 10) / 10}%`)
         }}
       />
     ))
-  const choose = (option, every) => {
-    const [kind, key, value] = option.value.split(":")
-    if (kind === "near") {
-      if (key === "toggle") return near({ on: !(forEvery(every) ? config.pauseNearLimit !== false : autoPauseFor(sid()).on) }, every)
-      if (key === "at") return near({ on: true, at: Number(value) }, every)
-      if (key === "exact") return nearExact(every)
-      if (key === "follow") setSessionAutoPause(sid(), { on: null, at: null })
-      if (key === "followAll") {
-        config.sessionAutoPause = {}
-        saveConfig()
-      }
-      return setTick((n) => n + 1)
-    }
-    if (kind === "off") return once(null, every)
-    if (kind === "exact") return exact(key, every)
-    if (kind === "level") return once({ window: key, percent: Number(value) }, every)
-    if (kind === "more") return once({ window: key, percent: Math.min(100, used(key) + Number(value)) }, every)
-    if (kind === "in") return once({ time: Date.now() + Number(value) * 60_000 }, every)
-    if (kind === "time")
-      return dialog.replace(() => (
-        <DialogPrompt
-          title={`Stop ${who(every)} once at (HH:MM) or after N minutes`}
-          placeholder="e.g. 23:30 or 90"
-          onConfirm={(text) => {
-            const time = parseWhen(text)
-            if (!time) return toast.show({ variant: "warning", message: "Write a time like 23:30 or a number of minutes" })
-            once({ time }, every)
-          }}
-        />
-      ))
+  const nearExact = () =>
+    dialog.push(() => (
+      <DialogPrompt
+        title="Stop near any limit at what %?"
+        placeholder="e.g. 93 (from 50 to 100)"
+        onConfirm={(value) => {
+          const level = Number(value.trim().replace("%", ""))
+          if (!Number.isFinite(level) || level < 50 || level > 100) return toast.show({ variant: "warning", message: "Write a level from 50 to 100" })
+          dialog.pop()
+          setGuard(Math.round(level * 10) / 10)
+        }}
+      />
+    ))
+  const atTime = (time) => done([{ id: newEntryId(), kind: "stop", at: time }], `Stop at ${whenText(time)} (${untilText(time)})`)
+  const options = []
+  const near = "Near any limit · each time (5-hour, weekly, Fable)"
+  for (const level of [80, 90, 95, 98, 99])
+    options.push({ title: `At ${level}%`, value: `guard:${level}`, category: near, description: level === 95 ? "default" : undefined, gutter: <text fg={guard.on && guard.at === level ? theme.primary : theme.textMuted}>{guard.on && guard.at === level ? "(•)" : "( )"}</text> })
+  options.push({ title: "At an exact %…", value: "guard:exact", category: near, description: guard.on && ![80, 90, 95, 98, 99].includes(guard.at) ? `now ${guard.at}%` : "from 50 to 100" })
+  options.push({ title: "Off", value: "guard:off", category: near, gutter: <text fg={!guard.on ? theme.primary : theme.textMuted}>{!guard.on ? "(•)" : "( )"}</text> })
+  const windows = [...(limits.rolling === false ? [] : ["fiveHour"]), "week", ...(hasFableWindow() ? ["fable"] : [])]
+  for (const key of windows) {
+    const now = used(key)
+    const title = `Once · ${WINDOW_TITLES[key]} ${known(key) ? `(now ${now}%)` : "(not read yet)"}`
+    options.push({ title: "At an exact %…", value: `exact:${key}`, category: title, description: known(key) ? "any level, or +N from now" : "any level" })
+    for (const level of (key === "fiveHour" ? [70, 80, 90, 95] : [50, 75, 90]).filter((level) => level > now)) options.push({ title: `At ${level}%`, value: `level:${key}:${level}`, category: title })
+    if (key === "fiveHour" && known(key)) for (const more of [5, 10, 20].filter((more) => now + more <= 100)) options.push({ title: `${more}% more from now`, value: `level:${key}:${now + more}`, category: title, description: `at ${now + more}%` })
   }
-  const options = createMemo(() => {
-    tick()
-    configRevision()
-    const mine = autoPauseFor(sid())
-    const every = { on: config.pauseNearLimit !== false, at: config.pauseAt ?? 95 }
-    const others = autoPauseOverrides().filter((id) => id !== sid()).length
-    const rule = stopRuleFor(sid())
-    const nearTitle = "Near any limit · each time (5-hour, weekly, Fable)"
-    const list = [
-      {
-        title: mine.on ? `On · at ${mine.at}%` : "Off",
-        value: "near:toggle",
-        description: `this tab${mine.own ? " (its own)" : " (follows every tab)"} · every tab: ${every.on ? `at ${every.at}%` : "off"}`,
-        gutter: <text fg={mine.on ? theme.success : theme.textMuted}>{mine.on ? "[x]" : "[ ]"}</text>,
-        category: nearTitle,
-      },
-      ...[80, 90, 95, 98, 99].map((level) => ({
-        title: `At ${level}%`,
-        value: `near:at:${level}`,
-        category: nearTitle,
-        description: [level === mine.at ? "this tab" : "", level === every.at ? "every tab" : "", level === 95 ? "default" : ""].filter(Boolean).join(" · ") || undefined,
-        gutter: <text fg={level === mine.at ? theme.primary : theme.textMuted}>{level === mine.at ? "(•)" : "( )"}</text>,
-      })),
-      {
-        title: "At an exact %…",
-        value: "near:exact",
-        category: nearTitle,
-        description: [80, 90, 95, 98, 99].includes(mine.at) ? "any level from 50 to 100" : `this tab: ${mine.at}%`,
-        gutter: <text fg={[80, 90, 95, 98, 99].includes(mine.at) ? theme.textMuted : theme.primary}>{[80, 90, 95, 98, 99].includes(mine.at) ? "( )" : "(•)"}</text>,
-      },
-      ...(mine.own ? [{ title: "Follow the setting for every tab", value: "near:follow", category: nearTitle, side: false }] : []),
-      ...(others ? [{ title: "Make every tab follow it", value: "near:followAll", category: nearTitle, description: `${others} other tab${others === 1 ? " has" : "s have"} its own setting`, side: false }] : []),
-    ]
-    const windows = [...(limits.rolling === false ? [] : ["fiveHour"]), "week", ...(hasFableWindow() ? ["fable"] : [])]
-    for (const key of windows) {
-      const now = used(key)
-      const title = `Once · ${WINDOW_TITLES[key]} ${known(key) ? `(now ${now}%)` : "(not read yet)"}`
-      list.push({ title: "At an exact %…", value: `exact:${key}`, category: title, description: known(key) ? "any level, or +N from now" : "any level" })
-      const levels = key === "fiveHour" ? [70, 80, 90, 95] : [50, 75, 90]
-      for (const level of levels.filter((level) => level > now)) list.push({ title: `At ${level}%`, value: `level:${key}:${level}`, category: title })
-      if (key === "fiveHour" && known(key)) for (const more of [5, 10, 20].filter((more) => now + more <= 100)) list.push({ title: `${more}% more from now`, value: `more:${key}:${more}`, category: title, description: `at ${now + more}%` })
-    }
-    for (const [minutes, label] of [[30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"]]) list.push({ title: label, value: `in::${minutes}`, category: "Once · at a time" })
-    list.push({ title: "At a time…", value: "time", category: "Once · at a time", description: "HH:MM, or a number of minutes" })
-    list.push({ title: "No one-time stop", value: "off", category: "Once", description: rule ? `now: ${describeRule(rule)} (${rule.own ? "this tab" : "every tab"})` : "none set" })
-    return list
-  })
+  for (const [minutes, label] of [[15, "In 15 minutes"], [30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"]]) options.push({ title: label, value: `in:${minutes}`, category: "At a time" })
+  options.push({ title: "At a time…", value: "time", category: "At a time", description: "HH:MM, or a number of minutes" })
   return (
     <DialogSelect
-      title="Stop after"
-      options={options()}
-      onSelect={(option) => choose(option, false)}
-      side={{ label: "every tab", run: (option) => choose(option, true) }}
-      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => option.side !== false && choose(option, true) }]}
+      title={props.edit ? `Change: ${describeEntry(props.edit)}` : "Plan a stop"}
+      options={options}
+      onSelect={(option) => {
+        const [kind, key, value] = option.value.split(":")
+        if (kind === "guard") return key === "exact" ? nearExact() : setGuard(key === "off" ? 0 : Number(key))
+        if (kind === "exact") return exact(key)
+        if (kind === "level") return done([{ id: newEntryId(), kind: "stop", window: key, percent: Number(value) }], `Stop once at ${WINDOW_TITLES[key]} ${value}%`)
+        if (kind === "in") return atTime(Date.now() + Number(key) * 60_000)
+        if (kind === "time") askTime("Stop at (HH:MM) or after N minutes", atTime)
+      }}
       footer={
         <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>this tab (comes first) · a limit stop goes on when it resets</span>
+          enter <span style={{ fg: theme.textMuted }}>plan it · a limit stop goes on when that limit resets</span>
         </text>
       }
+    />
+  )
+}
+
+/** Plan a resume (a time). It also holds back automatic continues after a limit until then — never earlier. */
+function DialogAddResume(props) {
+  const done = (time) => {
+    addToSchedule([{ id: newEntryId(), kind: "resume", at: time }], props.edit ? [props.edit.id] : [])
+    toast.show({ variant: "info", message: `Resume at ${whenText(time)} (${untilText(time)})` })
+    props.onDone?.()
+    dialog.pop()
+  }
+  const paused = store.pause
+  return (
+    <DialogSelect
+      title={props.edit ? `Change: ${describeEntry(props.edit)}` : `Plan a resume${paused ? ` · now ${paused.until ? `paused until ${whenText(paused.until)}` : "paused until you resume"}` : ""}`}
+      options={[
+        ...[[15, "In 15 minutes"], [30, "In 30 minutes"], [60, "In 1 hour"], [120, "In 2 hours"], [240, "In 4 hours"]].map(([minutes, label]) => ({ title: label, value: String(minutes), category: "Resume" })),
+        { title: "At a time…", value: "time", category: "Resume", description: "HH:MM, or a number of minutes" },
+      ]}
+      onSelect={(option) => (option.value === "time" ? askTime("Resume at (HH:MM) or after N minutes", done) : done(Date.now() + Number(option.value) * 60_000))}
+      footer={
+        <text fg={theme.text}>
+          <span style={{ fg: theme.textMuted }}>it ends a stop or pause then; a continue after a limit waits for it (never earlier)</span>
+        </text>
+      }
+    />
+  )
+}
+
+/**
+ * A break: first when to stop (now, unless a time is picked), then when to go on (or not: until you resume).
+ * `edit`: the group it replaces.
+ */
+function DialogBreak(props) {
+  // `stopAt` given (0: now): this is the second step, when to go on.
+  const stopAt = () => props.stopAt || undefined
+  const step = () => (props.stopAt === undefined ? 1 : 2)
+  const finish = (back) => {
+    const group = newEntryId()
+    const replace = props.edit ? scheduleOf(store.sessionID).filter((entry) => entry.group === props.edit).map((entry) => entry.id) : []
+    const start = stopAt()
+    const entries = [...(start ? [{ id: newEntryId(), kind: "stop", at: start, group }] : []), ...(back ? [{ id: newEntryId(), kind: "resume", at: back, group }] : [])]
+    addToSchedule(entries, replace)
+    if (!start) active().pause(back, "break", undefined, group)
+    toast.show({ variant: "info", message: `Break ${start ? `at ${whenText(start)}` : "now"}${back ? `, back at ${whenText(back)}` : ", until you resume"}` })
+    props.onDone?.()
+    dialog.pop()
+  }
+  const from = () => stopAt() ?? Date.now()
+  const options = createMemo(() =>
+    step() === 1
+      ? [
+          { title: "Now", value: "now", category: "Stop when?", description: "ctrl+click on Break does this at once" },
+          ...[[15, "In 15 minutes"], [30, "In 30 minutes"], [60, "In 1 hour"]].map(([minutes, label]) => ({ title: label, value: String(minutes), category: "Stop when?" })),
+          { title: "At a time…", value: "time", category: "Stop when?", description: "HH:MM, or a number of minutes" },
+        ]
+      : [
+          { title: "Not set: until I resume", value: "none", category: `Resume when? (stop ${stopAt() ? whenText(stopAt()) : "now"})` },
+          ...[[15, "15 minutes later"], [30, "30 minutes later"], [60, "1 hour later"], [120, "2 hours later"]].map(([minutes, label]) => ({ title: label, value: String(minutes), category: `Resume when? (stop ${stopAt() ? whenText(stopAt()) : "now"})` })),
+          { title: "At a time…", value: "time", category: `Resume when? (stop ${stopAt() ? whenText(stopAt()) : "now"})`, description: "HH:MM, or minutes after the stop" },
+        ],
+  )
+  return (
+    <DialogSelect
+      title={props.edit ? "Change the break" : "Break (stop, then resume)"}
+      options={options()}
+      onSelect={(option) => {
+        if (step() === 1) {
+          // The second step is a dialog of its own (a fresh search line: what was typed for the first doesn't stay).
+          const next = (time) => {
+            dialog.pop()
+            dialog.push(() => <DialogBreak edit={props.edit} onDone={props.onDone} stopAt={time ?? 0} />)
+          }
+          if (option.value === "now") return next(undefined)
+          if (option.value === "time") return askTime("Stop at (HH:MM) or after N minutes", next)
+          return next(Date.now() + Number(option.value) * 60_000)
+        }
+        if (option.value === "none") return finish(undefined)
+        if (option.value === "time") return askTime("Resume at (HH:MM) or N minutes after the stop", finish, from())
+        finish(from() + Number(option.value) * 60_000)
+      }}
+    />
+  )
+}
+
+/**
+ * Push this tab's schedule to other sessions: what (everything, or only stops, resumes or breaks), how (added to
+ * theirs, or replacing theirs of those kinds), to whom (open tabs, every session in this folder, new sessions), then
+ * yes or no.
+ */
+function DialogPushSchedules() {
+  const sid = store.sessionID
+  const [what, setWhat] = createSignal("all")
+  const [how, setHow] = createSignal("add")
+  const [to, setTo] = createSignal(new Set(["open"]))
+  const openIds = () => [...new Set(tabs().map((tab) => tab.store.sessionID).filter((id) => id && id !== sid))]
+  const folderIds = () => [...new Set([...openIds(), ...(folderApp.sessions ?? []).map((item) => item.sessionId)].filter((id) => id && id !== sid))]
+  const dot = (on) => <text fg={on ? theme.primary : theme.textMuted}>{on ? "(•)" : "( )"}</text>
+  const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
+  const options = createMemo(() => [
+    ...[["all", "Everything planned"], ["stop", "Only stops"], ["resume", "Only resumes"], ["break", "Only breaks"]].map(([key, title]) => ({ title, value: `what:${key}`, category: "What", gutter: dot(what() === key) })),
+    { title: "Add to theirs", value: "how:add", category: "How", gutter: dot(how() === "add") },
+    { title: "Replace theirs (of those kinds)", value: "how:replace", category: "How", gutter: dot(how() === "replace") },
+    { title: `Open tabs (${openIds().length})`, value: "to:open", category: "To", gutter: box(to().has("open")) },
+    { title: `Every session in this folder (${folderIds().length})`, value: "to:all", category: "To", description: "closed ones too", gutter: box(to().has("all")) },
+    { title: "New sessions", value: "to:new", category: "To", description: "what they start with", gutter: box(to().has("new")) },
+    { title: "Yes, push", value: "yes", category: "Are you sure?" },
+    { title: "No, cancel", value: "no", category: "Are you sure?" },
+  ])
+  const push = () => {
+    const pick = (entry) => what() === "all" || kindOf(entry) === what()
+    const mine = scheduleOf(sid).filter(pick)
+    const targets = [...new Set([...(to().has("open") ? openIds() : []), ...(to().has("all") ? folderIds() : [])])]
+    if (!targets.length && !to().has("new")) return toast.show({ variant: "warning", message: "Tick where to push it, or choose No" })
+    const copies = () => {
+      const groups = new Map()
+      return mine.map((entry) => ({ ...entry, id: newEntryId(), ...(entry.group ? { group: groups.get(entry.group) ?? groups.set(entry.group, newEntryId()).get(entry.group) } : {}) }))
+    }
+    const apply = (id) => {
+      let theirs = scheduleOf(id)
+      if (how() === "replace") theirs = theirs.filter((entry) => !pick(entry))
+      // One near-any-limit stop per tab: a pushed one replaces theirs.
+      if (mine.some((entry) => entry.guard)) theirs = theirs.filter((entry) => !entry.guard)
+      setSchedule(id, [...theirs, ...copies()])
+    }
+    for (const id of targets) apply(id)
+    if (to().has("new")) apply(undefined)
+    toast.show({ variant: "success", message: `Pushed ${mine.length} planned entr${mine.length === 1 ? "y" : "ies"} to ${targets.length} session${targets.length === 1 ? "" : "s"}${to().has("new") ? " and new sessions" : ""}` })
+    dialog.pop()
+  }
+  return (
+    <DialogSelect
+      title="Push this tab's schedule"
+      options={options()}
+      onSelect={(option) => {
+        const [type, key] = option.value.split(":")
+        if (type === "what") return setWhat(key)
+        if (type === "how") return setHow(key)
+        if (type === "to")
+          return setTo((now) => {
+            const next = new Set(now)
+            if (next.has(key)) next.delete(key)
+            else next.add(key)
+            return next
+          })
+        if (type === "no") return dialog.pop()
+        if (type === "yes") push()
+      }}
     />
   )
 }
@@ -2101,93 +2332,6 @@ function DialogLogin() {
   )
 }
 
-/**
- * How long to pause: Enter (or a click on the row) pauses this tab; the "every tab" cell on the right (or a
- * right-click, or ctrl+o) does the same for every open tab. By hand, for a while, at a time, or until the 5-hour
- * window resets.
- */
-function DialogPause() {
-  const fiveHour = limits.fiveHour?.resetsAt && limits.fiveHour.resetsAt > Date.now() ? limits.fiveHour.resetsAt : undefined
-  const at = (minutes) => Date.now() + minutes * 60_000
-  const paused = tabs().filter((tab) => tab.store.pause)
-  // Who a choice applies to: this tab, or every open tab.
-  const targets = (all) => (all ? tabs().filter((tab) => !tab.disposed) : [active()])
-  const pauseFor = (until, all) => {
-    const list = targets(all)
-    for (const tab of list) tab.pause(until)
-    dialog.clear()
-    const when = until ? ` until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""
-    toast.show({
-      variant: "info",
-      message: all
-        ? `Paused ${list.length} tab${list.length === 1 ? "" : "s"}${when}: work stops at its next step; nothing is sent until they resume`
-        : active().engine || active().store.engine
-          ? `Paused${when}: stopped now, a short continue on resume`
-          : `Paused${when}: the work stops at its next step; nothing is sent until it resumes`,
-      duration: 4000,
-    })
-  }
-  const choose = (option, all) => {
-    if (option.value === "resume") {
-      const list = all || !active().store.pause ? paused : [active()]
-      for (const tab of list) tab.resume()
-      dialog.clear()
-      return toast.show({ variant: "info", message: list.length ? `Resumed ${list.length === 1 && !all ? "this tab" : `${list.length} tab${list.length === 1 ? "" : "s"}`}` : "Nothing was paused here" })
-    }
-    if (option.value === "time") {
-      dialog.replace(() => (
-        <DialogPrompt
-          title={`Resume ${all ? "every tab" : "this tab"} at (HH:MM) or after N minutes`}
-          placeholder="e.g. 14:30 or 45"
-          onConfirm={(value) => {
-            const text = value.trim()
-            const clock = text.match(/^(\d{1,2}):(\d{2})$/)
-            let until
-            if (clock) {
-              const date = new Date()
-              date.setHours(Number(clock[1]), Number(clock[2]), 0, 0)
-              if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
-              until = date.getTime()
-            } else if (/^\d+$/.test(text)) until = at(Number(text))
-            dialog.clear()
-            if (!until) return toast.show({ variant: "warning", message: "Write a time like 14:30 or a number of minutes" })
-            pauseFor(until, all)
-          }}
-        />
-      ))
-      return
-    }
-    pauseFor(option.value === "manual" ? undefined : option.value === "reset" ? fiveHour + 30_000 : at(Number(option.value)), all)
-  }
-  // Pausing comes first (the cursor starts there); resuming other paused tabs is the last row.
-  const options = [
-    { title: "Until I resume", value: "manual", description: "click the bar, /resume or ctrl+x p again" },
-    { title: "15 minutes", value: "15" },
-    { title: "30 minutes", value: "30" },
-    { title: "1 hour", value: "60" },
-    { title: "2 hours", value: "120" },
-    ...(fiveHour ? [{ title: "Until the 5-hour limit resets", value: "reset", footer: new Date(fiveHour + 30_000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }] : []),
-    { title: "Until a time…", value: "time", description: "HH:MM, or a number of minutes" },
-    ...(paused.length
-      ? [{ title: active().store.pause ? "Resume this tab" : `Resume the paused tab${paused.length === 1 ? "" : "s"}`, value: "resume", description: `${paused.length} paused`, category: "Paused" }]
-      : []),
-  ]
-  return (
-    <DialogSelect
-      title="Pause"
-      flatten
-      options={options}
-      onSelect={(option) => choose(option, false)}
-      side={{ label: "every tab", run: (option) => choose(option, true) }}
-      actions={[{ keybind: "ctrl+o", label: "every tab", run: (option) => choose(option, true) }]}
-      footer={
-        <text fg={theme.text}>
-          enter <span style={{ fg: theme.textMuted }}>this tab</span>
-        </text>
-      }
-    />
-  )
-}
 
 function DialogSavedSettings() {
   const list = listSavedSettings()
@@ -2293,7 +2437,7 @@ function DialogSettings() {
       get: flag("dropFiles", true),
       set: write("dropFiles"),
     },
-    { key: "stopafter", title: "Stop after…", description: "stop near any limit each time (until it resets), or once at an exact level or a time", get: () => autoPauseFor(undefined).on || !!config.stopAfter?.every, set: () => {} },
+    { key: "schedules", title: "Schedules…", description: "this tab's planned stops, resumes and breaks; push them to other sessions", get: () => scheduleOf(store.sessionID).some((entry) => !entry.frozen), set: () => {} },
     { key: "fable.fallback", title: "Fable fallback…", description: "at the Fable limit, go on with another model (reasoning raised)", get: () => fableFallback().enabled, set: () => {} },
     { key: "fable.upgrade", title: "Back to Fable…", description: "after a used-up Fable limit resets, return tabs to Fable (reasoning lowered)", get: () => fableUpgrade().enabled, set: () => {} },
     {
@@ -2319,7 +2463,7 @@ function DialogSettings() {
     if (key === "orchestrator") return openOrchestrator(back)
     if (key === "fable.fallback") return dialog.push(() => <DialogFableFallback />)
     if (key === "fable.upgrade") return dialog.push(() => <DialogFableUpgrade />)
-    if (key === "stopafter") return dialog.push(() => <DialogStopAfter />, undefined, "large")
+    if (key === "schedules") return openSchedules()
   }
   const options = createMemo(() => {
     tick()
@@ -2334,7 +2478,6 @@ function DialogSettings() {
       ...(setting.key === "autoResumeMode" ? { footer: config.autoResumeMode === "one" ? "one at a time" : "all at once", gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> } : {}),
       ...(setting.key === "access" ? { footer: accessEngine(store.engine) === "claude" ? "Claude Code" : store.engine, gutter: <text fg={theme.textMuted}>{" › "}</text> } : {}),
       ...(setting.key === "orchestrator" ? { footer: `${orchestrator().enabled ? "on" : "off"} · routing ${subagentRouting().enabled ? "on" : "off"}` } : {}),
-      ...(setting.key === "stopafter" ? { footer: config.pauseNearLimit !== false ? `any limit ${config.pauseAt ?? 95}%` : "off" } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
       ...(setting.key === "settings.restore" ? { footer: `${listSavedSettings().length} saved`, gutter: <text fg={theme.textMuted}>{" ⇧ "}</text> } : {}),
       ...(setting.key === "settings.reset" ? { footer: "reset", gutter: <text fg={theme.textMuted}>{" ↺ "}</text> } : {}),
@@ -2355,10 +2498,7 @@ function DialogSettings() {
         }
         if (option.value === "orchestrator") return openOrchestrator(() => setTick((n) => n + 1))
         if (option.value === "access") return openAccess(undefined, "push")
-        if (option.value === "stopafter") {
-          dialog.replace(() => <DialogStopAfter />, undefined, "large")
-          return
-        }
+        if (option.value === "schedules") return openSchedules()
         if (option.value === "transcriptDetail") {
           cycleTranscriptDetail()
           setTick((n) => n + 1)
@@ -3097,7 +3237,7 @@ export function App() {
     )
   })
   useKeyboard((event          ) => dispatchKey(event))
-  actions.pause = () => dialog.replace(() => <DialogPause />, undefined, "large")
+  actions.pause = () => dialog.push(() => <DialogBreak />)
   actions.message = (id) => dialog.replace(() => <DialogMessage messageID={id} />)
   actions.redo = () =>
     dialog.replace(() => (
@@ -3416,28 +3556,22 @@ export function App() {
     },
     {
       id: "session.pause",
-      title: store.pause ? "Resume" : "Pause",
+      title: store.pause ? "Resume" : "Break… (stop now or later, resume later)",
       category: "Session",
       slash: "pause",
+      slashAliases: ["break"],
       run: () => (store.pause ? active().resume() : actions.pause()),
-    },
-    {
-      id: "pause.limit.toggle",
-      title: autoPauseFor(store.sessionID).on ? "Stop near any limit: turn off (this tab)" : "Stop near any limit: turn on (this tab)",
-      category: "Session",
-      run: () => {
-        const now = autoPauseFor(store.sessionID)
-        if (!store.sessionID) {
-          config.pauseNearLimit = !now.on
-          saveConfig()
-        } else setSessionAutoPause(store.sessionID, { on: !now.on })
-        const after = autoPauseFor(store.sessionID)
-        toast.show({ variant: "info", message: after.on ? `Stop near any limit: at ${after.at}% · this tab` : "Stop near any limit: off · this tab" })
-      },
     },
     { id: "access.settings", title: "Access settings (this harness; each has its own)", category: "Session", slash: "access", run: () => openAccess() },
     { id: "access.sync", title: "Sync this harness's access settings to the others…", category: "Session", run: () => dialog.replace(() => <DialogAccessSync from={store.engine} onDone={() => { restartForAccess(new Set(accessChanged)); accessChanged.clear() }} />) },
-    { id: "plan.stopafter", title: "Stop after… (near any limit, an exact level, or a time)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
+    { id: "schedules", title: "Schedules (this tab): stops, resumes, breaks", category: "Session", slash: "schedules", slashAliases: ["stopafter", "schedule"], run: () => openSchedules() },
+    { id: "schedule.stop", title: "Plan a stop…", category: "Session", slash: "stopat", run: () => dialog.push(() => <DialogAddStop />, undefined, "large") },
+    { id: "schedule.resume", title: "Plan a resume…", category: "Session", slash: "resumeat", run: () => dialog.push(() => <DialogAddResume />) },
+    { id: "pause.now", title: "Break now (until you resume)", category: "Session", slash: "breaknow", run: () => active().pause() },
+    { id: "schedule.freeze.all", title: "Freeze / unfreeze everything planned (this tab)", category: "Session", run: () => freezeKind("all") },
+    { id: "schedule.freeze.stop", title: "Freeze / unfreeze the planned stops", category: "Session", run: () => freezeKind("stop") },
+    { id: "schedule.freeze.resume", title: "Freeze / unfreeze the planned resumes", category: "Session", run: () => freezeKind("resume") },
+    { id: "schedule.freeze.break", title: "Freeze / unfreeze the planned breaks", category: "Session", run: () => freezeKind("break") },
     {
       id: "orchestrator.toggle",
       title: orchestrator().enabled ? "Turn off orchestrator mode" : "Turn on orchestrator mode",

@@ -187,3 +187,6 @@ textarea#input { width: 100%; resize: none; border: 0; outline: none; background
 :root.light .item { color: #333; }
 :root.light .item.active { background: #e4e4e8; }
 :root.light .screen { background: #0a0a0a; }
+
+/* When a message was sent. */
+.msg-user .time { display: block; margin-top: 4px; font-size: 0.78em; opacity: 0.55; }
