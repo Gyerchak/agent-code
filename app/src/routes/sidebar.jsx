@@ -1,4 +1,5 @@
 import { TextAttributes } from "@opentui/core"
+import { accessEngineName, accessSummary } from "../context/access"
 import os from "node:os"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
@@ -616,6 +617,27 @@ export function PhoneRow() {
   )
 }
 
+/**
+ * Access settings of the tab's harness, right above the harness line: a click opens them (a tab per harness), the
+ * "sync" cell copies them to the other harnesses (after a yes/no, with the harnesses to pick).
+ */
+export function AccessRow() {
+  const [hover, setHover] = createSignal(false)
+  const summary = () => (configRevision(), accessSummary(store.engine))
+  return (
+    <box flexDirection="row" justifyContent="space-between" flexShrink={0} paddingLeft={1} backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel} onMouseOver={() => setHover(true)} onMouseOut={() => setHover(false)}>
+      <text fg={theme.text} wrapMode="none" truncate flexShrink={1} onMouseUp={() => runCommand("access.settings")}>
+        <span style={{ fg: theme.primary }}>⚙</span>
+        {`  Access · ${accessEngineName(store.engine)}`}
+        <span style={{ fg: theme.textMuted }}>{` · ${summary()}`}</span>
+      </text>
+      <text fg={hover() ? theme.primary : theme.textMuted} wrapMode="none" flexShrink={0} onMouseUp={() => runCommand("access.sync")}>
+        {" ⇉ sync "}
+      </text>
+    </box>
+  )
+}
+
 /** The harness the tab's model runs in, with its version when it is known. */
 function engineLabel() {
   if (!store.engine) return `Claude Code ${store.version ?? ""}`.trim()
@@ -643,6 +665,7 @@ export function SidebarFooter() {
       <text fg={theme.textMuted} wrapMode="none" truncate>
         {location()}
       </text>
+      <AccessRow />
       <Show when={dimensions().height >= 20}>
         {/* This harness and its version; to the right, the harness the tab's model runs in. */}
         <box flexDirection="row" justifyContent="space-between" gap={1}>

@@ -12,7 +12,8 @@ import { log } from "./log"
 import { stateDir } from "./paths"
 import { findBinary, openCommand } from "./platform"
 // tabs before session: tabs.js has to load first (it imports session.js, which reaches back to it).
-import { newSession, tabs } from "./tabs"
+import { active as activeTab, newSession, tabs } from "./tabs"
+import { accessEngine, accessEngineName, accessFor, setAccess } from "./access"
 import { onSessionEvent } from "./session"
 import { machine, vc, whisperPython } from "./voice"
 
@@ -918,11 +919,13 @@ let webServer
 /** Switches the web settings page shows (the plain on/off ones; the rest live in the terminal view's Settings). */
 const WEB_SETTINGS = [
   { key: "chatByDefault", title: "New chats start in Chat mode", fallback: true },
-  { key: "autoAllow", title: "Allow everything (no permission prompts)", fallback: false },
-  { key: "askQuestions", title: "Clarifying questions", fallback: true, restart: true },
-  { key: "runTests", title: "Run tests", fallback: true, restart: true },
-  { key: "preferTools", title: "Prefer installed tools", fallback: true, restart: true },
-  { key: "installTools", title: "Install tools", fallback: false, restart: true },
+  { key: "autoAllow", title: "Allow everything (no permission prompts)", access: true },
+  { key: "askQuestions", title: "Clarifying questions", access: true },
+  { key: "runTests", title: "Run tests", access: true },
+  { key: "preferTools", title: "Prefer installed tools", access: true },
+  { key: "installTools", title: "Install software", access: true },
+  { key: "downloads", title: "Download files", access: true },
+  { key: "web", title: "Web access", access: true },
   { key: "planning", title: "Planning checklist", fallback: false, restart: true },
   { key: "subagents", title: "Subagents", fallback: true, restart: true },
   { key: "memoryUse", title: "Memory", fallback: true, restart: true },
@@ -932,7 +935,7 @@ const WEB_SETTINGS = [
 ]
 
 function webMessages(session) {
-  return session.store.messages.slice(-300).map((message) => {
+  return session.store.messages.slice(-300).filter((message) => !message.repeat).map((message) => {
     if (message.type === "user")
       return { type: "user", id: message.id, text: message.text, queued: !!message.queued, unsent: !!message.unsent, attachments: (message.attachments ?? []).map((item) => ({ name: item.name, kind: item.kind })) }
     if (message.type === "assistant")
@@ -1051,7 +1054,12 @@ async function webApi(request, response, url, parts) {
         users: webUsers(),
         agents: agentList().map((agent) => ({ id: agent.id, name: agent.name })),
         models: await webModels(),
-        settings: WEB_SETTINGS.map((item) => ({ key: item.key, title: item.title, value: config[item.key] ?? item.fallback })),
+        // Access settings are per harness: the focused tab's.
+        settings: WEB_SETTINGS.map((item) =>
+          item.access
+            ? { key: item.key, title: `${item.title} (${accessEngineName(activeTab()?.store.engine)})`, value: !!accessFor(activeTab()?.store.engine)[item.key] }
+            : { key: item.key, title: item.title, value: config[item.key] ?? item.fallback },
+        ),
         limits: { fiveHour: limits.fiveHour, week: limits.week, scoped: limits.scoped },
         tabs: tabs().map((session) => webTab(session, false)),
         active: active()?.key,
@@ -1125,6 +1133,13 @@ async function webApi(request, response, url, parts) {
     case "setting": {
       const item = WEB_SETTINGS.find((entry) => entry.key === body.name)
       if (!item) return json(response, 400, { error: "unknown setting" })
+      if (item.access) {
+        // The focused tab's harness; its idle tabs start again with the new instructions.
+        const engine = accessEngine(activeTab()?.store.engine)
+        setAccess(engine, item.key, !!body.value)
+        for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && accessEngine(tab.store.engine) === engine) void tab.restart()
+        return json(response, 200, { ok: true })
+      }
       config[item.key] = !!body.value
       saveConfig()
       if (item.restart) for (const tab of tabs()) if (tab.live && tab.store.status === "idle") void tab.restart()

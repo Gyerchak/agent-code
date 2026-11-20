@@ -28,6 +28,7 @@ import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, prov
 import { acpEffort, acpModels, acpModes, harnessById, harnessLaunch } from "./harnesses"
 import { modelVariants } from "./variants"
 import { sessionSpend, spendSnapshot } from "./spendhistory"
+import { accessFor } from "./access"
 import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, planPerPercent, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
@@ -1459,23 +1460,38 @@ function contextEnv(value        , sent         )                         {
   return context ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(context) } : {}
 }
 
-/** `context`: the session the prompt is for ({ sessionId, session }), so a part can differ per session. */
-export function behaviourPrompt(extra           = [], context = {}, skip = new Set()) {
-  const parts           = []
+/**
+ * Agent Code's instructions for one session, each with an id (so a resumed conversation can be told what changed):
+ * the registered parts, the planning checklist, the access switches, then `extra` ({ id, text } or plain text).
+ * `context`: the session the prompt is for ({ sessionId, session }), so a part can differ per session.
+ */
+export function behaviourParts(extra           = [], context = {}, skip = new Set()) {
+  const parts = []
+  const add = (id, text) => {
+    const value = typeof text === "string" ? text.trim() : ""
+    if (value) parts.push({ id, text: value })
+  }
   for (const [id, part] of promptParts) {
     if (skip.has(id)) continue
     try {
-      const text = part(context)?.trim()
-      if (text) parts.push(text)
+      add(id, part(context))
     } catch (error) {
       log("prompt part failed", error)
     }
   }
-  if (config.planning && !skip.has("planning")) parts.push(PLANNING_PROMPT)
-  if (config.runTests === false) parts.push(NO_TESTS_PROMPT)
-  if (config.askQuestions === false) parts.push(NO_QUESTIONS_PROMPT)
-  parts.push(...extra)
-  return parts.length ? parts.join("\n\n") : undefined
+  if (config.planning && !skip.has("planning")) add("planning", PLANNING_PROMPT)
+  // The tab's harness decides (each has its own access settings).
+  const access = accessFor(context.session?.store?.engine)
+  if (!access.runTests) add("noTests", NO_TESTS_PROMPT)
+  if (!access.askQuestions) add("noQuestions", NO_QUESTIONS_PROMPT)
+  extra.forEach((item, index) => (typeof item === "string" ? add(`extra-${index}`, item) : add(item.id, item.text)))
+  return parts
+}
+
+/** The same instructions as one text. */
+export function behaviourPrompt(extra           = [], context = {}, skip = new Set()) {
+  const parts = behaviourParts(extra, context, skip)
+  return parts.length ? parts.map((part) => part.text).join("\n\n") : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -1892,41 +1908,51 @@ function orchestrateCall(orch, next, currentLevel) {
 }
 
 // What each session started with, so switching something off can tell the conversation once that it's gone.
-const FEATURE_GONE = {
-  orchestrator: "orchestrator mode is off: work normally instead of planning and delegating everything, and its subagent types are gone",
-  routing: "subagent routing is off: the routed subagent types are gone",
-  planning: "the planning checklist is off",
-  noTests: "running tests is allowed again",
-  noQuestions: "asking clarifying questions is allowed again",
-  installTools: "installing new tools is no longer allowed",
+// Claude Code records a conversation's system prompt on its first request and sends that record again on every later
+// request and resume (until a compaction), whatever a later start passes: a setting changed afterwards would never
+// reach the conversation. So Agent Code remembers which of its instruction parts each conversation's record holds,
+// and when a resumed conversation's differ, it adds one note to the conversation with what changed.
+// Parts whose text moves on its own (the memory note counts memories) count only as there or not.
+const PROMPT_VOLATILE = new Set(["acode-memory-tools", "providers"])
+const textHash = (text) => {
+  let hash = 5381
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0
+  return (hash >>> 0).toString(36)
 }
-function activeFeatures(routes, orch) {
-  return [
-    orch && "orchestrator",
-    routes && "routing",
-    config.planning && "planning",
-    config.runTests === false && "noTests",
-    config.askQuestions === false && "noQuestions",
-    config.installTools === true && "installTools",
-  ].filter(Boolean)
+const partHeading = (text) => text.split("\n")[0].replace(/^#+\s*/, "").slice(0, 80)
+
+function promptRecord(parts) {
+  return Object.fromEntries(parts.map((part) => [part.id, { h: PROMPT_VOLATILE.has(part.id) ? "" : textHash(part.text), title: partHeading(part.text) }]))
 }
 
-/** The note for features this session had and has no longer (once); remembers what it has now. */
-function featureChange(sessionId, now) {
+function rememberPromptParts(sessionId, parts) {
+  if (!sessionId) return
+  const all = { ...(config.sessionPrompt ?? {}) }
+  delete all[sessionId]
+  all[sessionId] = promptRecord(parts)
+  const keys = Object.keys(all)
+  for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
+  config.sessionPrompt = all
+  saveConfig()
+}
+
+/**
+ * The note for a resumed conversation whose recorded instructions differ from Agent Code's current ones (undefined
+ * when they match, or when nothing is known about the conversation yet); remembers the current ones as told.
+ */
+function promptChange(sessionId, parts, from) {
   if (!sessionId) return undefined
-  const all = { ...(config.sessionFeatures ?? {}) }
-  const before = all[sessionId] ?? []
-  const gone = before.filter((id) => !now.includes(id))
-  if (now.length) all[sessionId] = now
-  else delete all[sessionId]
-  if (JSON.stringify(all) !== JSON.stringify(config.sessionFeatures ?? {})) {
-    const keys = Object.keys(all)
-    for (const old of keys.slice(0, Math.max(0, keys.length - 300))) delete all[old]
-    config.sessionFeatures = all
-    saveConfig()
-  }
-  if (!gone.length) return undefined
-  return `[Agent Code] The user changed settings since earlier in this conversation: ${gone.map((id) => FEATURE_GONE[id]).join("; ")}. Earlier instructions about ${gone.length === 1 ? "this" : "these"} no longer apply.`
+  const before = config.sessionPrompt?.[sessionId] ?? (from ? config.sessionPrompt?.[from] : undefined)
+  rememberPromptParts(sessionId, parts)
+  if (!before) return undefined
+  const now = promptRecord(parts)
+  const changed = parts.filter((part) => !before[part.id] || before[part.id].h !== now[part.id].h)
+  const removed = Object.keys(before).filter((id) => !now[id])
+  if (!changed.length && !removed.length) return undefined
+  const lines = ["[Agent Code] The user changed Agent Code's settings since this conversation began. Your system prompt still shows the earlier instructions; where they differ, these replace them."]
+  if (changed.length) lines.push("", ...changed.map((part) => part.text))
+  if (removed.length) lines.push("", `No longer applies (ignore these parts of your system prompt): ${removed.map((id) => `"${before[id].title || id}"`).join(", ")}.`)
+  return lines.join("\n")
 }
 
 // Claude Code's reply to a background task's note when there is nothing to say: not shown in the chat.
@@ -2063,8 +2089,12 @@ const LOGIN_ERROR = /authenticat|not logged in|log ?in again|login (has )?expire
 const acpHistoryDir = path.join(stateDir, "harness-chats")
 
 /** What the user typed, without Agent Code's notes in front of it (the earlier conversation, a mode's rule). */
+const HARNESS_INSTRUCTIONS_START = "[Agent Code instructions — from the app this chat runs in; follow them like system instructions]"
+const HARNESS_INSTRUCTIONS_END = "[End of Agent Code instructions]"
+
 export function cleanUserText(text) {
   let value = String(text ?? "")
+  value = value.replace(/^\[Agent Code instructions[^\]]*\][\s\S]*?\[End of Agent Code instructions\]\s*/, "")
   value = value.replace(/^\[Agent Code\] This conversation went on with [\s\S]*?\[End of the earlier conversation\.\]\s*/, "")
   value = value.replace(/^(\[Mode "[^"]*": [^\n]*\]\s*)+/, "")
   return value
@@ -2190,6 +2220,8 @@ function withoutKey                                   (value   , key        )   
 export function createSession(seed             ) {
   // Orchestrator mode's limits on subagents (at once, per message) for this tab.
   const agentLimits = makeAgentLimits()
+  // Agent Code's instructions this tab's Claude Code process started with (recorded again at a compaction).
+  let startedParts = []
   const key = randomUUID()
   const from = seed.from?.store
   const [store, setStore] = createStore              ({
@@ -2511,15 +2543,19 @@ export function createSession(seed             ) {
           ? providerAgents(store.model)
           : { agents: {}, lines: []             }
     const extra           = []
-    if (orch) extra.push(orchestratorPrompt(orch, !!routes))
-    if (routes) extra.push(routingPrompt(routes))
-    else if (!orch && policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push(PICK_PROMPT)
-    // Once, in the conversation: what was switched off since this session last ran (its instructions are gone).
-    const goneNote = featureChange(sessionKey, activeFeatures(routes, orch))
-    if (lines.length) extra.push(providerPrompt(lines))
-    const append = behaviourPrompt(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
+    if (orch) extra.push({ id: "orchestrator", text: orchestratorPrompt(orch, !!routes) })
+    if (routes) extra.push({ id: "routing", text: routingPrompt(routes) })
+    else if (!orch && policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push({ id: "pick", text: PICK_PROMPT })
+    if (lines.length) extra.push({ id: "providers", text: providerPrompt(lines) })
+    const instructionParts = behaviourParts(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
+    const append = instructionParts.length ? instructionParts.map((part) => part.text).join("\n\n") : undefined
+    // A resumed conversation keeps the instructions it began with (Claude Code's recorded prompt): what changed since
+    // goes in as one note. A new conversation records the current ones.
+    const goneNote = options.resume || options.continue ? promptChange(sessionKey, instructionParts, options.fork ? options.resume : undefined) : (rememberPromptParts(sessionKey, instructionParts), undefined)
+    startedParts = instructionParts
     const disallowed = [
-      ...(config.askQuestions === false ? ["AskUserQuestion"] : []),
+      ...(accessFor().askQuestions ? [] : ["AskUserQuestion"]),
+      ...(accessFor().web ? [] : ["WebFetch", "WebSearch"]),
       ...(policy.enabled ? [] : ["Agent", "Task"]),
     ]
     ensureBoxTrusted(store.cwd)
@@ -3129,6 +3165,26 @@ export function createSession(seed             ) {
     if (!running) void promptOpencode()
   }
 
+  /**
+   * A harness that reads no instructions file (opencode — its shared background service never sees per-launch
+   * settings — and Codex) gets Agent Code's instructions with the first message of a conversation, and after a
+   * settings change only what changed. The chat doesn't show them (cleanUserText).
+   */
+  function harnessInstructions() {
+    const harness = harnessById(store.engine)
+    if (!harness || harness.instructions) return undefined
+    const id = oc?.id ?? store.sessionID
+    if (!id) return undefined
+    const parts = behaviourParts([], { sessionId: id, session: api }, new Set(["acode-memory", "acode-memory-tools", "planning"]))
+    if (!parts.length) return undefined
+    if (!config.sessionPrompt?.[id]) {
+      rememberPromptParts(id, parts)
+      return `${HARNESS_INSTRUCTIONS_START}\n\n${parts.map((part) => part.text).join("\n\n")}\n\n${HARNESS_INSTRUCTIONS_END}`
+    }
+    const note = promptChange(id, parts)
+    return note ? `${HARNESS_INSTRUCTIONS_START}\n\n${note}\n\n${HARNESS_INSTRUCTIONS_END}` : undefined
+  }
+
   async function promptOpencode() {
     const session = oc
     if (!session || !ocQueue.length) return
@@ -3139,6 +3195,8 @@ export function createSession(seed             ) {
       else for (const image of item.images) prompt.push({ type: "image", mimeType: image.mime, data: image.data })
       prompt.push(...attachmentAcp(item.attachments))
     }
+    const instructions = harnessInstructions()
+    if (instructions) prompt.push({ type: "text", text: instructions })
     const carry = pendingCarry()
     if (carry) prompt.push({ type: "text", text: carry })
     prompt.push({ type: "text", text: [modeNote, items.map((item) => item.text).join("\n\n")].filter(Boolean).join("\n\n") })
@@ -4139,7 +4197,11 @@ export function createSession(seed             ) {
     input                         ,
     opts                                                                                            ,
   )                            {
-    if (toolName === "AskUserQuestion" && config.askQuestions === false) {
+    const access = accessFor(store.engine)
+    if (!access.web && /^(web_?fetch|web_?search|fetch|websearch)$/i.test(String(toolName))) {
+      return Promise.resolve({ behavior: "deny", message: "The user has turned web access off for this harness.", toolUseID: opts.toolUseID })
+    }
+    if (toolName === "AskUserQuestion" && !access.askQuestions) {
       return Promise.resolve({
         behavior: "deny",
         message: "The user has turned off clarifying questions. Make a reasonable assumption and continue.",
@@ -4150,7 +4212,7 @@ export function createSession(seed             ) {
       return Promise.resolve({ behavior: "allow", updatedInput: input, toolUseID: opts.toolUseID })
     }
     // "Allow everything" setting: approve every tool except the ones that need the user (questions, leaving plan mode).
-    if (config.autoAllow && toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode" && store.mode !== "plan") {
+    if (access.autoAllow && toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode" && store.mode !== "plan") {
       return Promise.resolve({ behavior: "allow", updatedInput: input, toolUseID: opts.toolUseID })
     }
     return new Promise((resolve) => {
@@ -4594,6 +4656,8 @@ export function createSession(seed             ) {
           "compaction",
         )
         setStore("compacting", false)
+        // A compaction records the system prompt again, from this process's instructions.
+        rememberPromptParts(store.sessionID, startedParts)
         emit("compacted")
         return
       }
@@ -4690,6 +4754,8 @@ export function createSession(seed             ) {
 
   function pushNotice(text        , variant                          , markdown = false) {
     if (!text.trim()) return
+    // A limit refusal said again (a background subagent reporting in) since the user last wrote: once is enough.
+    if (isLimitError(text) && limitShownSince(store.messages)) return
     setStore("messages", (list) => [...list, { type: "notice", id: randomUUID(), text, variant, markdown }])
   }
 
@@ -5182,10 +5248,16 @@ export function createSession(seed             ) {
       if (message.error) turn.error = assistantError(message.error, msg)
       if (message.error === "authentication_failed") needLogin()
       if (message.error === "rate_limit") limitRefusal = turn.error
+      // The same refusal again for each background subagent that reports in (each report starts a turn): shown once.
+      if (turn.error && isLimitError(turn.error) && !turn.repeat && refusalOnly(turn)) {
+        const index = store.messages.findIndex((item) => item.id === turn.id)
+        if (limitShownSince(store.messages, index)) turn.repeat = true
+      }
       // Claude Code's stand-in reply when a request fails (e.g. a usage limit): show it once, as the error.
       if (msg.model === "<synthetic>") {
         const text = syntheticText(msg)
         if (text && !turn.error) turn.error = text
+        if (turn.error && isLimitError(turn.error) && !turn.repeat && limitShownSince(store.messages, store.messages.findIndex((item) => item.id === turn.id))) turn.repeat = true
         return
       }
       const used = syncedParts
@@ -5547,6 +5619,41 @@ export function subagentLogs(cwd, sessionId) {
   return out.sort((a, b) => b.start - a.start)
 }
 
+
+/** A message that is nothing but a usage-limit refusal (no reply text, no steps). */
+function refusalOnly(message) {
+  if (message.type === "notice") return isLimitError(message.text)
+  if (message.type !== "assistant" || !message.error || !isLimitError(message.error)) return false
+  return !(message.parts ?? []).some((part) => part.type === "tool" || (part.type === "text" && String(part.text ?? "").trim()))
+}
+
+/** Whether a limit refusal is already shown since the user last wrote (before `before`, an index into the list). */
+function limitShownSince(list, before = list.length) {
+  for (let i = (before < 0 ? list.length : before) - 1; i >= 0; i--) {
+    const message = list[i]
+    if (message.type === "user") return false
+    if (!message.repeat && refusalOnly(message)) return true
+  }
+  return false
+}
+
+/**
+ * When the plan limit is hit, every background subagent fails, each failure is reported to the conversation, and
+ * each report starts a turn that is refused again: the same "You've hit your limit" many times. From the second
+ * until the user writes again, they are marked `repeat` (not shown).
+ */
+function markLimitRepeats(list) {
+  let shown = false
+  for (const message of list) {
+    if (message.type === "user") shown = false
+    else if (refusalOnly(message)) {
+      if (shown) message.repeat = true
+      shown = true
+    }
+  }
+  return list
+}
+
 function convertHistory(history                                                )            {
   const out            = []
   let turn
@@ -5588,6 +5695,8 @@ function convertHistory(history                                                )
         continue
       }
       if (entry.isMeta) continue
+      // Agent Code's own note about changed settings (sent into the conversation for the model): not the user's.
+      if (/^\[Agent Code\] The user changed /.test(text)) continue
       // Claude Code's own notes about background tasks are not the user's messages: not shown, except a failure as
       // one short line. The reply that follows is a turn of its own.
       if (entry.origin?.kind === "task-notification" || text.startsWith("<task-notification>")) {
@@ -5652,5 +5761,5 @@ function convertHistory(history                                                )
       }
     }
   }
-  return out
+  return markLimitRepeats(out)
 }

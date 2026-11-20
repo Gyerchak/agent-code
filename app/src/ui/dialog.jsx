@@ -377,6 +377,8 @@ export function DialogSelect   (props
             <For each={props.tabs}>
               {(item) => (
                 <text
+                  wrapMode="none"
+                  flexShrink={0}
                   fg={item.key === props.tab ? theme.primary : theme.textMuted}
                   attributes={item.key === props.tab ? TextAttributes.BOLD | TextAttributes.UNDERLINE : 0}
                   onMouseUp={() => props.onTab?.(item.key)}
@@ -385,7 +387,9 @@ export function DialogSelect   (props
                 </text>
               )}
             </For>
-            <text fg={theme.textMuted}>tab: switch</text>
+            <text fg={theme.textMuted} wrapMode="none" truncate flexShrink={1}>
+              tab: switch
+            </text>
           </box>
         </Show>
         <Show when={props.filter !== false}>

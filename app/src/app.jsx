@@ -1,4 +1,5 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
+import { ACCESS, ACCESS_ENGINES, accessEngine, accessFor, setAccess, syncAccess } from "./context/access"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
 import { knownSessionSpend, scanAllSpend } from "./context/spendhistory"
@@ -2235,11 +2236,7 @@ function DialogSettings() {
           { key: "box.reset", title: "Box: reset to factory default", description: "back to Agent Code's settings (own copy kept as a backup)", get: () => !ownSettings(), set: () => {} },
         ]
       : []),
-    { key: "autoAllow", title: "Allow everything", description: "approve every tool without asking", get: flag("autoAllow", false), set: write("autoAllow") },
-    { key: "askQuestions", title: "Clarifying questions", description: "Claude may ask you questions", get: flag("askQuestions", true), set: write("askQuestions"), restart: true },
-    { key: "runTests", title: "Run tests", description: "Claude may run tests and checks", get: flag("runTests", true), set: write("runTests"), restart: true },
-    { key: "preferTools", title: "Prefer tools", description: "use installed tools instead of spending tokens", get: flag("preferTools", true), set: write("preferTools"), restart: true },
-    { key: "installTools", title: "Install tools", description: "Claude may download and set up new tools", get: flag("installTools", false), set: write("installTools"), restart: true },
+    { key: "access", title: "Access (per harness)…", description: "permission prompts, installing, downloads, web, tests, questions — for each harness on its own", get: () => true, set: () => {} },
     { key: "chatByDefault", title: "New chats start in Chat mode", description: "a plain conversation, no tools unless asked (tab switches to Build or Plan)", get: flag("chatByDefault", true), set: write("chatByDefault") },
     { key: "planning", title: "Planning checklist", description: "Claude keeps a plan with checkboxes", get: flag("planning", false), set: write("planning"), restart: true },
     { key: "subagents", title: "Subagents", description: "Claude may delegate work to subagents", get: flag("subagents", true), set: write("subagents"), restart: true },
@@ -2335,6 +2332,7 @@ function DialogSettings() {
       // Saving, restoring and resetting the settings are actions, not switches.
       ...(setting.key === "transcriptDetail" ? { footer: transcriptDetail(), gutter: <text fg={theme.textMuted}>{" ≡ "}</text> } : {}),
       ...(setting.key === "autoResumeMode" ? { footer: config.autoResumeMode === "one" ? "one at a time" : "all at once", gutter: <text fg={theme.textMuted}>{" ⇄ "}</text> } : {}),
+      ...(setting.key === "access" ? { footer: accessEngine(store.engine) === "claude" ? "Claude Code" : store.engine, gutter: <text fg={theme.textMuted}>{" › "}</text> } : {}),
       ...(setting.key === "orchestrator" ? { footer: `${orchestrator().enabled ? "on" : "off"} · routing ${subagentRouting().enabled ? "on" : "off"}` } : {}),
       ...(setting.key === "stopafter" ? { footer: config.pauseNearLimit !== false ? `any limit ${config.pauseAt ?? 95}%` : "off" } : {}),
       ...(setting.key === "settings.save" ? { footer: "save", gutter: <text fg={theme.textMuted}>{" ⇩ "}</text> } : {}),
@@ -2356,6 +2354,7 @@ function DialogSettings() {
           return
         }
         if (option.value === "orchestrator") return openOrchestrator(() => setTick((n) => n + 1))
+        if (option.value === "access") return openAccess(undefined, "push")
         if (option.value === "stopafter") {
           dialog.replace(() => <DialogStopAfter />, undefined, "large")
           return
@@ -2461,6 +2460,135 @@ function DialogSettings() {
       footer={
         <text fg={theme.text}>
           enter <span style={{ fg: theme.textMuted }}>toggle</span>
+        </text>
+      }
+    />
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Access settings per harness (sidebar row above the harness line; Settings → Access…)
+// ---------------------------------------------------------------------------
+
+/** Harnesses whose access settings changed while the dialog was open: their idle tabs start again. */
+const accessChanged = new Set()
+function restartForAccess(ids) {
+  for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && ids.has(accessEngine(tab.store.engine))) void tab.restart()
+}
+
+/** Open the access settings on the focused tab's harness (or `engine`). */
+function openAccess(engine, how = "replace") {
+  const close = () => {
+    if (!accessChanged.size) return
+    restartForAccess(new Set(accessChanged))
+    accessChanged.clear()
+  }
+  if (how === "push") dialog.push(() => <DialogAccess engine={engine} />, close)
+  else dialog.replace(() => <DialogAccess engine={engine} />, close, "large")
+}
+
+const ACCESS_NOTES = {
+  claude: "Claude Code: instructions, plus permission checks and its web tools",
+  opencode: "opencode: the instructions go with each conversation's first message (later, what changed)",
+  dsh: "DeepSeek Harness: Agent Code's instructions in its AGENTS.md folder",
+  codex: "Codex: the instructions go with each conversation's first message (later, what changed)",
+}
+
+/**
+ * What the agent may do, for each harness on its own: one tab per harness (the focused tab's first). Enter switches
+ * a setting; "Sync to the other harnesses…" copies this harness's settings to the others you pick.
+ */
+function DialogAccess(props) {
+  const [engine, setEngine] = createSignal(accessEngine(props.engine ?? store.engine))
+  const [tick, setTick] = createSignal(0)
+  const installed = (id) => id === "claude" || !!harnessStatus().find((item) => item.id === id)?.installed
+  const options = createMemo(() => {
+    tick()
+    configRevision()
+    const access = accessFor(engine())
+    const note = `${installed(engine()) ? "" : "Not installed · "}${ACCESS_NOTES[engine()] ?? "Access"}`
+    return [
+      ...ACCESS.map((item) => ({
+        title: item.title,
+        value: item.key,
+        description: item.description,
+        category: note,
+        footer: access[item.key] ? "on" : "off",
+        gutter: <text fg={access[item.key] ? theme.success : theme.textMuted}>{access[item.key] ? "[x]" : "[ ]"}</text>,
+      })),
+      { title: "Sync to the other harnesses…", value: "sync", category: "All harnesses", description: "copy these settings to the ones you pick", gutter: <text fg={theme.textMuted}>{" ⇉ "}</text> },
+    ]
+  })
+  return (
+    <DialogSelect
+      title="Access"
+      tabs={ACCESS_ENGINES.map((item) => ({ key: item.id, title: item.name }))}
+      tab={engine()}
+      onTab={setEngine}
+      options={options()}
+      onSelect={(option) => {
+        if (option.value === "sync") return dialog.push(() => <DialogAccessSync from={engine()} onDone={() => setTick((n) => n + 1)} />)
+        setAccess(engine(), option.value, !accessFor(engine())[option.value])
+        accessChanged.add(engine())
+        setTick((n) => n + 1)
+      }}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>on/off · each harness keeps its own · idle tabs restart on close</span>
+        </text>
+      }
+    />
+  )
+}
+
+/**
+ * "Sync to the other harnesses": which ones (all ticked at first; enter or a click unticks one), then Yes or No.
+ */
+function DialogAccessSync(props) {
+  const from = accessEngine(props.from)
+  const others = ACCESS_ENGINES.filter((item) => item.id !== from)
+  const [picked, setPicked] = createSignal(new Set(others.map((item) => item.id)))
+  const name = ACCESS_ENGINES.find((item) => item.id === from)?.name ?? from
+  const options = createMemo(() => {
+    const chosen = picked()
+    return [
+      ...others.map((item) => ({
+        title: item.name,
+        value: `pick:${item.id}`,
+        category: "Copy to",
+        footer: chosen.has(item.id) ? "yes" : "no",
+        gutter: <text fg={chosen.has(item.id) ? theme.success : theme.textMuted}>{chosen.has(item.id) ? "[x]" : "[ ]"}</text>,
+      })),
+      { title: chosen.size ? `Yes, sync to ${chosen.size} harness${chosen.size === 1 ? "" : "es"}` : "Yes (nothing ticked)", value: "yes", category: "Are you sure? Their own settings are replaced" },
+      { title: "No, cancel", value: "no", category: "Are you sure? Their own settings are replaced" },
+    ]
+  })
+  return (
+    <DialogSelect
+      title={`Sync ${name}'s access settings to other harnesses?`}
+      options={options()}
+      onSelect={(option) => {
+        if (option.value === "no") return dialog.pop()
+        if (option.value === "yes") {
+          const targets = [...picked()]
+          if (!targets.length) return toast.show({ variant: "warning", message: "Tick at least one harness, or choose No" })
+          syncAccess(from, targets)
+          for (const id of targets) accessChanged.add(id)
+          toast.show({ variant: "success", message: `${name}'s access settings copied to ${targets.map((id) => ACCESS_ENGINES.find((item) => item.id === id)?.name ?? id).join(", ")}` })
+          props.onDone?.()
+          return dialog.pop()
+        }
+        const id = option.value.slice(5)
+        setPicked((now) => {
+          const next = new Set(now)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          return next
+        })
+      }}
+      footer={
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>tick / untick · then Yes or No</span>
         </text>
       }
     />
@@ -3298,6 +3426,8 @@ export function App() {
         toast.show({ variant: "info", message: after.on ? `Stop near any limit: at ${after.at}% · this tab` : "Stop near any limit: off · this tab" })
       },
     },
+    { id: "access.settings", title: "Access settings (this harness; each has its own)", category: "Session", slash: "access", run: () => openAccess() },
+    { id: "access.sync", title: "Sync this harness's access settings to the others…", category: "Session", run: () => dialog.replace(() => <DialogAccessSync from={store.engine} onDone={() => { restartForAccess(new Set(accessChanged)); accessChanged.clear() }} />) },
     { id: "plan.stopafter", title: "Stop after… (near any limit, an exact level, or a time)", category: "Session", slash: "stopafter", run: () => dialog.replace(() => <DialogStopAfter />, undefined, "large") },
     {
       id: "orchestrator.toggle",

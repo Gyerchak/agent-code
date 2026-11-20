@@ -272,6 +272,9 @@ export function Session() {
                   <Match when={revertIndex() >= 0 && index() + windowStart() > revertIndex()}>
                     <></>
                   </Match>
+                  <Match when={message.repeat}>
+                    <></>
+                  </Match>
                   <Match when={true}>
                     <MessageView message={message} />
                   </Match>
