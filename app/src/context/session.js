@@ -5827,7 +5827,7 @@ function convertHistory(history                                                )
         if (block.type === "text" && block.text?.trim() && !NO_REPLY.test(block.text))
           turn.parts.push({ type: "text", id: randomUUID(), text: block.text, done: true })
         else if (block.type === "thinking" && block.thinking?.trim())
-          turn.parts.push({ type: "reasoning", id: randomUUID(), text: block.thinking, start: 0, end: 0 })
+          turn.parts.push({ type: "reasoning", id: randomUUID(), text: block.thinking, start: Date.parse(entry.timestamp ?? "") || 0, end: Date.parse(entry.timestamp ?? "") || 0 })
         else if (block.type === "tool_use") {
           const part           = {
             type: "tool",

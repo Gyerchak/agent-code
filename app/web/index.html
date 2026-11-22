@@ -27,6 +27,7 @@
             <span class="avatar" id="avatar">M</span>
             <span class="user-name" id="user-name">main</span>
           </button>
+          <button class="icon" id="open-commands" title="Commands: everything the terminal app can do (Ctrl+K)">⌘</button>
           <button class="icon" id="open-terminal" title="Terminal view: everything the terminal app has (Ctrl+`)">⌨</button>
           <button class="icon" id="open-settings" title="Settings">⚙</button>
         </div>
@@ -72,6 +73,10 @@
       <!-- Agent Code's panels -->
       <aside id="right" class="right">
         <div class="panel">
+          <div class="panel-title">Controls</div>
+          <div id="controls" class="controls"></div>
+        </div>
+        <div class="panel">
           <div class="panel-title">Context</div>
           <div id="context" class="facts"></div>
         </div>
@@ -102,6 +107,26 @@
         <button class="icon" id="close-terminal" title="Back to the chat (Esc twice)">✕</button>
       </div>
       <div id="screen" class="screen" tabindex="0"></div>
+    </div>
+
+    <!-- The terminal app's dialog open now, drawn natively (every option the terminal has) -->
+    <div id="dlg" class="overlay hidden">
+      <div class="sheet dlg">
+        <div class="overlay-head"><span id="dlg-title"></span><button class="icon" id="dlg-close" title="Close (Esc)">✕</button></div>
+        <div id="dlg-tabs" class="dlg-tabs"></div>
+        <input id="dlg-filter" class="search" placeholder="Search" />
+        <div id="dlg-list" class="dlg-list"></div>
+        <div id="dlg-foot" class="small dlg-foot"></div>
+      </div>
+    </div>
+
+    <!-- Commands: the terminal's command list (ctrl+p there) -->
+    <div id="cmds" class="overlay hidden">
+      <div class="sheet dlg">
+        <div class="overlay-head"><span>Commands</span><button class="icon" id="cmds-close" title="Close (Esc)">✕</button></div>
+        <input id="cmds-filter" class="search" placeholder="Search commands (/schedules, Access, Settings…)" />
+        <div id="cmds-list" class="dlg-list"></div>
+      </div>
     </div>
 
     <!-- Settings -->

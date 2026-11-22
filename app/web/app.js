@@ -196,7 +196,7 @@ function renderPart(part, key) {
   if (part.type === "reasoning") {
     const box = document.createElement("details")
     box.className = "thought"
-    box.innerHTML = `<summary>${part.done ? `Thought${part.ms ? ` for ${Math.max(1, Math.round(part.ms / 1000))}s` : ""}` : "Thinking…"}</summary><pre>${escape(part.text)}</pre>`
+    box.innerHTML = `<summary>${part.done ? `Thought${part.at ? ` ${messageTime(part.at)}` : ""}${part.ms ? ` · ${Math.max(1, Math.round(part.ms / 1000))}s` : ""}` : "Thinking…"}</summary><pre>${escape(part.text)}</pre>`
     return keepOpen(box, key)
   }
   const box = document.createElement("details")
@@ -340,8 +340,10 @@ function renderPanels() {
   const context = []
   if (tab?.context?.tokens) context.push(`${tab.context.tokens.toLocaleString()} tokens`, `${tab.context.percent ?? 0}% used`)
   if (tab?.cost) context.push(`${money(tab.cost)} spent${tab.subCost ? ` · subagents ${money(tab.subCost)}` : ""}`)
-  if (tab?.thinkingMs >= 1000) context.push(`${span(tab.thinkingMs)} thinking`)
-  if (tab?.subThinkingMs >= 1000) context.push(`${span(tab.subThinkingMs)} subagents thinking`)
+  // Thinking, all agents together (two subagents thinking a minute each are two minutes).
+  const thought = (tab?.thinkingMs ?? 0) + (tab?.subThinkingMs ?? 0)
+  if (thought >= 1000) context.push(`${span(thought)} thinking${tab?.subThinkingMs >= 1000 ? ` · ${span(tab.subThinkingMs)} of it subagents` : ""}`)
+  renderControls()
   $("context").innerHTML = context.map((line) => `<div>${escape(line)}</div>`).join("") || "<div>—</div>"
   const limits = state.boot?.limits ?? {}
   const bar = (label, window) => {
@@ -352,6 +354,166 @@ function renderPanels() {
   }
   $("usage").innerHTML = bar("5-hour", limits.fiveHour) + bar("Weekly", limits.week) + (limits.scoped ?? []).map((window) => bar(window.name, window)).join("") || "<div>—</div>"
   $("tasks").innerHTML = (tab?.tasks ?? []).map((task) => `<div>● ${escape(task.description ?? task.type ?? "task")}</div>`).join("") || "<div>none running</div>"
+}
+
+/** The terminal sidebar's control rows: a click, a right click and ctrl+click run the same commands as there. */
+function renderControls() {
+  const box = $("controls")
+  if (!box) return
+  box.innerHTML = ""
+  for (const row of state.tab?.controls ?? []) {
+    const div = document.createElement("div")
+    div.className = `ctl${row.on ? "" : " off"}${row.highlight ? " lit" : ""}`
+    div.title = row.hint ? `${row.label} (${row.hint})` : row.label
+    div.innerHTML = `<span class="icon">${escape(row.icon ?? "")}</span><span>${escape(row.label)}<span class="extra">${escape(row.extra ?? "")}</span></span>`
+    div.onclick = (event) => void runCommandId(event.ctrlKey && row.ctrl ? row.ctrl : row.click)
+    div.oncontextmenu = (event) => {
+      event.preventDefault()
+      void runCommandId(row.right ?? row.click)
+    }
+    box.append(div)
+  }
+}
+
+async function runCommandId(id) {
+  if (!id) return
+  try {
+    await post("web/command", { id })
+  } catch (error) {
+    toast(error.message)
+  }
+  // A command may open a dialog (the page draws it) or change the tab.
+  await Promise.all([refreshDialog(), refreshTab()])
+}
+
+// --- The terminal's dialog, drawn here ----------------------------------------------------------------------------
+async function refreshDialog() {
+  try {
+    const { open, dialog } = await get("web/dialog")
+    state.dialog = open ? (dialog ?? { kind: "other" }) : undefined
+  } catch {
+    state.dialog = undefined
+  }
+  renderDialog()
+}
+const dialogAct = (op, args = {}) => post("web/dialog", { op, ...args }).catch((error) => toast(error.message)).then(() => refreshDialog())
+
+function renderDialog() {
+  const box = $("dlg")
+  const d = state.dialog
+  // In the terminal view the same dialog is on its screen already.
+  box.classList.toggle("hidden", !d || !$("terminal").classList.contains("hidden"))
+  if (!d) return
+  $("dlg-title").textContent = d.title || (d.kind === "other" ? "A dialog is open" : "")
+  const list = $("dlg-list")
+  const filter = $("dlg-filter")
+  const tabsRow = $("dlg-tabs")
+  list.innerHTML = ""
+  tabsRow.innerHTML = ""
+  filter.classList.toggle("hidden", d.kind !== "select")
+  $("dlg-foot").textContent = d.footer ?? ""
+  if (d.kind === "other") {
+    list.innerHTML = `<div class="dlg-prompt">This dialog is only in the terminal view. <button id="dlg-term">Open the terminal view</button></div>`
+    $("dlg-term").onclick = () => openTerminal?.()
+    return
+  }
+  if (d.kind === "prompt" || d.kind === "confirm") {
+    const row = document.createElement("div")
+    row.className = "dlg-prompt"
+    if (d.kind === "prompt") {
+      row.innerHTML = `<input id="dlg-input" class="search" placeholder="${escape(d.placeholder ?? "")}" value="${escape(d.value ?? "")}" /><button id="dlg-ok">OK</button>`
+      list.append(row)
+      const input = $("dlg-input")
+      const ok = () => void dialogAct("confirm", { text: input.value })
+      $("dlg-ok").onclick = ok
+      input.onkeydown = (event) => event.key === "Enter" && ok()
+      setTimeout(() => input.focus(), 0)
+    } else {
+      row.innerHTML = `<span style="flex:1">${escape(d.message ?? "")}</span><button id="dlg-yes">Yes</button><button id="dlg-no">No</button>`
+      list.append(row)
+      $("dlg-yes").onclick = () => void dialogAct("confirm")
+      $("dlg-no").onclick = () => void dialogAct("close")
+    }
+    return
+  }
+  for (const tab of d.tabs ?? []) {
+    const button = document.createElement("button")
+    button.textContent = tab.title
+    button.className = tab.key === d.tab ? "on" : ""
+    button.onclick = () => void dialogAct("tab", { key: tab.key })
+    tabsRow.append(button)
+  }
+  if (document.activeElement !== filter) filter.value = d.filter ?? ""
+  let category
+  for (const option of d.options ?? []) {
+    if (option.category !== category) {
+      category = option.category
+      if (category) {
+        const head = document.createElement("div")
+        head.className = "dlg-cat"
+        head.textContent = category
+        list.append(head)
+      }
+    }
+    const row = document.createElement("div")
+    row.className = `dlg-row${option.value === d.selected ? " sel" : ""}`
+    row.innerHTML = `<span class="mark">${escape(option.mark ?? "")}</span><span>${escape(option.title)}</span><span class="desc">${escape(option.description ?? "")}</span><span class="chips"></span><span class="foot">${escape(option.footer ?? "")}</span>`
+    const chips = row.querySelector(".chips")
+    const chip = (label, run) => {
+      const button = document.createElement("button")
+      button.textContent = label
+      button.onclick = (event) => {
+        event.stopPropagation()
+        run()
+      }
+      chips.append(button)
+    }
+    if (option.side) chip(option.side, () => void dialogAct("side", { value: option.value }))
+    for (const action of d.actions ?? []) chip(action.label, () => void dialogAct("action", { value: option.value, keybind: action.keybind }))
+    row.onclick = () => void dialogAct("select", { value: option.value })
+    row.oncontextmenu = (event) => {
+      event.preventDefault()
+      if (d.rightClick) void dialogAct("right", { value: option.value })
+    }
+    list.append(row)
+  }
+}
+
+// --- The command list (ctrl+p in the terminal) ----------------------------------------------------------------------
+async function openCommands() {
+  $("cmds").classList.remove("hidden")
+  try {
+    state.commands = (await get("web/commands")).commands
+  } catch (error) {
+    toast(error.message)
+  }
+  $("cmds-filter").value = ""
+  renderCommands()
+  setTimeout(() => $("cmds-filter").focus(), 0)
+}
+function renderCommands() {
+  const needle = $("cmds-filter").value.trim().toLowerCase()
+  const list = $("cmds-list")
+  list.innerHTML = ""
+  let category
+  const shown = (state.commands ?? []).filter((item) => !needle || `${item.title} ${item.category} /${item.slash ?? ""}`.toLowerCase().includes(needle))
+  for (const item of shown.sort((a, b) => a.category.localeCompare(b.category))) {
+    if (item.category !== category) {
+      category = item.category
+      const head = document.createElement("div")
+      head.className = "dlg-cat"
+      head.textContent = category || "Other"
+      list.append(head)
+    }
+    const row = document.createElement("div")
+    row.className = "dlg-row"
+    row.innerHTML = `<span>${escape(item.title)}</span><span class="desc"></span><span class="foot">${item.slash ? `/${escape(item.slash)}` : ""}</span>`
+    row.onclick = () => {
+      $("cmds").classList.add("hidden")
+      void runCommandId(item.id)
+    }
+    list.append(row)
+  }
 }
 
 function renderComposer() {
@@ -477,6 +639,8 @@ async function sendMessage() {
     input.value = text
   }
   await refreshTab()
+  // A slash command may have opened one of the terminal's dialogs: it is drawn here.
+  if (text.startsWith("/")) void refreshDialog()
   setTimeout(refreshSessions, 1500)
 }
 
@@ -676,6 +840,30 @@ function layout(part, hidden) {
 }
 
 function wire() {
+  $("open-commands").onclick = () => void openCommands()
+  $("cmds-close").onclick = () => $("cmds").classList.add("hidden")
+  $("cmds-filter").oninput = renderCommands
+  $("cmds-filter").onkeydown = (event) => {
+    if (event.key === "Enter") $("cmds-list").querySelector(".dlg-row")?.click()
+    if (event.key === "Escape") $("cmds").classList.add("hidden")
+  }
+  $("dlg-close").onclick = () => void dialogAct("close")
+  let filterTimer
+  $("dlg-filter").oninput = () => {
+    clearTimeout(filterTimer)
+    filterTimer = setTimeout(() => void dialogAct("filter", { text: $("dlg-filter").value }), 150)
+  }
+  $("dlg-filter").onkeydown = (event) => {
+    if (event.key === "Enter" && state.dialog?.options?.length) void dialogAct("select", { value: state.dialog.selected ?? state.dialog.options[0].value })
+  }
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault()
+      void openCommands()
+    }
+    // Esc closes the dialog drawn here (in the terminal view the keys go to the program itself).
+    if (event.key === "Escape" && state.dialog && $("terminal").classList.contains("hidden")) void dialogAct("close")
+  })
   if (localStorage.getItem("acode.web.theme") === "light") document.documentElement.classList.add("light")
   for (const part of ["left", "right"]) if (localStorage.getItem(`acode.web.${part}`) === "hidden") document.querySelector(".app").classList.add(`${part}-hidden`)
   $("collapse-left").onclick = () => layout("left", true)
@@ -692,8 +880,37 @@ function wire() {
   $("search").oninput = renderSessions
   $("send").onclick = () => void sendMessage()
   const input = $("input")
-  input.oninput = autosize
+  // "/" at the start: the terminal's slash commands, as suggestions (a click, or Tab, puts one in).
+  const slashBox = document.createElement("div")
+  slashBox.className = "slash-box hidden"
+  $("composer-wrap").prepend(slashBox)
+  const showSlash = async () => {
+    const text = input.value
+    if (!/^\/[^\s]*$/.test(text)) return slashBox.classList.add("hidden")
+    if (!state.commands) state.commands = (await get("web/commands").catch(() => ({ commands: [] }))).commands
+    const query = text.slice(1).toLowerCase()
+    const hits = state.commands.filter((item) => item.slash && item.slash.toLowerCase().includes(query)).sort((a, b) => (b.slash.toLowerCase().startsWith(query) ? 1 : 0) - (a.slash.toLowerCase().startsWith(query) ? 1 : 0)).slice(0, 8)
+    slashBox.innerHTML = hits.map((item) => `<div class="dlg-row" data-slash="${escape(item.slash)}"><b>/${escape(item.slash)}</b><span class="desc">${escape(item.title)}</span></div>`).join("")
+    slashBox.classList.toggle("hidden", !hits.length)
+    for (const row of slashBox.querySelectorAll(".dlg-row"))
+      row.onclick = () => {
+        input.value = `/${row.dataset.slash}`
+        slashBox.classList.add("hidden")
+        void sendMessage()
+      }
+  }
+  input.oninput = () => {
+    autosize()
+    void showSlash()
+  }
   input.onkeydown = (event) => {
+    if (event.key === "Tab" && !slashBox.classList.contains("hidden")) {
+      event.preventDefault()
+      const first = slashBox.querySelector(".dlg-row")
+      if (first) input.value = `/${first.dataset.slash}`
+      return
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) slashBox.classList.add("hidden")
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
       void sendMessage()
@@ -790,6 +1007,7 @@ function listen() {
     if (data.key === state.active) later("tab", refreshTab)
   })
   source.addEventListener("tabs", () => later("tabs", () => refreshBoot().then(render)))
+  source.addEventListener("dialog", () => later("dialog", refreshDialog))
   source.onerror = () => {
     // Agent Code restarting (another user, a reset), sleep, a network blip: the browser reconnects by itself.
   }

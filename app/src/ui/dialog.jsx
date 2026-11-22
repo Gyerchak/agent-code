@@ -1,6 +1,6 @@
 import { RGBA, TextAttributes,                                                } from "@opentui/core"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
-import { batch, createEffect, createMemo, For, on, Show,          } from "solid-js"
+import { batch, createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { theme } from "../context/theme"
 import { matchesId, shortcut, useLayer,              } from "../context/keymap"
@@ -18,6 +18,47 @@ export function setDialogRefocus(fn            ) {
 }
 
 const rememberedRows = new Map()
+
+// The open dialog as data, for the web app: it draws the same dialog natively and acts on it through `mirrorAct`, so
+// every option the terminal has is there too. Only the dialog on top is drawn, and mirrored.
+const [mirrorState, setMirrorState] = createSignal()
+export const dialogMirror = mirrorState
+let mirrorHandlers
+let mirrorOwner
+export function mirrorAct(op, args = {}) {
+  const handler = mirrorHandlers?.[op]
+  if (!handler) return false
+  handler(args)
+  return true
+}
+function mirror(owner, state, handlers) {
+  mirrorOwner = owner
+  mirrorHandlers = handlers
+  setMirrorState(state)
+}
+function unmirror(owner) {
+  if (mirrorOwner !== owner) return
+  mirrorOwner = undefined
+  mirrorHandlers = undefined
+  setMirrorState(undefined)
+}
+/** Plain text of a label, a footer or a gutter (a string, or a drawn text element). */
+function plain(value) {
+  if (value === undefined || value === null || value === false) return ""
+  if (typeof value === "string" || typeof value === "number") return String(value)
+  // A drawn <text>: its chunks once laid out, else its text nodes (strings, or nodes with children).
+  const fromNode = (node) => (typeof node === "string" ? node : Array.isArray(node?.children) ? node.children.map(fromNode).join("") : String(node?.text ?? ""))
+  try {
+    return (
+      value.chunks?.map?.((chunk) => chunk.text).join("") ||
+      (value.textNode ? fromNode(value.textNode) : "") ||
+      (value.getTextChildren?.() ?? []).map(fromNode).join("") ||
+      String(value.plainText ?? "")
+    )
+  } catch {
+    return ""
+  }
+}
 
 export const dialog = {
   get open() {
@@ -292,6 +333,59 @@ export function DialogSelect   (props
       },
     ),
   )
+
+  const mirrorKey = {}
+  createEffect(() => {
+    const options = flat()
+    const byValue = (value) => options.find((option) => String(option.value) === String(value))
+    mirror(
+      mirrorKey,
+      {
+        kind: "select",
+        title: plain(props.title),
+        filter: store.filter,
+        tabs: props.tabs,
+        tab: props.tab,
+        selected: selected()?.value !== undefined ? String(selected().value) : undefined,
+        options: options.map((option) => ({
+          value: String(option.value),
+          title: plain(option.title),
+          description: plain(option.description),
+          category: option.category ?? "",
+          footer: plain(option.footer),
+          mark: plain(option.gutter),
+          side: props.side && option.side !== false ? props.side.label : undefined,
+        })),
+        actions: (props.actions ?? []).filter((action) => action.label).map((action) => ({ keybind: action.keybind, label: action.label })),
+        rightClick: !!props.onRightClick,
+        footer: plain(props.footer),
+      },
+      {
+        select: ({ value }) => choose(byValue(value)),
+        right: ({ value }) => {
+          const option = byValue(value)
+          if (option) props.onRightClick?.(option)
+        },
+        side: ({ value }) => {
+          const option = byValue(value)
+          if (option) props.side?.run(option)
+        },
+        action: ({ value, keybind }) => {
+          const option = byValue(value)
+          const action = (props.actions ?? []).find((item) => item.keybind === keybind)
+          if (option && action) action.run(option)
+        },
+        tab: ({ key }) => props.onTab?.(key),
+        filter: ({ text }) => {
+          setStore("filter", String(text ?? ""))
+          props.search?.(String(text ?? ""))
+          props.onFilter?.(String(text ?? ""))
+        },
+        close: () => dialog.pop(),
+      },
+    )
+  })
+  onCleanup(() => unmirror(mirrorKey))
 
   function move(delta        ) {
     const count = flat().length
@@ -593,6 +687,12 @@ export function truncate(text        , width        ) {
 
 export function DialogPrompt(props                                                                                             ) {
   let input
+  const mirrorKey = {}
+  mirror(mirrorKey, { kind: "prompt", title: plain(props.title), placeholder: props.placeholder ?? "", value: props.value ?? "" }, {
+    confirm: ({ text }) => props.onConfirm(String(text ?? "")),
+    close: () => (props.onCancel ? props.onCancel() : dialog.pop()),
+  })
+  onCleanup(() => unmirror(mirrorKey))
   useLayer({
     priority: 101,
     commands: () => [],
@@ -641,6 +741,9 @@ export function DialogConfirm(props                                             
     else if (props.onCancel) props.onCancel()
     else dialog.pop()
   }
+  const mirrorKey = {}
+  mirror(mirrorKey, { kind: "confirm", title: plain(props.title), message: plain(props.message) }, { confirm: () => decide("confirm"), close: () => decide("cancel") })
+  onCleanup(() => unmirror(mirrorKey))
   useLayer({
     priority: 101,
     commands: () => [],

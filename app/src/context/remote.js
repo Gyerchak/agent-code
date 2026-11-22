@@ -14,6 +14,10 @@ import { findBinary, openCommand, spawnOptions } from "./platform"
 // tabs before session: tabs.js has to load first (it imports session.js, which reaches back to it).
 import { active as activeTab, newSession, tabs } from "./tabs"
 import { accessEngine, accessEngineName, accessFor, setAccess } from "./access"
+import { controlRows } from "./controls"
+import { allCommands, runCommand } from "./keymap"
+import { dialog as dialogStack, dialogMirror, mirrorAct } from "../ui/dialog"
+import { createEffect, createRoot } from "solid-js"
 import { onSessionEvent } from "./session"
 import { machine, vc, whisperPython } from "./voice"
 
@@ -290,6 +294,12 @@ async function handleApi(request, response, url) {
         const attachments = await saveUploads(body.attachments)
         const text = String(body.text ?? "").trim() || (attachments.length ? "See the attached files." : "")
         if (!text) return json(response, 400, { error: "empty" })
+        // "/schedules", "/models"…: the terminal's own command (its dialog opens in the page), not a message.
+        const command = !attachments.length && slashCommand(text)
+        if (command) {
+          runCommand(command.id)
+          return json(response, 200, { ok: true, command: command.id })
+        }
         session.send(text, { attachments })
         return json(response, 200, { ok: true })
       }
@@ -953,7 +963,7 @@ function webMessages(session) {
         error: message.error,
         parts: message.parts.map((part) => {
           if (part.type === "text") return { type: "text", text: part.text }
-          if (part.type === "reasoning") return { type: "reasoning", text: part.text.slice(0, 4000), done: part.end !== undefined, ms: part.end && part.start ? part.end - part.start : 0 }
+          if (part.type === "reasoning") return { type: "reasoning", text: part.text.slice(0, 4000), done: part.end !== undefined, ms: part.end && part.start ? part.end - part.start : 0, at: part.start || part.end || undefined }
           return {
             type: "tool",
             id: part.id,
@@ -971,6 +981,22 @@ function webMessages(session) {
   })
 }
 
+/** The terminal's command list, for the page's palette. */
+function webCommands() {
+  return allCommands()
+    .filter((command) => command.palette !== false && command.title && (!command.enabled || command.enabled()))
+    .map((command) => ({ id: command.id, title: String(command.title), category: command.category ?? "", slash: command.slash }))
+}
+
+/** A typed "/name" that is one of the terminal's commands (its own name first, then an alias; any case). */
+function slashCommand(text) {
+  const match = text.match(/^\/([^\s]+)$/)
+  if (!match) return undefined
+  const name = match[1].toLowerCase()
+  const usable = allCommands().filter((command) => !command.enabled || command.enabled())
+  return usable.find((command) => command.slash?.toLowerCase() === name) ?? usable.find((command) => command.slashAliases?.some((alias) => alias.toLowerCase() === name))
+}
+
 function webTab(session, full) {
   const s = session.store
   return {
@@ -986,6 +1012,8 @@ function webTab(session, full) {
     subCost: (s.historySubCost ?? 0) + (s.subCost ?? 0) + (s.liveSubCost ?? 0),
     thinkingMs: s.thinkingMs ?? 0,
     subThinkingMs: s.subThinkingMs ?? 0,
+    // The sidebar's control rows (Schedules, Resume at, Stop at, Break, the switches, Access).
+    controls: controlRows(s, phoneServerState()).map(({ color, ...row }) => row),
     tasks: Object.values(s.tasks ?? {}).map((task) => ({ description: task.description, type: task.type })),
     ...(full
       ? {
@@ -1099,6 +1127,9 @@ async function webApi(request, response, url, parts) {
       return session ? json(response, 200, webTab(session, true)) : json(response, 404, { error: "no such tab" })
     }
     if (what === "alive") return json(response, 200, { pages: clients.size })
+    // Everything the terminal's command list (ctrl+p) has, and the dialog open now (drawn by the page natively).
+    if (what === "commands") return json(response, 200, { commands: webCommands() })
+    if (what === "dialog") return json(response, 200, { open: dialogStack.open, dialog: dialogMirror() })
     if (what === "screen") {
       const now = webScreen()
       return json(response, 200, Number(url.searchParams.get("have")) === now.id ? { id: now.id, same: true } : now)
@@ -1201,6 +1232,14 @@ async function webApi(request, response, url, parts) {
       if (result.status !== 0) return json(response, 500, { error: output || "acode-box failed" })
       return json(response, 200, { ok: true, output, dir, open: path.join(dir, "box", "scripts", "acode-box.sh") + " web" })
     }
+    case "command": {
+      const ok = runCommand(String(body.id ?? ""))
+      return json(response, ok ? 200 : 404, ok ? { ok: true } : { error: "no such command here" })
+    }
+    case "dialog": {
+      const ok = mirrorAct(String(body.op ?? ""), body)
+      return json(response, ok ? 200 : 409, ok ? { ok: true } : { error: "that dialog is not open any more" })
+    }
     case "openurl": {
       const target = String(body.url ?? "")
       if (!/^https?:\/\//i.test(target)) return json(response, 400, { error: "only web links" })
@@ -1261,6 +1300,13 @@ export function startWebServer(memory, env = {}) {
   webEnvSaved = env
   webToken = env.ACODE_WEB_TOKEN || randomBytes(18).toString("base64url")
   webCode = env.ACODE_WEB_CODE
+  // The page hears when a dialog opens, changes or closes.
+  createRoot(() =>
+    createEffect(() => {
+      dialogMirror()
+      broadcast("dialog", {})
+    }),
+  )
   const port = Number(env.ACODE_WEB_PORT) || 7790
   listenToSessions()
   // Nothing draws by itself without a terminal: a few frames a second keep layout, scrolling and the view current.

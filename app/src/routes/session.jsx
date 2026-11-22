@@ -928,6 +928,9 @@ function ReasoningView(props                         ) {
       <text fg={fg()} wrapMode="none" truncate>
         <span>{expanded() ? "- " : "+ "}</span>
         <span>Thought</span>
+        <Show when={props.part.start || props.part.end}>
+          <span style={{ fg: theme.textMuted }}> {messageTime(props.part.start || props.part.end)}</span>
+        </Show>
         <Show when={!expanded() && content()}>
           <span>: {reasoningTitle(content())}</span>
         </Show>

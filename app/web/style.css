@@ -190,3 +190,31 @@ textarea#input { width: 100%; resize: none; border: 0; outline: none; background
 
 /* When a message was sent. */
 .msg-user .time { display: block; margin-top: 4px; font-size: 0.78em; opacity: 0.55; }
+
+/* Controls (the terminal sidebar's rows), the mirrored dialog and the command list. */
+.controls .ctl { display: flex; gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 0.92em; }
+.controls .ctl:hover { background: var(--hover, rgba(255,255,255,0.06)); }
+.controls .ctl.off { opacity: 0.6; }
+.controls .ctl.lit { background: rgba(250, 178, 131, 0.12); }
+.controls .ctl .icon { width: 1.2em; text-align: center; }
+.controls .ctl .extra { opacity: 0.6; }
+.sheet.dlg { max-width: 760px; width: min(760px, 94vw); max-height: 84vh; display: flex; flex-direction: column; }
+.dlg-tabs { display: flex; gap: 14px; padding: 4px 14px 8px; flex-wrap: wrap; }
+.dlg-tabs button { background: none; border: 0; color: inherit; opacity: 0.6; cursor: pointer; padding: 2px 0; font: inherit; }
+.dlg-tabs button.on { opacity: 1; font-weight: 600; border-bottom: 2px solid currentColor; }
+.dlg-list { overflow: auto; padding: 4px 8px 10px; flex: 1; }
+.dlg-cat { font-weight: 600; font-size: 0.85em; opacity: 0.8; margin: 10px 6px 4px; color: #fab283; }
+.dlg-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.dlg-row:hover, .dlg-row.sel { background: rgba(255,255,255,0.07); }
+.dlg-row .mark { font-family: monospace; opacity: 0.85; min-width: 2.2em; }
+.dlg-row .desc { opacity: 0.55; font-size: 0.9em; flex: 1; }
+.dlg-row .foot { opacity: 0.65; font-size: 0.9em; white-space: nowrap; }
+.dlg-row .chips { display: none; gap: 6px; }
+.dlg-row:hover .chips { display: inline-flex; }
+.dlg-row .chips button { font-size: 0.8em; padding: 1px 6px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.2); background: none; color: inherit; cursor: pointer; }
+.dlg-foot { padding: 6px 14px 12px; opacity: 0.6; }
+.dlg-prompt { display: flex; gap: 8px; padding: 12px 14px; }
+.dlg-prompt input { flex: 1; }
+
+.slash-box { background: var(--panel, #141414); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; margin: 0 0 6px; padding: 4px; max-height: 280px; overflow: auto; }
+.slash-box.hidden { display: none; }

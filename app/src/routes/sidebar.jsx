@@ -1,5 +1,6 @@
 import { TextAttributes } from "@opentui/core"
-import { accessEngineName, accessSummary } from "../context/access"
+import { accessEngineName } from "../context/access"
+import { scheduleControls } from "../context/controls"
 import os from "node:os"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
@@ -69,32 +70,29 @@ const span = (ms) => {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
 }
 
-/** The session's thinking time so far (live while it thinks), and the subagents' apart. */
+/**
+ * Thinking time so far, all agents together (live while one thinks): two subagents thinking a minute each are two
+ * minutes. The subagents' share after it.
+ */
 function ThinkingTime() {
   const [now, setNow] = createSignal(Date.now())
   const timer = setInterval(() => (store.thinkingSince !== undefined || store.subThinkingOpen?.length) && setNow(Date.now()), 1000)
   onCleanup(() => clearInterval(timer))
   const main = () => (store.thinkingMs ?? 0) + (store.thinkingSince !== undefined ? Math.max(0, now() - store.thinkingSince) : 0)
   const sub = () => (store.subThinkingMs ?? 0) + (store.subThinkingOpen ?? []).reduce((sum, start) => sum + Math.max(0, now() - start), 0)
+  const thinkingNow = () => store.thinkingSince !== undefined || !!store.subThinkingOpen?.length
   return (
-    <>
-      <Show when={main() >= 1000}>
-        <text fg={theme.textMuted}>
-          {span(main())} thinking{store.thinkingSince !== undefined ? " ·" : ""}
-          <Show when={store.thinkingSince !== undefined}>
-            <span style={{ fg: theme.warning }}> now</span>
-          </Show>
-        </text>
-      </Show>
-      <Show when={sub() >= 1000}>
-        <text fg={theme.textMuted}>
-          {span(sub())} subagents thinking
-          <Show when={store.subThinkingOpen?.length}>
-            <span style={{ fg: theme.warning }}> · now</span>
-          </Show>
-        </text>
-      </Show>
-    </>
+    <Show when={main() + sub() >= 1000}>
+      <text fg={theme.textMuted}>
+        {span(main() + sub())} thinking
+        <Show when={sub() >= 1000}>
+          <span> · {span(sub())} of it subagents</span>
+        </Show>
+        <Show when={thinkingNow()}>
+          <span style={{ fg: theme.warning }}> · now</span>
+        </Show>
+      </text>
+    </Show>
   )
 }
 
@@ -466,98 +464,33 @@ function PlanRow(props) {
   )
 }
 
-const planned = () => (configRevision(), scheduleOf(store.sessionID))
-const nextOf = (list) => list.filter((entry) => entry.at).sort((a, b) => a.at - b.at)[0]
+/** One of the schedule rows (context/controls.js: the web app shows the same). */
+function ControlRow(props) {
+  const row = () => (clock(), configRevision(), scheduleControls(store).find((item) => item.id === props.id))
+  return (
+    <PlanRow
+      icon={row().icon}
+      on={row().on}
+      highlight={row().highlight}
+      color={theme[row().color] ?? theme.warning}
+      label={row().label}
+      extra={row().extra}
+      hint={row().hint}
+      click={row().click}
+      right={row().right}
+      ctrl={row().ctrl}
+    />
+  )
+}
 
 /** Schedules: how much is planned for this tab; a click lists it all, a right click freezes / unfreezes it all. */
-export function SchedulesRow() {
-  const live = () => planned().filter((entry) => !entry.frozen)
-  const frozen = () => planned().length - live().length
-  const count = () => new Set(live().map((entry) => entry.group ?? entry.id)).size
-  return (
-    <PlanRow
-      icon="☰"
-      on={count() > 0}
-      color={theme.primary}
-      label={`Schedules · ${count() ? `${count()} planned` : "none"}`}
-      extra={frozen() ? ` · ${frozen()} frozen` : ""}
-      hint="list · right click: freeze all"
-      click="schedules"
-      right="schedule.freeze.all"
-    />
-  )
-}
-
+export const SchedulesRow = () => <ControlRow id="schedules" />
 /** Resume at: the next planned resume (a break's own is on the Break row). */
-export function ResumeRow() {
-  const all = () => planned().filter((entry) => entry.kind === "resume" && !entry.group)
-  const next = () => nextOf(all().filter((entry) => !entry.frozen))
-  return (
-    <PlanRow
-      icon="⏵"
-      on={!!next()}
-      color={theme.success}
-      label={next() ? `Resume at ${whenText(next().at)}` : all().length ? "Resume at: frozen" : "Resume at: none"}
-      extra={next() ? ` · ${untilText(next().at)}` : ""}
-      hint="plan · right click: freeze"
-      click="schedule.resume"
-      right="schedule.freeze.resume"
-    />
-  )
-}
-
+export const ResumeRow = () => <ControlRow id="resume" />
 /** Stop at: the closest planned stop (a time, then a limit level, then near any limit). */
-export function StopAfterRow() {
-  const all = () => planned().filter((entry) => entry.kind === "stop" && !entry.group)
-  const live = () => all().filter((entry) => !entry.frozen)
-  const first = () => nextOf(live()) ?? live().find((entry) => entry.window) ?? live().find((entry) => entry.guard)
-  const guard = () => live().find((entry) => entry.guard)
-  return (
-    <PlanRow
-      icon="⏹"
-      on={!!first()}
-      label={first() ? describeEntry(first()) : all().length ? "Stop at: frozen" : "Stop at: none"}
-      extra={first()?.at ? ` · ${untilText(first().at)}${guard() ? ` · any ${guard().guard}%` : ""}` : first() && !first().guard && guard() ? ` · any ${guard().guard}%` : ""}
-      hint="plan · right click: freeze"
-      click="schedule.stop"
-      right="schedule.freeze.stop"
-    />
-  )
-}
-
-/**
- * Break (it was "Pause"): stop, then resume. Not on a break: a click plans one (when to stop, when to go on),
- * ctrl+click stops at once; the next planned break shows. On one (or stopped): a click goes on now.
- */
-export function PauseBar() {
-  const paused = () => store.pause
-  const breaks = () => planned().filter((entry) => entry.group && !entry.frozen)
-  const nextBreak = () => {
-    const stop = nextOf(breaks().filter((entry) => entry.kind === "stop"))
-    if (!stop) return undefined
-    const back = breaks().find((entry) => entry.group === stop.group && entry.kind === "resume")
-    return ` · ${whenText(stop.at)} → ${back ? whenText(back.at) : "until resumed"}`
-  }
-  const label = () => {
-    const p = paused()
-    if (!p) return "Break"
-    const when = p.until ? `until ${whenText(p.until)}` : "until you resume"
-    return `${p.reason === "break" ? "On break" : p.reason === "limit" || p.reason === "stop" ? "Stopped" : "Paused"} · ${when}`
-  }
-  return (
-    <PlanRow
-      icon={paused() ? "▶" : "⏸"}
-      on={!!paused() || !!nextBreak()}
-      highlight={!!paused()}
-      label={label()}
-      extra={paused() ? "" : nextBreak() ?? ""}
-      hint={paused() ? (paused().reason === "limit" ? "click: go on to 100%" : "click: go on now") : "plan · ctrl+click: now · right click: freeze"}
-      click="session.pause"
-      ctrl={paused() ? "session.pause" : "pause.now"}
-      right="schedule.freeze.break"
-    />
-  )
-}
+export const StopAfterRow = () => <ControlRow id="stop" />
+/** Break (it was "Pause"): stop, then resume; ctrl+click stops at once; on a break a click goes on now. */
+export const PauseBar = () => <ControlRow id="break" />
 
 /** One switch row of the sidebar's footer: a click runs `toggle`, a right click `settings`. */
 function SwitchRow(props) {
@@ -671,21 +604,26 @@ export function PhoneRow() {
 }
 
 /**
- * Access settings of the tab's harness, right above the harness line: a click opens them (a tab per harness), the
- * "sync" cell copies them to the other harnesses (after a yes/no, with the harnesses to pick).
+ * Access settings of the tab's harness, right above the harness line: a click opens them (a tab per harness), a right
+ * click copies them to the other harnesses (after a yes/no, with the harnesses to pick).
  */
 export function AccessRow() {
   const [hover, setHover] = createSignal(false)
-  const summary = () => (configRevision(), accessSummary(store.engine))
   return (
-    <box flexDirection="row" justifyContent="space-between" flexShrink={0} paddingLeft={1} backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel} onMouseOver={() => setHover(true)} onMouseOut={() => setHover(false)}>
-      <text fg={theme.text} wrapMode="none" truncate flexShrink={1} onMouseUp={() => runCommand("access.settings")}>
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={(event) => runCommand(event?.button === 2 ? "access.sync" : "access.settings")}
+    >
+      <text fg={theme.text} wrapMode="none" truncate>
         <span style={{ fg: theme.primary }}>⚙</span>
         {`  Access · ${accessEngineName(store.engine)}`}
-        <span style={{ fg: theme.textMuted }}>{` · ${summary()}`}</span>
-      </text>
-      <text fg={hover() ? theme.primary : theme.textMuted} wrapMode="none" flexShrink={0} onMouseUp={() => runCommand("access.sync")}>
-        {" ⇉ sync "}
+        <Show when={hover()}>
+          <span style={{ fg: theme.textMuted }}> (right click: copy to the others)</span>
+        </Show>
       </text>
     </box>
   )
