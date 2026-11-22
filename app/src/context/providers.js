@@ -473,7 +473,7 @@ export async function providerEnv(value                    , sessionId          
   const protocol = await protocolOf(provider, split.model)
   const session = provider.sessionHeader && sessionId ? { "x-opencode-session": sessionId } : undefined
   // Always through Agent Code's proxy: it translates protocols and writes the model's variant into each request.
-  const baseURL = await proxyURL({ baseURL: provider.baseURL, apiKey: provider.apiKey, protocol, headers: session, model: value })
+  const baseURL = await proxyURL({ baseURL: provider.baseURL, apiKey: provider.apiKey, provider: provider.id, protocol, headers: session, model: value })
   // Local Ollama: a variant whose context fits the GPU (the default 4K would cut Claude Code's prompt).
   const model = providerKind(value) === "local" ? await localModel(provider.baseURL, split.model) : split.model
   log("provider", split.provider.id, model, protocol)
@@ -511,7 +511,7 @@ export async function routerEnv(sessionId                    , main         )   
       return {
         model: name,
         protocol,
-        upstream: { baseURL: provider.baseURL, apiKey: provider.apiKey, protocol, headers },
+        upstream: { baseURL: provider.baseURL, apiKey: provider.apiKey, provider: provider.id, protocol, headers },
       }
     },
   })

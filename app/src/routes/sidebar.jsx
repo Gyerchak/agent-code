@@ -1,6 +1,6 @@
 import { TextAttributes } from "@opentui/core"
 import { accessEngineName } from "../context/access"
-import { scheduleControls } from "../context/controls"
+import { loginControls, scheduleControls } from "../context/controls"
 import os from "node:os"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
@@ -466,7 +466,7 @@ function PlanRow(props) {
 
 /** One of the schedule rows (context/controls.js: the web app shows the same). */
 function ControlRow(props) {
-  const row = () => (clock(), configRevision(), scheduleControls(store).find((item) => item.id === props.id))
+  const row = () => (clock(), configRevision(), [...scheduleControls(store), ...loginControls(store)].find((item) => item.id === props.id))
   return (
     <PlanRow
       icon={row().icon}
@@ -480,6 +480,16 @@ function ControlRow(props) {
       right={row().right}
       ctrl={row().ctrl}
     />
+  )
+}
+
+/** The Claude login this tab runs on (shown when there is more than one). */
+export function LoginRow() {
+  const shown = () => (configRevision(), loginControls(store).length > 0)
+  return (
+    <Show when={shown()}>
+      <ControlRow id="login" />
+    </Show>
   )
 }
 
@@ -659,6 +669,7 @@ export function SidebarFooter() {
         {location()}
       </text>
       <AccessRow />
+      <LoginRow />
       <Show when={dimensions().height >= 20}>
         {/* This harness and its version; to the right, the harness the tab's model runs in. */}
         <box flexDirection="row" justifyContent="space-between" gap={1}>

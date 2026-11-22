@@ -3,6 +3,7 @@
 // ctrl are command ids (a click, a right click, ctrl+click).
 import { accessEngineName } from "./access"
 import { config } from "./config"
+import { blockedUntil, chosenLogin, loginLabel, loginRule, loginsOf } from "./logins"
 import { describeEntry, fableFallback, fableUpgrade, orchestrator, scheduleOf, subagentRouting, untilText, whenText } from "./session"
 
 const nextOf = (list) => list.filter((entry) => entry.at).sort((a, b) => a.at - b.at)[0]
@@ -79,6 +80,28 @@ export function scheduleControls(s) {
   ]
 }
 
+/** The Claude login a tab runs on, when there is more than one. */
+export function loginControls(s) {
+  const list = loginsOf("anthropic")
+  if (list.length < 2 || s.engine) return []
+  const on = s.login ?? chosenLogin("anthropic").id
+  const preferred = loginRule("anthropic").prefer
+  const back = on !== preferred ? blockedUntil("anthropic", preferred) : undefined
+  return [
+    {
+      id: "login",
+      icon: "◎",
+      on: true,
+      color: on === "main" ? "primary" : "warning",
+      label: `Login · ${loginLabel("anthropic", on)}`,
+      extra: back ? ` · back to ${loginLabel("anthropic", preferred)} ${whenText(back)}` : loginRule("anthropic").rotate ? " · next at a limit" : "",
+      hint: "logins",
+      click: "logins",
+      right: "logins",
+    },
+  ]
+}
+
 /** Every control row of a tab: the schedule rows, then the switches and Access. */
 export function controlRows(s, phone) {
   const fallback = fableFallback()
@@ -111,5 +134,6 @@ export function controlRows(s, phone) {
     },
     ...(phone ? [{ id: "phone", icon: phone.running ? "◉" : "○", on: phone.running, color: "success", label: phone.running ? `Phone on · ${phone.clients} connected` : "Phone app off", click: "phone.show", right: "phone.show" }] : []),
     { id: "access", icon: "⚙", on: true, color: "primary", label: `Access · ${accessEngineName(s.engine)}`, hint: "right click: copy to the others", click: "access.settings", right: "access.sync" },
+    ...loginControls(s),
   ]
 }

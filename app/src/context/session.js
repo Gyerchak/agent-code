@@ -29,6 +29,7 @@ import { acpEffort, acpModels, acpModes, harnessById, harnessInfo, harnessLaunch
 import { modelVariants } from "./variants"
 import { sessionSpend, spendSnapshot } from "./spendhistory"
 import { accessFor } from "./access"
+import { blockLogin, blockedUntil, chosenLogin, loginLabel, loginsOf, loginRule } from "./logins"
 import { claimResetOffer, fetchPlanUsage, fetchResetOffer, isLimitError, limitResetTime, notePlanSpend, onSharedPlanUsage, planDetails, planPerPercent, publishPlanUsage, samplePlanRate } from "./usage"
 
 // Claude Code's model list as a Claude-login process reports it. A process pointed at another provider
@@ -949,6 +950,49 @@ export function resumeHold(sessionID, now = Date.now()) {
   return times.length ? Math.min(...times) : undefined
 }
 
+const LOGIN_SWITCH_PROMPT = "Agent Code moved this conversation to another of the user's logins after a usage limit. Continue the work from where it stopped."
+
+/**
+ * A Claude turn was refused by a limit and "next login at a limit" is on: that login is passed over until the limit
+ * resets, and the work goes on at once with the next free one. False when there is none (the usual wait then).
+ */
+function switchLoginAfterLimit(session, resetsAt) {
+  if (!loginRule("anthropic").rotate || loginsOf("anthropic").length < 2) return false
+  const from = session.store.login ?? "main"
+  blockLogin("anthropic", from, resetsAt && resetsAt > Date.now() ? resetsAt + 30_000 : Date.now() + 60 * 60_000)
+  const next = chosenLogin("anthropic")
+  if (next.id === from || blockedUntil("anthropic", next.id)) return false
+  log("login switch", session.store.sessionID, from, "→", next.id)
+  session.notice?.(`Limit on ${loginLabel("anthropic", from)}: going on with ${next.label}; back to ${loginLabel("anthropic", loginRule("anthropic").prefer)} when its limit resets.`, "info")
+  void session.restart(true).then(() => session.send(LOGIN_SWITCH_PROMPT))
+  return true
+}
+
+/** Tabs on another login than the one to use now (the preferred one is free again): back to it. */
+function checkLogins() {
+  if (loginsOf("anthropic").length < 2) return
+  const want = chosenLogin("anthropic").id
+  for (const session of allSessions) {
+    const s = session.store
+    if (session.disposed || s.engine || splitModel(s.model) || s.login === undefined || s.login === want || blockedUntil("anthropic", want)) continue
+    if (s.status === "running") {
+      session.restartLater?.()
+      continue
+    }
+    log("login back", s.sessionID, s.login, "→", want)
+    const waiting = s.resumeAt !== undefined
+    void session.restart().then(() => {
+      // It was waiting for a limit: on a free login it goes on now.
+      if (waiting && !session.disposed) {
+        setResumeAt(session, Date.now())
+        waitingResume.add(session)
+        startResumeClock()
+      }
+    })
+  }
+}
+setInterval(checkLogins, 60_000).unref?.()
+
 function checkSchedules() {
   const now = Date.now()
   for (const session of allSessions) {
@@ -969,7 +1013,7 @@ function checkSchedules() {
         session.pause(back, entry.group ? "break" : "stop", undefined, entry.group)
         session.notice?.(`${entry.group ? "Break" : "Stopped"} (schedule)${back ? `: goes on ${whenText(back)}` : ": resume when you want"}.`, "info")
       } else if (entry.kind === "stop" && entry.window && entry.percent) {
-        if (splitModel(session.store.model) || session.store.pause || (stopLevel(entry.window) ?? 0) < entry.percent) continue
+        if (splitModel(session.store.model) || session.store.pause || (session.store.login ?? "main") !== "main" || (stopLevel(entry.window) ?? 0) < entry.percent) continue
         drop(entry)
         const exact = planWindowOf(entry.window)
         const until = exact?.resetsAt && exact.resetsAt > now ? exact.resetsAt + 30_000 : undefined
@@ -1264,6 +1308,8 @@ async function fireAutoResume(session         ) {
     return
   }
   session.heldResume = undefined
+  // Another login is free now (or the main one is back): the process starts on it first.
+  if (!session.store.engine && !splitModel(session.store.model) && (session.store.login ?? "main") !== chosenLogin("anthropic").id) await session.restart(true)
   log("auto-resume fires", session.store.sessionID, session.store.model)
   resumingNow.set(session, { fired: Date.now(), ran: false })
   try {
@@ -2586,6 +2632,9 @@ export function createSession(seed             ) {
     if (routes) extra.push({ id: "routing", text: routingPrompt(routes) })
     else if (!orch && policy.enabled && policy.pick && (policy.models || policy.effort)) extra.push({ id: "pick", text: PICK_PROMPT })
     if (lines.length) extra.push({ id: "providers", text: providerPrompt(lines) })
+    // Which Claude login this process runs on (Claude itself only: provider models have their own keys).
+    const claudeLogin = !external ? chosenLogin("anthropic") : undefined
+    setStore("login", claudeLogin?.id)
     const instructionParts = behaviourParts(extra, { sessionId: options.sessionId ?? options.resume ?? store.sessionID, session: api })
     const append = instructionParts.length ? instructionParts.map((part) => part.text).join("\n\n") : undefined
     // A resumed conversation keeps the instructions it began with (Claude Code's recorded prompt): what changed since
@@ -2646,6 +2695,8 @@ export function createSession(seed             ) {
           CLAUDE_AGENT_SDK_CLIENT_APP: "agent-code",
           // Claude Code 2.1.323: its "resume this session" hints name Agent Code's own command.
           CLAUDE_CODE_RESUME_HINT_COMMAND: "acode -r",
+          // Another of the user's Claude logins (context/logins.js): its token, conversations stay where they are.
+          ...(claudeLogin?.secret ? { CLAUDE_CODE_OAUTH_TOKEN: claudeLogin.secret } : {}),
           ...providerVars,
           // Claude Code assumes 200K for models it doesn't know: give it the real window so it compacts in time.
           ...(external && !routed ? contextEnv(store.model, providerVars?.ANTHROPIC_MODEL) : {}),
@@ -3334,6 +3385,17 @@ export function createSession(seed             ) {
   function needLogin() {
     // Another provider's refused key is not Claude Code's login.
     if (store.authRequired || splitModel(store.model) || oc) return
+    // One of the other Claude logins was refused (its token is wrong or expired): it is set aside for a day and the
+    // work goes on with the next one; it can be replaced in /logins.
+    if (store.login && store.login !== "main") {
+      const broken = store.login
+      blockLogin("anthropic", broken, Date.now() + 24 * 3_600_000)
+      const next = chosenLogin("anthropic")
+      pushNotice(`The login "${loginLabel("anthropic", broken)}" was refused (its token is wrong or expired; replace it in /logins). Going on with ${next.label}.`, "warning")
+      log("login refused", store.sessionID, broken, "→", next.id)
+      void restart(true).then(() => send(LOGIN_SWITCH_PROMPT))
+      return
+    }
     loginNeededAt = Date.now()
     setStore("authRequired", true)
     pushNotice("Claude Code's login has expired or was refused. Run /login — prompts you send meanwhile wait here and go out after you log in.", "warning")
@@ -3536,7 +3598,7 @@ export function createSession(seed             ) {
    */
   function pauseNearLimit() {
     const rule = guardFor(store.sessionID)
-    if (!rule.on || splitModel(store.model) || store.pause) return
+    if (!rule.on || splitModel(store.model) || store.pause || (store.login ?? "main") !== "main") return
     const at = rule.at
     const own = (limits.scoped ?? []).filter((w) => onModel(store, w.name))
     const windows = [
@@ -5472,7 +5534,9 @@ export function createSession(seed             ) {
       return
     }
     // Only Claude's own refusals count against the Claude plan (other providers answer 429 too).
-    if (refusal && !splitModel(store.model)) markLimitHit(/weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined, resetsAt)
+    const onMain = (store.login ?? "main") === "main"
+    if (refusal && !splitModel(store.model) && onMain) markLimitHit(/weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined, resetsAt)
+    if (refusal && !interrupted && !splitModel(store.model) && switchLoginAfterLimit(api, resetsAt)) return
     if (refusal && !interrupted) armAutoResume(api, resetsAt)
     else {
       if (!error) resumeSucceeded(api)
@@ -5502,6 +5566,10 @@ export function createSession(seed             ) {
 
   const api = Object.assign(self, {
     notice: pushNotice,
+    /** Restart once the running turn is over (a login change). */
+    restartLater: () => {
+      restartAfterTurn = true
+    },
     start,
     stop,
     ensureStarted,
