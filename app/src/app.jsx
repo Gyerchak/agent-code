@@ -1,5 +1,5 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
-import { addLogin, blockedUntil, chosenLogin, loginRule, loginsOf, removeLogin, setRule } from "./context/logins"
+import { addLogin, blockedUntil, chosenLogin, CLAUDE_TERMS, loginRule, loginsOf, projectTie, projectTies, removeLogin, setProjectTie, setRule } from "./context/logins"
 import { ACCESS, ACCESS_ENGINES, accessEngine, accessFor, setAccess, syncAccess } from "./context/access"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
@@ -2772,7 +2772,18 @@ function DialogLogins() {
     const claude = provider === "anthropic"
     const list = loginsOf(provider)
     const rule = loginRule(provider)
-    const using = claude ? (store.login ?? chosenLogin("anthropic").id) : chosenLogin(provider).id
+    const using = claude ? (store.login ?? chosenLogin("anthropic", store.cwd).id) : chosenLogin(provider).id
+    const tie = projectTie(provider, store.cwd)
+    const here = tie?.folder ?? store.cwd
+    const short = (folder) => folder.replace(os.homedir(), "~")
+    const ties = claude
+      ? [
+          { title: "Not tied (uses the preferred login)", value: "tie:", category: `This project · ${short(here)}`, gutter: dot(!tie) },
+          ...list.map((item) => ({ title: `Tied to ${item.label}`, value: `tie:${item.id}`, category: `This project · ${short(here)}`, description: "only this login here; it is kept for its projects", gutter: dot(tie?.id === item.id) })),
+          ...projectTies(provider).map((item) => ({ title: short(item.folder), value: `untie:${item.folder}`, category: "Tied projects (ctrl+d unties)", footer: list.find((login) => login.id === item.id)?.label ?? "missing login" })),
+          ...CLAUDE_TERMS.map((term, index) => ({ title: term.text, value: `terms:${index}`, category: "Anthropic's terms (enter: read them)", gutter: <text fg={theme.textMuted}>{" § "}</text> })),
+        ]
+      : []
     return [
       ...list.map((item) => {
         const until = blockedUntil(provider, item.id)
@@ -2785,8 +2796,11 @@ function DialogLogins() {
           gutter: dot(rule.prefer === item.id),
         }
       }),
-      { title: "Next login at a limit", value: "rotate", category: "When a limit hits", description: "go on with the next free login; back to the preferred one when its limit resets", footer: rule.rotate ? "on" : "off", gutter: box(rule.rotate) },
+      ...(claude
+        ? []
+        : [{ title: "Next key at a limit", value: "rotate", category: "When a limit hits", description: "on 429 / 402 the next key; check this provider's terms first", footer: rule.rotate ? "on" : "off", gutter: box(rule.rotate) }]),
       { title: claude ? "Add a Claude login…" : "Add another key…", value: "add", category: "Add", description: claude ? "paste a token from `claude setup-token` (signed in with the other account)" : "another API key for this provider", gutter: <text fg={theme.textMuted}>{" + "}</text> },
+      ...ties,
       ...(claude ? [{ title: "Get a token: run claude setup-token…", value: "setup", category: "Add", description: "Claude Code's sign-in, in this terminal; copy the token it prints", gutter: <text fg={theme.textMuted}>{" ⌨ "}</text> }] : []),
     ]
   })
@@ -2834,6 +2848,17 @@ function DialogLogins() {
           toast.show({ variant: "info", message: "Preferred login set: idle tabs move to it within a minute, busy ones after their turn" })
           return refresh()
         }
+        if (kind === "tie") {
+          const folder = projectTie(provider, store.cwd)?.folder ?? store.cwd
+          setProjectTie(provider, folder, id || null)
+          toast.show({ variant: "info", message: id ? `This project now uses only that login (idle tabs move within a minute)` : "This project uses the preferred login again" })
+          return refresh()
+        }
+        if (kind === "untie") {
+          setProjectTie(provider, option.value.slice(6), null)
+          return refresh()
+        }
+        if (kind === "terms") return void openURL(CLAUDE_TERMS[Number(id)].url)
         if (kind === "rotate") {
           setRule(provider, { rotate: !loginRule(provider).rotate })
           return refresh()
@@ -2847,6 +2872,10 @@ function DialogLogins() {
           label: "remove",
           run: (option) => {
             const [kind, id] = option.value.split(":")
+            if (kind === "untie") {
+              setProjectTie(tab(), option.value.slice(6), null)
+              return refresh()
+            }
             if (kind !== "login" || id === "main") return false
             removeLogin(tab(), id)
             refresh()
@@ -2855,7 +2884,7 @@ function DialogLogins() {
       ]}
       footer={
         <text fg={theme.text}>
-          <span style={{ fg: theme.textMuted }}>logins you own; each provider's terms apply · ctrl+d removes one</span>
+          <span style={{ fg: theme.textMuted }}>your own logins only; follow each provider's terms · ctrl+d removes / unties</span>
         </text>
       }
     />

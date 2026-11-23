@@ -3,7 +3,7 @@
 // ctrl are command ids (a click, a right click, ctrl+click).
 import { accessEngineName } from "./access"
 import { config } from "./config"
-import { blockedUntil, chosenLogin, loginLabel, loginRule, loginsOf } from "./logins"
+import { chosenLogin, loginLabel, loginsOf } from "./logins"
 import { describeEntry, fableFallback, fableUpgrade, orchestrator, scheduleOf, subagentRouting, untilText, whenText } from "./session"
 
 const nextOf = (list) => list.filter((entry) => entry.at).sort((a, b) => a.at - b.at)[0]
@@ -84,9 +84,8 @@ export function scheduleControls(s) {
 export function loginControls(s) {
   const list = loginsOf("anthropic")
   if (list.length < 2 || s.engine) return []
-  const on = s.login ?? chosenLogin("anthropic").id
-  const preferred = loginRule("anthropic").prefer
-  const back = on !== preferred ? blockedUntil("anthropic", preferred) : undefined
+  const want = chosenLogin("anthropic", s.cwd)
+  const on = s.login ?? want.id
   return [
     {
       id: "login",
@@ -94,7 +93,7 @@ export function loginControls(s) {
       on: true,
       color: on === "main" ? "primary" : "warning",
       label: `Login · ${loginLabel("anthropic", on)}`,
-      extra: back ? ` · back to ${loginLabel("anthropic", preferred)} ${whenText(back)}` : loginRule("anthropic").rotate ? " · next at a limit" : "",
+      extra: want.tied ? " · tied to this project" : on !== want.id ? ` · moves to ${want.label}` : "",
       hint: "logins",
       click: "logins",
       right: "logins",
