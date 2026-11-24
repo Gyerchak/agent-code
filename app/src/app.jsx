@@ -1,5 +1,4 @@
 import { findBinary, isWindows, openCommand, spawnOptions } from "./context/platform"
-import { addLogin, blockedUntil, chosenLogin, CLAUDE_TERMS, loginRule, loginsOf, projectTie, projectTies, removeLogin, setProjectTie, setRule } from "./context/logins"
 import { ACCESS, ACCESS_ENGINES, accessEngine, accessFor, setAccess, syncAccess } from "./context/access"
 import { TextAttributes } from "@opentui/core"
 import { authFile, harnessStatus, importFromOpencode, providerKind, providerName, providers, refreshProviders, saveKey, splitModel } from "./context/providers"
@@ -2381,7 +2380,6 @@ function DialogSettings() {
           { key: "box.reset", title: "Box: reset to factory default", description: "back to Agent Code's settings (own copy kept as a backup)", get: () => !ownSettings(), set: () => {} },
         ]
       : []),
-    { key: "logins", title: "Logins…", description: "several logins per provider; the next one at a limit, back to the main one after", get: () => loginsOf("anthropic").length > 1, set: () => {} },
     { key: "access", title: "Access (per harness)…", description: "permission prompts, installing, downloads, web, tests, questions — for each harness on its own", get: () => true, set: () => {} },
     { key: "chatByDefault", title: "New chats start in Chat mode", description: "a plain conversation, no tools unless asked (tab switches to Build or Plan)", get: flag("chatByDefault", true), set: write("chatByDefault") },
     { key: "planning", title: "Planning checklist", description: "Claude keeps a plan with checkboxes", get: flag("planning", false), set: write("planning"), restart: true },
@@ -2500,7 +2498,6 @@ function DialogSettings() {
         }
         if (option.value === "orchestrator") return openOrchestrator(() => setTick((n) => n + 1))
         if (option.value === "access") return openAccess(undefined, "push")
-        if (option.value === "logins") return dialog.push(() => <DialogLogins />)
         if (option.value === "schedules") return openSchedules()
         if (option.value === "transcriptDetail") {
           cycleTranscriptDetail()
@@ -2733,158 +2730,6 @@ function DialogAccessSync(props) {
       footer={
         <text fg={theme.text}>
           enter <span style={{ fg: theme.textMuted }}>tick / untick · then Yes or No</span>
-        </text>
-      }
-    />
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Logins: several per provider (context/logins.js)
-// ---------------------------------------------------------------------------
-
-let loginsTab = "anthropic"
-
-/**
- * Logins per provider: Claude first (its main login is Claude Code's own; more are tokens from `claude setup-token`,
- * signed in with the other account), then each provider with a key. Enter on a login prefers it; "Next login at a
- * limit" passes over a login that hit a limit until that limit resets, then the work comes back to the preferred one.
- */
-function DialogLogins() {
-  const renderer = useRenderer()
-  const [tab, setTabNow] = createSignal(loginsTab)
-  const setTab = (value) => {
-    loginsTab = value
-    setTabNow(value)
-  }
-  const [tick, setTick] = createSignal(0)
-  const refresh = () => setTick((n) => n + 1)
-  const tabsList = () => [
-    { key: "anthropic", title: "Claude" },
-    ...providers.list.filter((item) => item.apiKey && item.apiKey !== "local" && !item.harness).map((item) => ({ key: item.id, title: item.name })),
-  ]
-  const dot = (on) => <text fg={on ? theme.primary : theme.textMuted}>{on ? "(•)" : "( )"}</text>
-  const box = (on) => <text fg={on ? theme.success : theme.textMuted}>{on ? "[x]" : "[ ]"}</text>
-  const options = createMemo(() => {
-    tick()
-    configRevision()
-    const provider = tab()
-    const claude = provider === "anthropic"
-    const list = loginsOf(provider)
-    const rule = loginRule(provider)
-    const using = claude ? (store.login ?? chosenLogin("anthropic", store.cwd).id) : chosenLogin(provider).id
-    const tie = projectTie(provider, store.cwd)
-    const here = tie?.folder ?? store.cwd
-    const short = (folder) => folder.replace(os.homedir(), "~")
-    const ties = claude
-      ? [
-          { title: "Not tied (uses the preferred login)", value: "tie:", category: `This project · ${short(here)}`, gutter: dot(!tie) },
-          ...list.map((item) => ({ title: `Tied to ${item.label}`, value: `tie:${item.id}`, category: `This project · ${short(here)}`, description: "only this login here; it is kept for its projects", gutter: dot(tie?.id === item.id) })),
-          ...projectTies(provider).map((item) => ({ title: short(item.folder), value: `untie:${item.folder}`, category: "Tied projects (ctrl+d unties)", footer: list.find((login) => login.id === item.id)?.label ?? "missing login" })),
-          ...CLAUDE_TERMS.map((term, index) => ({ title: term.text, value: `terms:${index}`, category: "Anthropic's terms (enter: read them)", gutter: <text fg={theme.textMuted}>{" § "}</text> })),
-        ]
-      : []
-    return [
-      ...list.map((item) => {
-        const until = blockedUntil(provider, item.id)
-        return {
-          title: item.label,
-          value: `login:${item.id}`,
-          category: "Logins (enter: prefer this one)",
-          description: item.main ? (claude ? "Claude Code's own login (/login)" : "the key saved with /connect") : "added here",
-          footer: until ? `limit until ${whenText(until)}` : item.id === using ? "in use" : "",
-          gutter: dot(rule.prefer === item.id),
-        }
-      }),
-      ...(claude
-        ? []
-        : [{ title: "Next key at a limit", value: "rotate", category: "When a limit hits", description: "on 429 / 402 the next key; check this provider's terms first", footer: rule.rotate ? "on" : "off", gutter: box(rule.rotate) }]),
-      { title: claude ? "Add a Claude login…" : "Add another key…", value: "add", category: "Add", description: claude ? "paste a token from `claude setup-token` (signed in with the other account)" : "another API key for this provider", gutter: <text fg={theme.textMuted}>{" + "}</text> },
-      ...ties,
-      ...(claude ? [{ title: "Get a token: run claude setup-token…", value: "setup", category: "Add", description: "Claude Code's sign-in, in this terminal; copy the token it prints", gutter: <text fg={theme.textMuted}>{" ⌨ "}</text> }] : []),
-    ]
-  })
-  const add = () => {
-    const provider = tab()
-    const claude = provider === "anthropic"
-    dialog.push(() => (
-      <DialogPrompt
-        title="A name for this login"
-        placeholder={claude ? "e.g. Work account" : "e.g. Second key"}
-        onConfirm={(label) => {
-          dialog.pop()
-          dialog.push(() => (
-            <DialogPrompt
-              title={claude ? "Paste the token from `claude setup-token`" : "Paste the API key"}
-              placeholder={claude ? "sk-ant-oat01-…" : "the key"}
-              onConfirm={(secret) => {
-                const value = secret.trim()
-                if (value.length < 20) return toast.show({ variant: "warning", message: "That doesn't look like a whole token or key" })
-                if (claude && !value.startsWith("sk-ant-")) return toast.show({ variant: "warning", message: "A Claude token starts with sk-ant- (from `claude setup-token`)" })
-                addLogin(provider, label.trim() || "Another login", value)
-                dialog.pop()
-                refresh()
-                toast.show({ variant: "success", message: `Login "${label.trim() || "Another login"}" added` })
-              }}
-            />
-          ))
-        }}
-      />
-    ))
-  }
-  return (
-    <DialogSelect
-      title="Logins"
-      memoryKey="logins"
-      tabs={tabsList()}
-      tab={tab()}
-      onTab={setTab}
-      options={options()}
-      onSelect={(option) => {
-        const provider = tab()
-        const [kind, id] = option.value.split(":")
-        if (kind === "login") {
-          setRule(provider, { prefer: id })
-          toast.show({ variant: "info", message: "Preferred login set: idle tabs move to it within a minute, busy ones after their turn" })
-          return refresh()
-        }
-        if (kind === "tie") {
-          const folder = projectTie(provider, store.cwd)?.folder ?? store.cwd
-          setProjectTie(provider, folder, id || null)
-          toast.show({ variant: "info", message: id ? `This project now uses only that login (idle tabs move within a minute)` : "This project uses the preferred login again" })
-          return refresh()
-        }
-        if (kind === "untie") {
-          setProjectTie(provider, option.value.slice(6), null)
-          return refresh()
-        }
-        if (kind === "terms") return void openURL(CLAUDE_TERMS[Number(id)].url)
-        if (kind === "rotate") {
-          setRule(provider, { rotate: !loginRule(provider).rotate })
-          return refresh()
-        }
-        if (kind === "add") return add()
-        if (kind === "setup") void runInTerminal(renderer, findBinary("claude") ?? "claude", ["setup-token"], "claude setup-token: sign in with the other account, then copy the token it prints").then(() => add())
-      }}
-      actions={[
-        {
-          keybind: "ctrl+d",
-          label: "remove",
-          run: (option) => {
-            const [kind, id] = option.value.split(":")
-            if (kind === "untie") {
-              setProjectTie(tab(), option.value.slice(6), null)
-              return refresh()
-            }
-            if (kind !== "login" || id === "main") return false
-            removeLogin(tab(), id)
-            refresh()
-          },
-        },
-      ]}
-      footer={
-        <text fg={theme.text}>
-          <span style={{ fg: theme.textMuted }}>your own logins only; follow each provider's terms · ctrl+d removes / unties</span>
         </text>
       }
     />
@@ -3717,7 +3562,6 @@ export function App() {
       slashAliases: ["break"],
       run: () => (store.pause ? active().resume() : actions.pause()),
     },
-    { id: "logins", title: "Logins (several per provider)…", category: "Agent", slash: "logins", run: () => dialog.push(() => <DialogLogins />, undefined, "large") },
     { id: "access.settings", title: "Access settings (this harness; each has its own)", category: "Session", slash: "access", run: () => openAccess() },
     { id: "access.sync", title: "Sync this harness's access settings to the others…", category: "Session", run: () => dialog.replace(() => <DialogAccessSync from={store.engine} onDone={() => { restartForAccess(new Set(accessChanged)); accessChanged.clear() }} />) },
     { id: "schedules", title: "Schedules (this tab): stops, resumes, breaks", category: "Session", slash: "schedules", slashAliases: ["stopafter", "schedule"], run: () => openSchedules() },

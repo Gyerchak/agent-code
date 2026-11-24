@@ -2,7 +2,6 @@ import { randomBytes, randomUUID } from "node:crypto"
 import http from "node:http"
 
 import { log } from "./log"
-import { blockKey, keysFor } from "./logins"
 import { applyVariant } from "./variants"
 
 // ---------------------------------------------------------------------------
@@ -181,56 +180,33 @@ async function routed(router        , route        , query                    , 
 }
 
 /** A request to an Anthropic-protocol provider with its own key. */
-/**
- * Several logins (keys) for a provider: an answer of 429 (too many requests) or 402 (out of credit) puts that key
- * aside for a while (its Retry-After, else 15 minutes) and the same request goes again with the next key; the first
- * key is used again once its time is over (context/logins.js).
- */
-async function withKeys(upstream, call) {
-  const keys = upstream.provider ? keysFor(upstream.provider, upstream.apiKey) : [upstream.apiKey]
-  let response
-  for (const [index, key] of (keys.length ? keys : [upstream.apiKey]).entries()) {
-    response = await call(key)
-    if ((response.status !== 429 && response.status !== 402) || index === keys.length - 1) return response
-    const after = Number(response.headers.get("retry-after"))
-    if (key) blockKey(key, Number.isFinite(after) && after > 0 ? after * 1000 : undefined)
-    log("proxy: limit on a key, trying the next one", upstream.provider, response.status)
-    await response.body?.cancel?.().catch?.(() => {})
-  }
-  return response
-}
-
 function anthropicFetch(upstream          , path        , method        , body                    , headers                        , signal             ) {
-  return withKeys(upstream, (key) =>
-    fetch(upstream.baseURL.replace(/\/+$/, "") + path, {
-      method,
-      signal,
-      headers: {
-        "user-agent": "agent-code/1.0",
-        "anthropic-version": "2023-06-01",
-        ...headers,
-        ...(key ? { "x-api-key": key, authorization: `Bearer ${key}` } : {}),
-        ...upstream.headers,
-      },
-      body,
-    }),
-  )
+  return fetch(upstream.baseURL.replace(/\/+$/, "") + path, {
+    method,
+    signal,
+    headers: {
+      "user-agent": "agent-code/1.0",
+      "anthropic-version": "2023-06-01",
+      ...headers,
+      ...(upstream.apiKey ? { "x-api-key": upstream.apiKey, authorization: `Bearer ${upstream.apiKey}` } : {}),
+      ...upstream.headers,
+    },
+    body,
+  })
 }
 
 async function post(upstream          , path        , payload         , headers                        , signal             ) {
-  return withKeys(upstream, (key) =>
-    fetch(upstream.baseURL.replace(/\/+$/, "") + path, {
-      method: "POST",
-      signal,
-      headers: {
-        "content-type": "application/json",
-        "user-agent": "agent-code/1.0",
-        ...(key ? { authorization: `Bearer ${key}` } : {}),
-        ...headers,
-      },
-      body: JSON.stringify(payload),
-    }),
-  )
+  return fetch(upstream.baseURL.replace(/\/+$/, "") + path, {
+    method: "POST",
+    signal,
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "agent-code/1.0",
+      ...(upstream.apiKey ? { authorization: `Bearer ${upstream.apiKey}` } : {}),
+      ...headers,
+    },
+    body: JSON.stringify(payload),
+  })
 }
 
 async function upstreamError(res                     , response          ) {
