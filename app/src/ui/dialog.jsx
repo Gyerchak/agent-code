@@ -492,7 +492,8 @@ export function DialogSelect   (props
           </text>
         </box>
         <Show when={props.tabs?.length}>
-          <box flexDirection="row" gap={3} paddingTop={1}>
+          {/* Many tabs (Access: every provider and harness) wrap onto more lines instead of running into each other. */}
+          <box flexDirection="row" flexWrap="wrap" columnGap={3} paddingTop={1}>
             <For each={props.tabs}>
               {(item) => (
                 <text

@@ -38,7 +38,7 @@ Do not search the web or fetch web pages. Work from the project and what you kno
 
 export const toolsPlugin         = (api) => {
   // Each harness has its own access settings: the tab's engine decides (Claude Code when none).
-  const access = (context) => accessFor(context?.session?.store?.engine)
+  const access = (context) => accessFor(context?.session?.store)
   api.lifecycle.onDispose(registerPromptPart("acode-tools-prefer", (context) => (access(context).preferTools ? PREFER_TOOLS : undefined)))
   api.lifecycle.onDispose(registerPromptPart("acode-tools-install", (context) => (access(context).installTools ? INSTALL_TOOLS_ON : INSTALL_TOOLS_OFF)))
   api.lifecycle.onDispose(registerPromptPart("acode-tools-downloads", (context) => (access(context).downloads ? DOWNLOADS_ON : DOWNLOADS_OFF)))

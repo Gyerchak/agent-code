@@ -620,7 +620,7 @@ export function AccessRow() {
     >
       <text fg={theme.text} wrapMode="none" truncate>
         <span style={{ fg: theme.primary }}>⚙</span>
-        {`  Access · ${accessEngineName(store.engine)}`}
+        {`  Access · ${accessEngineName(store)}`}
         <Show when={hover()}>
           <span style={{ fg: theme.textMuted }}> (right click: copy to the others)</span>
         </Show>

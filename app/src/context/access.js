@@ -5,6 +5,7 @@
 // nothing changes for anyone until a setting is changed here.
 import { config, saveConfig } from "./config"
 import { HARNESSES } from "./harnesses"
+import { providers, splitModel } from "./providers"
 
 export const ACCESS = [
   { key: "autoAllow", title: "Allow everything", description: "no permission prompts (questions and leaving plan mode still ask)", fallback: false },
@@ -17,20 +18,42 @@ export const ACCESS = [
   { key: "preferTools", title: "Prefer installed tools", description: "use the machine's tools instead of generating the same work", fallback: true },
 ]
 
-/** Claude Code ("claude"), then each harness by its engine id. */
-export const ACCESS_ENGINES = [{ id: "claude", name: "Claude Code" }, ...HARNESSES.map((harness) => ({ id: harness.id, name: harness.name }))]
+/**
+ * Who has access settings: Claude Code ("claude"), every provider Agent Code knows (a provider's models run in Claude
+ * Code through Agent Code's proxy, with that provider's own settings), and every harness.
+ */
+export function accessEngines() {
+  const harnessIds = new Set(HARNESSES.map((harness) => harness.id))
+  const list = providers.list.filter((provider) => !provider.harness && !harnessIds.has(provider.id)).map((provider) => ({ id: provider.id, name: provider.name, provider: true }))
+  // A provider with settings of its own but not listed right now (no key yet, models not read) still has its tab.
+  for (const id of Object.keys(config.harnessAccess ?? {})) if (id !== "claude" && !harnessIds.has(id) && !list.some((item) => item.id === id)) list.push({ id, name: id, provider: true })
+  return [{ id: "claude", name: "Claude Code" }, ...list, ...HARNESSES.map((harness) => ({ id: harness.id, name: harness.name }))]
+}
 
-/** A tab's engine (undefined: Claude Code) as an access id. */
-export const accessEngine = (engine) => engine || "claude"
-export const accessEngineName = (engine) => ACCESS_ENGINES.find((item) => item.id === accessEngine(engine))?.name ?? engine
+/**
+ * The access id of a tab (its store) or an engine id: a harness tab → that harness; a provider's model in Claude
+ * Code → that provider; Claude itself → "claude".
+ */
+export function accessEngine(target) {
+  if (target && typeof target === "object") return target.engine || splitModel(target.model)?.provider.id || "claude"
+  return target || "claude"
+}
+export const accessEngineName = (target) => {
+  const id = accessEngine(target)
+  return accessEngines().find((item) => item.id === id)?.name ?? providers.list.find((item) => item.id === id)?.name ?? id
+}
+const isProvider = (id) => id !== "claude" && !HARNESSES.some((harness) => harness.id === id)
 
 /** The access settings a harness works with. */
 export function accessFor(engine) {
-  const own = config.harnessAccess?.[accessEngine(engine)] ?? {}
+  const id = accessEngine(engine)
+  const own = config.harnessAccess?.[id] ?? {}
+  // A provider without settings of its own runs as Claude Code does (its models run inside Claude Code).
+  const base = isProvider(id) ? (config.harnessAccess?.claude ?? {}) : {}
   const out = {}
   for (const item of ACCESS) {
     const fallback = item.key === "downloads" ? out.installTools : item.fallback
-    out[item.key] = own[item.key] ?? config[item.key] ?? fallback
+    out[item.key] = own[item.key] ?? base[item.key] ?? config[item.key] ?? fallback
   }
   return out
 }

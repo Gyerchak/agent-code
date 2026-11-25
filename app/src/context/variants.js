@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js"
 import { catalog,                      } from "./catalog"
 import { config } from "./config"
+import { harnessInfo, harnessTick } from "./harnesses"
 import { log } from "./log"
 import { providerKind, providers, splitModel } from "./providers"
 
@@ -20,7 +21,8 @@ function devModel(value        ) {
   const split = splitModel(value)
   const kind = providerKind(value)
   const ids = [split.model, split.model.replace(/:latest$/, ""), split.model.replace(/:[^:]*$/, "")]
-  const sources = DEV[kind] ? [DEV[kind]] : Object.values(DEV)
+  // The model's own provider first (a saved key for deepseek/openai/…), then the opencode gateways.
+  const sources = [...new Set([split.provider.id, ...(DEV[kind] ? [DEV[kind]] : Object.values(DEV))])]
   for (const source of sources) for (const id of ids) if (catalog.dev[source]?.[id]) return catalog.dev[source][id]
   return undefined
 }
@@ -77,8 +79,17 @@ function localSpec(value        )       {
   return { levels: ["none", "high"], efforts: [], toggle: true, budget: false }
 }
 
+/** Another harness states its own reasoning levels when it lists models (dsh: off, low, high, max). */
+function harnessSpec(value        )       {
+  harnessTick()
+  const split = splitModel(value)
+  return effortSpec(harnessInfo(split.provider.id)?.efforts ?? [])
+}
+
 function spec(value        )       {
-  if (providerKind(value) === "local") return localSpec(value)
+  const kind = providerKind(value)
+  if (kind === "local") return localSpec(value)
+  if (kind === "harness") return harnessSpec(value)
   const dev = devModel(value)
   if (dev?.reasoning === false) return effortSpec([])
   if (dev?.options) return fromOptions(dev.options)

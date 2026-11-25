@@ -22,10 +22,11 @@ import { planDetails } from "./usage"
 /** models.dev's reasoning controls for a model: effort levels, an on/off toggle, a thinking-token budget. */
 
 
-// v2: + reasoning options (variants); older caches are refetched.
+// v3: + the DeepSeek provider's reasoning options (variants); older caches are refetched.
 
 
-const DEV_PROVIDERS = ["anthropic", "opencode", "opencode-go", "ollama-cloud"]
+const CACHE_V = 3
+const DEV_PROVIDERS = ["anthropic", "deepseek", "opencode", "opencode-go", "ollama-cloud"]
 const file = path.join(stateDir, "catalog.json")
 
 export const [catalog, setCatalog] = createStore
@@ -100,10 +101,10 @@ export function refreshCatalog() {
     const cache = load()
     if (cache.dev) setCatalog("dev", cache.dev)
     try {
-      if (!cache.dev || cache.v !== 2 || !cache.time || Date.now() - cache.time > 86_400_000) {
+      if (!cache.dev || cache.v !== CACHE_V || !cache.time || Date.now() - cache.time > 86_400_000) {
         cache.dev = await fetchDev()
         cache.time = Date.now()
-        cache.v = 2
+        cache.v = CACHE_V
         setCatalog("dev", cache.dev )
       }
     } catch (error) {

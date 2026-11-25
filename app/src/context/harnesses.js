@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { createSignal } from "solid-js"
 import { AcpClient } from "./acp"
 import { log } from "./log"
 import { stateDir } from "./paths"
@@ -65,6 +66,9 @@ export function harnessLaunch(harness, keyFor) {
 
 const cacheFile = path.join(stateDir, "harnesses.json")
 let cache
+/** Bumped when a harness's models and levels are (re)discovered, so the variant picker updates. */
+const [harnessTick, setHarnessTick] = createSignal(0)
+export { harnessTick }
 function load() {
   if (cache) return cache
   try {
@@ -78,6 +82,7 @@ function save() {
   try {
     mkdirSync(stateDir, { recursive: true })
     writeFileSync(cacheFile, JSON.stringify(cache))
+    setHarnessTick((n) => n + 1)
   } catch {}
 }
 
@@ -116,6 +121,19 @@ export function acpModes(result) {
 /** Cached facts about a harness: `{ models, efforts, error, time }`. */
 export function harnessInfo(id) {
   return load()[id]
+}
+
+/**
+ * The name a harness lists for one of its model ids, or undefined: a harness's model id is its own business
+ * (DeepSeek Harness's are opaque selectors such as `["deepseek-official","deepseek-v4-flash"]`), the name is
+ * what the picker shows and what a tab should read.
+ */
+export function harnessModelName(id        ) {
+  for (const harness of HARNESSES) {
+    const model = harnessInfo(harness.id)?.models?.find((item) => item.id === id)
+    if (model?.name) return model.name
+  }
+  return undefined
 }
 
 const inflight = new Map()

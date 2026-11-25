@@ -3,13 +3,13 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { For } from "solid-js"
 import { theme, tint } from "../context/theme"
 
-// Same glyph language as opencode's logo, spelling "claude" + "code".
+// Same glyph language as opencode's logo, spelling "agent" + "code".
 const logo = {
   left: [
-    "     ▄              ▄     ",
-    "█▀▀▀ █ ▀▀▀█ █  █ █▀▀█ █▀▀█",
-    "█___ █ █▀▀█ █__█ █__█ █^^^",
-    "▀▀▀▀ ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+    "                     ▄ ",
+    "▀▀▀█ █▀▀▀ █▀▀█ █▀▀█ ▀█▀",
+    "█▀▀█ █_▀█ █^^^ █  █  █ ",
+    "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀  ▀  ▀▀",
   ],
   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
 }

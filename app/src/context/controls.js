@@ -110,6 +110,6 @@ export function controlRows(s, phone) {
       right: "orchestrator.toggle",
     },
     ...(phone ? [{ id: "phone", icon: phone.running ? "◉" : "○", on: phone.running, color: "success", label: phone.running ? `Phone on · ${phone.clients} connected` : "Phone app off", click: "phone.show", right: "phone.show" }] : []),
-    { id: "access", icon: "⚙", on: true, color: "primary", label: `Access · ${accessEngineName(s.engine)}`, hint: "right click: copy to the others", click: "access.settings", right: "access.sync" },
+    { id: "access", icon: "⚙", on: true, color: "primary", label: `Access · ${accessEngineName(s)}`, hint: "right click: copy to the others", click: "access.settings", right: "access.sync" },
   ]
 }

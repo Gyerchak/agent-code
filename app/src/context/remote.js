@@ -1093,7 +1093,7 @@ async function webApi(request, response, url, parts) {
         // Access settings are per harness: the focused tab's.
         settings: WEB_SETTINGS.map((item) =>
           item.access
-            ? { key: item.key, title: `${item.title} (${accessEngineName(activeTab()?.store.engine)})`, value: !!accessFor(activeTab()?.store.engine)[item.key] }
+            ? { key: item.key, title: `${item.title} (${accessEngineName(activeTab()?.store)})`, value: !!accessFor(activeTab()?.store)[item.key] }
             : { key: item.key, title: item.title, value: config[item.key] ?? item.fallback },
         ),
         limits: { fiveHour: limits.fiveHour, week: limits.week, scoped: limits.scoped },
@@ -1174,9 +1174,9 @@ async function webApi(request, response, url, parts) {
       if (!item) return json(response, 400, { error: "unknown setting" })
       if (item.access) {
         // The focused tab's harness; its idle tabs start again with the new instructions.
-        const engine = accessEngine(activeTab()?.store.engine)
+        const engine = accessEngine(activeTab()?.store)
         setAccess(engine, item.key, !!body.value)
-        for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && accessEngine(tab.store.engine) === engine) void tab.restart()
+        for (const tab of tabs()) if (tab.live && tab.store.status === "idle" && accessEngine(tab.store) === engine) void tab.restart()
         return json(response, 200, { ok: true })
       }
       config[item.key] = !!body.value

@@ -25,7 +25,7 @@ import { stateDir } from "./paths"
 import { ensureBoxTrusted } from "./box"
 import { acodeMcpServers } from "./mcp"
 import { apiKeyFor, harnessModel, opencodeModel, providerEnv, providerKind, providerName, providers, refreshProviders, routerEnv, splitModel } from "./providers"
-import { acpEffort, acpModels, acpModes, harnessById, harnessInfo, harnessLaunch } from "./harnesses"
+import { acpEffort, acpModels, acpModes, harnessById, harnessInfo, harnessLaunch, harnessModelName } from "./harnesses"
 import { modelVariants } from "./variants"
 import { sessionSpend, spendSnapshot } from "./spendhistory"
 import { accessFor } from "./access"
@@ -541,6 +541,16 @@ export function errorMessage(error         ) {
 }
 
 export function prettyModel(id        ) {
+  // DeepSeek Harness's model ids are opaque selectors ("[\"deepseek-official\",\"deepseek-v4-flash\"]"): read as
+  // the name it lists for that model, or as its plain model part.
+  if (id.startsWith("[")) {
+    const named = harnessModelName(id)
+    if (named) return named
+    try {
+      const parts = JSON.parse(id)
+      if (Array.isArray(parts) && parts.length) return String(parts[parts.length - 1])
+    } catch {}
+  }
   const match = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?/)
   // Agent Code's GPU-sized local variants ("qwen3:4b-acode88k") read as the model itself.
   if (!match) return id.replace(/-(?:acode|occ)\d+k$/, "")
@@ -1507,7 +1517,7 @@ export function behaviourParts(extra           = [], context = {}, skip = new Se
   }
   if (config.planning && !skip.has("planning")) add("planning", PLANNING_PROMPT)
   // The tab's harness decides (each has its own access settings).
-  const access = accessFor(context.session?.store?.engine)
+  const access = accessFor(context.session?.store)
   if (!access.runTests) add("noTests", NO_TESTS_PROMPT)
   if (!access.askQuestions) add("noQuestions", NO_QUESTIONS_PROMPT)
   extra.forEach((item, index) => (typeof item === "string" ? add(`extra-${index}`, item) : add(item.id, item.text)))
@@ -2593,8 +2603,8 @@ export function createSession(seed             ) {
     const goneNote = options.resume || options.continue ? promptChange(sessionKey, instructionParts, options.fork ? options.resume : undefined) : undefined
     startedParts = instructionParts
     const disallowed = [
-      ...(accessFor().askQuestions ? [] : ["AskUserQuestion"]),
-      ...(accessFor().web ? [] : ["WebFetch", "WebSearch"]),
+      ...(accessFor(store).askQuestions ? [] : ["AskUserQuestion"]),
+      ...(accessFor(store).web ? [] : ["WebFetch", "WebSearch"]),
       ...(policy.enabled ? [] : ["Agent", "Task"]),
     ]
     ensureBoxTrusted(store.cwd)
@@ -2863,7 +2873,7 @@ export function createSession(seed             ) {
         // The kept chat (DeepSeek Harness can't reload its own) gets the turn that just ended too.
         saveAcpHistory(was)
       },
-    })
+    }, launch, harness.name)
     oc = { client, id: resume ?? "", harness: harness.id, caps: {} }
     const learn = (result     ) => {
       if (!result) return
@@ -3856,7 +3866,8 @@ export function createSession(seed             ) {
 
   function modelLabel(value = store.model) {
     const external = splitModel(value)
-    if (external) return external.model
+    // Agent Code's own providers read as their model id; a harness as the name it lists for that id.
+    if (external) return harnessModelName(external.model) ?? external.model
     const info = store.models.find((model) => model.value === value)
     if (value === store.model && store.modelId && (value === "default" || !info)) return prettyModel(store.modelId)
     if (info?.resolvedModel) return prettyModel(info.resolvedModel)
@@ -4278,7 +4289,7 @@ export function createSession(seed             ) {
     input                         ,
     opts                                                                                            ,
   )                            {
-    const access = accessFor(store.engine)
+    const access = accessFor(store)
     if (!access.web && (/^(web_?fetch|web_?search|fetch|websearch)$/i.test(String(toolName)) || /^mcp__.+__(fetch|web_?search|browse|scrape|crawl)/i.test(String(toolName)))) {
       return Promise.resolve({ behavior: "deny", message: "The user has turned web access off for this harness.", toolUseID: opts.toolUseID })
     }
