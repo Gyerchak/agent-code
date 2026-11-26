@@ -2151,7 +2151,7 @@ function linkSessions(previous, next) {
     delete moved[previous]
     config.stopAfter = { ...config.stopAfter, tabs: moved }
   }
-  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause", "sessionSchedules"]) {
+  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause", "sessionSchedules", "sessionMemories"]) {
     const record = config[key]
     if (!record || !(previous in record)) continue
     const moved = { ...record, [next]: record[previous] }
