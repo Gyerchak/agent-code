@@ -96,6 +96,12 @@ function render(memory) {
   return `## ${memory.name} (${memory.type})\n${body}`
 }
 
+/**
+ * What an open memory puts in the context, in tokens (about 3.5 characters a token): its text as memory_open gives
+ * it (cut at MAX_OPEN characters, with its heading) — also what comes back after a compaction while it stays open.
+ */
+export const openCost = (memory) => Math.ceil(render(memory).length / 3.5)
+
 /** The index line set an acode-box adds to the system prompt (Claude Code's own index is off there). */
 export function boxIndex() {
   const list = listMemories({ dir: path.join(boxDir, "memory"), box: true })

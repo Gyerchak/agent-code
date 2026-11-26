@@ -10,7 +10,7 @@ import path from "node:path"
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { config, saveConfig } from "../context/config"
 import { onSessionEvent, registerAutoAllow, registerPromptPart, registerSettingsPart, registerToolPart } from "../context/session"
-import { indexInContext, listMemories, memoryPrompt, memoryTools, openMemories, openMemoriesChanged, reopenText, sessionStore } from "./memorytools"
+import { indexInContext, listMemories, memoryPrompt, memoryTools, openCost, openMemories, openMemoriesChanged, reopenText, sessionStore } from "./memorytools"
 import { appendContext, store, tabs } from "../context/tabs"
 import { providerKind, splitModel } from "../context/providers"
 import { syntax, theme } from "../context/theme"
@@ -216,7 +216,7 @@ export function DialogMemory() {
             title: memory.name,
             value: memory.file,
             description: memory.description,
-            footer: age(memory.time),
+            footer: `≈${openCost(memory).toLocaleString()} tok · ${age(memory.time)}`,
             category: TYPE_TITLE[type],
             gutter: <text fg={typeColor(memory.type)}>●</text>,
           })),
@@ -362,8 +362,9 @@ export function MemorySection() {
       : own().box
         ? list().reduce((sum, memory) => sum + memory.name.length + memory.description.length + 12, 0)
         : memoryTokens(own().dir) * 3.5
-    const opened = list().filter(isOpen).reduce((sum, memory) => sum + memory.size, 0)
-    return { index: Math.ceil(index / 3.5), open: Math.ceil(opened / 3.5) }
+    // This tab's session only, each as memory_open puts it in (a long one is cut at 24,000 characters).
+    const opened = list().filter(isOpen).reduce((sum, memory) => sum + openCost(memory), 0)
+    return { index: Math.ceil(index / 3.5), open: opened }
   })
   return (
     <box onMouseUp={() => openMemory()}>
@@ -378,17 +379,26 @@ export function MemorySection() {
       </box>
       <Show when={useOn() && (tokens().index > 0 || tokens().open > 0)}>
         <text fg={theme.textMuted} wrapMode="none" truncate>
-          {indexInContext() ? "index" : "note"} ≈{tokens().index.toLocaleString()} tok{tokens().open ? ` · open ≈${tokens().open.toLocaleString()} tok` : ""}
+          {indexInContext() ? "index" : "note"} ≈{tokens().index.toLocaleString()} tok{tokens().open ? ` · open here ≈${tokens().open.toLocaleString()} tok` : ""}
         </text>
       </Show>
       <Show when={list().length} fallback={<text fg={theme.textMuted}>{useOn() ? "nothing yet · click to add" : "memory is off"}</text>}>
         <For each={shown()}>
-          {(memory) => (
-            <text fg={isOpen(memory) ? theme.text : theme.textMuted} wrapMode="none" truncate>
-              <span style={{ fg: isOpen(memory) ? theme.success : typeColor(memory.type) }}>{isOpen(memory) ? "●" : "•"}</span> {memory.name}
-              {isOpen(memory) ? <span style={{ fg: theme.textMuted }}> open</span> : ""}
-            </text>
-          )}
+          {(memory) => {
+            // Hovered: what it takes in the context (open) or would take (if opened).
+            const [hover, setHover] = createSignal(false)
+            return (
+              <box onMouseOver={() => setHover(true)} onMouseOut={() => setHover(false)}>
+              <text fg={isOpen(memory) ? theme.text : theme.textMuted} wrapMode="none" truncate>
+                <span style={{ fg: isOpen(memory) ? theme.success : typeColor(memory.type) }}>{isOpen(memory) ? "●" : "•"}</span> {memory.name}
+                {isOpen(memory) ? <span style={{ fg: theme.textMuted }}> open</span> : ""}
+                <Show when={hover()}>
+                  <span style={{ fg: theme.textMuted }}>{` · ≈${openCost(memory).toLocaleString()} tok${isOpen(memory) ? " in context" : " if opened"}`}</span>
+                </Show>
+              </text>
+              </box>
+            )
+          }}
         </For>
         <Show when={list().length > shown().length}>
           <text fg={theme.textMuted}>+{list().length - shown().length} more</text>
