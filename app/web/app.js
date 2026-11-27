@@ -378,7 +378,8 @@ function renderControls() {
 async function runCommandId(id) {
   if (!id) return
   try {
-    await post("web/command", { id })
+    // The page's tab: the server focuses it first, so the command acts on the chat shown here.
+    await post("web/command", { id, key: state.active })
   } catch (error) {
     toast(error.message)
   }
@@ -387,16 +388,25 @@ async function runCommandId(id) {
 }
 
 // --- The terminal's dialog, drawn here ----------------------------------------------------------------------------
+// A filter typed here goes out after a short pause; it is kept so Enter can send it first.
+let filterTimer
 async function refreshDialog() {
+  const before = state.dialog?.seq
   try {
     const { open, dialog } = await get("web/dialog")
     state.dialog = open ? (dialog ?? { kind: "other" }) : undefined
   } catch {
     state.dialog = undefined
   }
+  // Another dialog now: a filter typed for the old one must not go to it.
+  if (state.dialog?.seq !== before) {
+    clearTimeout(filterTimer)
+    filterTimer = undefined
+  }
   renderDialog()
 }
-const dialogAct = (op, args = {}) => post("web/dialog", { op, ...args }).catch((error) => toast(error.message)).then(() => refreshDialog())
+// Each op names the dialog it was meant for (seq): the server refuses it when another one is open by now.
+const dialogAct = (op, args = {}) => post("web/dialog", { op, seq: state.dialog?.seq, ...args }).catch((error) => toast(error.message)).then(() => refreshDialog())
 
 function renderDialog() {
   const box = $("dlg")
@@ -568,7 +578,8 @@ function render() {
 
 // ---------------------------------------------------------------------------------------------------- actions
 async function refreshBoot() {
-  state.boot = await get("web/boot")
+  // The access settings in it are for this page's tab.
+  state.boot = await get(`web/boot${state.active ? `?tab=${encodeURIComponent(state.active)}` : ""}`)
   if (state.composingNew) return finishBoot()
   if (!state.active || !state.boot.tabs.some((tab) => tab.key === state.active)) state.active = state.boot.active ?? state.boot.tabs[0]?.key
   finishBoot()
@@ -614,6 +625,16 @@ async function closeTab(key) {
   await refreshSessions()
 }
 
+/** The id of the terminal command a typed "/name" stands for (its name, then an alias), if it is one. */
+async function slashCommandId(text) {
+  const match = text.match(/^\/([^\s]+)$/)
+  if (!match) return undefined
+  const name = match[1].toLowerCase()
+  if (!state.commands) state.commands = (await get("web/commands").catch(() => ({ commands: [] }))).commands
+  const found = state.commands.find((item) => item.slash?.toLowerCase() === name) ?? state.commands.find((item) => item.aliases?.some((alias) => alias.toLowerCase() === name))
+  return found?.id
+}
+
 async function sendMessage() {
   const input = $("input")
   const text = input.value.trim()
@@ -625,7 +646,11 @@ async function sendMessage() {
   renderFiles()
   autosize()
   try {
-    if (!state.active) {
+    const slash = !state.active && !attachments.length ? await slashCommandId(text) : undefined
+    if (slash) {
+      // A terminal command typed in a new chat runs without making an empty tab first.
+      await runCommandId(slash)
+    } else if (!state.active) {
       // A new chat: its tab first (with the model and mode picked here), then the message.
       const made = await post("web/new", { model: state.newModel, agent: state.newAgent })
       state.newModel = state.newAgent = undefined
@@ -706,6 +731,8 @@ window.addEventListener("resize", () => term.open && void fitTerminal())
 async function openTerminal() {
   term.open = true
   $("terminal").classList.remove("hidden")
+  // The terminal view shows the dialog itself: hide ours.
+  renderDialog()
   $("screen").focus()
   // After a restart (another user) Agent Code is back at its own size: always send it.
   term.cols = term.rows = 0
@@ -717,7 +744,16 @@ function closeTerminal() {
   term.open = false
   clearTimeout(term.timer)
   $("terminal").classList.add("hidden")
-  void refreshBoot().then(refreshTab)
+  // The dialog hidden while the terminal view was open is drawn again.
+  renderDialog()
+  // Tabs may have been switched in the terminal view: the page follows the app's tab.
+  void refreshBoot()
+    .then(() => {
+      if (state.composingNew || !state.boot.active || state.boot.active === state.active) return
+      state.active = state.boot.active
+      return refreshBoot()
+    })
+    .then(refreshTab)
 }
 async function pollScreen() {
   if (!term.open) return
@@ -795,7 +831,7 @@ function renderSettings() {
     row.className = "setting"
     row.innerHTML = `<span>${escape(item.title)}</span><button class="switch${item.value ? " on" : ""}" aria-label="${escape(item.title)}"></button>`
     row.querySelector("button").onclick = async () => {
-      await post("web/setting", { name: item.key, value: !item.value })
+      await post("web/setting", { name: item.key, value: !item.value, key: state.active })
       await refreshBoot()
       renderSettings()
     }
@@ -845,24 +881,48 @@ function wire() {
   $("cmds-filter").oninput = renderCommands
   $("cmds-filter").onkeydown = (event) => {
     if (event.key === "Enter") $("cmds-list").querySelector(".dlg-row")?.click()
-    if (event.key === "Escape") $("cmds").classList.add("hidden")
+    if (event.key === "Escape") {
+      // Handled here: it must not also close the dialog under the palette, or stop a running chat.
+      event.preventDefault()
+      $("cmds").classList.add("hidden")
+    }
   }
   $("dlg-close").onclick = () => void dialogAct("close")
-  let filterTimer
   $("dlg-filter").oninput = () => {
     clearTimeout(filterTimer)
-    filterTimer = setTimeout(() => void dialogAct("filter", { text: $("dlg-filter").value }), 150)
+    filterTimer = setTimeout(() => {
+      filterTimer = undefined
+      void dialogAct("filter", { text: $("dlg-filter").value })
+    }, 150)
   }
-  $("dlg-filter").onkeydown = (event) => {
-    if (event.key === "Enter" && state.dialog?.options?.length) void dialogAct("select", { value: state.dialog.selected ?? state.dialog.options[0].value })
+  $("dlg-filter").onkeydown = async (event) => {
+    if (event.key !== "Enter") return
+    // A filter still waiting is sent now, and the choice is made on what it left.
+    const pending = filterTimer !== undefined
+    if (pending) {
+      clearTimeout(filterTimer)
+      filterTimer = undefined
+      await dialogAct("filter", { text: $("dlg-filter").value })
+    }
+    const options = state.dialog?.options
+    if (options?.length) void dialogAct("select", { value: pending ? options[0].value : (state.dialog.selected ?? options[0].value) })
   }
   document.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault()
       void openCommands()
     }
-    // Esc closes the dialog drawn here (in the terminal view the keys go to the program itself).
-    if (event.key === "Escape" && state.dialog && $("terminal").classList.contains("hidden")) void dialogAct("close")
+    // Esc closes the palette, else the dialog drawn here (in the terminal view the keys go to the program itself). What
+    // it closes it marks as handled: only an Esc that closed nothing interrupts the chat.
+    if (event.key === "Escape" && !event.defaultPrevented) {
+      if (!$("cmds").classList.contains("hidden")) {
+        event.preventDefault()
+        $("cmds").classList.add("hidden")
+      } else if (state.dialog && $("terminal").classList.contains("hidden")) {
+        event.preventDefault()
+        void dialogAct("close")
+      }
+    }
   })
   if (localStorage.getItem("acode.web.theme") === "light") document.documentElement.classList.add("light")
   for (const part of ["left", "right"]) if (localStorage.getItem(`acode.web.${part}`) === "hidden") document.querySelector(".app").classList.add(`${part}-hidden`)
@@ -991,7 +1051,7 @@ function wire() {
     } else if (event.ctrlKey && event.key === "`") {
       event.preventDefault()
       void openTerminal()
-    } else if (event.key === "Escape" && state.tab?.status === "running") void post(`tabs/${state.active}/interrupt`)
+    } else if (event.key === "Escape" && !event.defaultPrevented && state.tab?.status === "running") void post(`tabs/${state.active}/interrupt`)
   })
 }
 
@@ -1018,10 +1078,12 @@ function listen() {
     void refreshBoot()
       .then(() => refreshTab())
       .then(render)
+      .then(() => refreshDialog())
       .catch(() => {})
   }
   // Limits and costs change without chat events too.
-  setInterval(() => refreshBoot().then(() => (renderPanels(), renderTabs())).catch(() => {}), 15000)
+  // (the open chat too: its control rows have times in them.)
+  setInterval(() => refreshBoot().then(() => refreshTab()).catch(() => {}), 15000)
 }
 
 async function main() {
@@ -1031,6 +1093,7 @@ async function main() {
     await refreshBoot()
     await refreshTab()
     await refreshSessions()
+    await refreshDialog()
     listen()
   } catch (error) {
     $("messages").innerHTML = `<div class="msg-notice error">${escape(error.message)}</div>`

@@ -266,7 +266,7 @@ export function releaseTab(session) {
   const list = tabs()
   const index = list.indexOf(session)
   if (index < 0) return
-  session.dispose()
+  session.dispose({ moved: true })
   const rest = list.filter((tab) => tab !== session)
   if (!rest.length) {
     const fresh = makeSession(session)

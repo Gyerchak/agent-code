@@ -637,7 +637,8 @@ function percent(value        ) {
 function updateLimitsFromUsage(usage     ) {
   if (!usage) return
   if (!usage.rate_limits_available || !usage.rate_limits) {
-    setLimits({ available: false, updated: Date.now() })
+    // No plan numbers in this fallback reading: windows already known (from the usage poll) stay on show.
+    if (!limits.fiveHour && !limits.week) setLimits({ available: false, updated: Date.now() })
     return
   }
   const window = (w     )                              =>
@@ -729,6 +730,7 @@ export function markLimitHit(type         , resetsAt         ) {
   shareLimits()
   void pollPlanUsage(true)
   if (key === "fiveHour") void checkResetOffer(true)
+  return key
 }
 
 // ---------------------------------------------------------------------------
@@ -753,11 +755,25 @@ export async function checkResetOffer(force = false) {
 
 /** The 5-hour limit was reset (here or by Claude Code's own /limit-reset): waiting and paused tabs go on now. */
 export function limitWasReset() {
-  setLimits("fiveHour", { utilization: 0, resetsAt: undefined })
+  const before = limits.fiveHour?.resetsAt
+  // The whole window object goes: a merge would keep `hit` from the refused one.
+  setLimits("fiveHour", reconcile({ utilization: 0 }))
   setLimits("offer", undefined)
+  // Published with the numbers: the other Agent Code windows wake their own tabs too (applySharedUsage).
+  lastReset = Date.now()
   shareLimits()
   void pollPlanUsage(true)
-  for (const session of waitingResume) if (!session.disposed && session.store.resumeAt !== undefined) setResumeAt(session, Date.now())
+  wakeAfterReset(before)
+}
+
+// When this window last learned of a 5-hour reset (here or from another window); a shared one from before this
+// window started doesn't count (its tabs weren't waiting then).
+let lastReset = 0
+const loadedAt = Date.now()
+
+/** The 5-hour window is new: only the tabs and pauses held by it go on (`before`: its reset time until now). */
+function wakeAfterReset(before) {
+  for (const session of waitingResume) if (!session.disposed && session.store.resumeAt !== undefined && waitsForFiveHour(session, before)) setResumeAt(session, Date.now())
   checkAutoResume()
   for (const fn of limitResetListeners) fn()
 }
@@ -790,7 +806,8 @@ export async function useLimitReset(auto = false) {
 
 /** Hand what this window knows to every other Agent Code window (they pick it up within ~2 s). */
 function shareLimits() {
-  publishPlanUsage({ fiveHour: limits.fiveHour, week: limits.week, all: limits.all, scoped: limits.scoped, rolling: limits.rolling, extra: limits.extra, offer: limits.offer })
+  // `offer` as null when there is none: JSON drops undefined, and the other windows would keep a used offer.
+  publishPlanUsage({ fiveHour: limits.fiveHour, week: limits.week, all: limits.all, scoped: limits.scoped, rolling: limits.rolling, extra: limits.extra, offer: limits.offer ?? null, resetAt: lastReset || undefined })
 }
 
 /**
@@ -991,6 +1008,8 @@ function checkSchedules() {
         session.notice?.(`Stopped at ${PLAN_WINDOWS[entry.window]} ${entry.percent}% (schedule)${until ? `: goes on when it resets, ${whenText(until)}` : ""}.`, "info")
       } else if (entry.kind === "resume" && entry.at && now >= entry.at) {
         drop(entry)
+        // Like a stop: a time this far past was missed while the tab was closed, it doesn't resume today's pause.
+        if (now - entry.at > 120_000) continue
         const pause = session.store.pause
         if (!pause || (entry.group && pause.reason !== "break")) continue
         // A limit not reset yet: a planned resume can't come earlier than the limit allows.
@@ -1143,9 +1162,16 @@ function applySharedUsage(usage                             ) {
     !!theirs?.resetsAt && !!mine?.resetsAt && mine.resetsAt > Date.now() && (theirs.resetsAt <= Date.now() || theirs.resetsAt < mine.resetsAt - 60_000)
   if (stale(usage.week, limits.week) || stale(usage.fiveHour, limits.fiveHour))
     usage = { ...usage, week: stale(usage.week, limits.week) ? limits.week : usage.week, fiveHour: stale(usage.fiveHour, limits.fiveHour) ? limits.fiveHour : usage.fiveHour }
+  const before = limits.fiveHour?.resetsAt
   applyUsage(usage)
-  if ("offer" in usage) setLimits("offer", usage.offer)
+  if ("offer" in usage) setLimits("offer", usage.offer ?? undefined)
   checkFableReturn()
+  // Another window reset the 5-hour limit: the tabs here that wait for it go on as well.
+  if (usage.resetAt > lastReset && usage.resetAt > loadedAt) {
+    lastReset = usage.resetAt
+    wakeAfterReset(before)
+    return
+  }
   checkAutoResume()
 }
 
@@ -1165,9 +1191,23 @@ const RESUME_PROMPT = "The plan usage limit has reset. Continue the work from wh
 const waitingResume = new Set         ()
 /** The reset time the refusal itself gave (the event or its text): that is the window actually blocking this tab. */
 const refusedUntil = new WeakMap                 ()
+/** The plan window that refused the tab ("fiveHour", "week", "fable"), when known: a 5-hour reset wakes only those. */
+const refusedWindow = new WeakMap()
 const resumeTries = new WeakMap                 ()
 
-// Waits survive a restart of Agent Code (crash, reboot, update): session id → resume time.
+/** True when a waiting tab is held by the 5-hour window (`fiveHourReset`: that window's reset time before the reset). */
+function waitsForFiveHour(session, fiveHourReset) {
+  // Network retries and other providers don't wait for Claude's 5-hour window.
+  if (networkWait.has(session) || session.store.engine || splitModel(session.store.model)) return false
+  const key = refusedWindow.get(session)
+  if (key) return key === "fiveHour"
+  // No refusal on record (e.g. restored after a restart): its time is the 5-hour window's reset.
+  const until = refusedUntil.get(session) ?? session.store.resumeAt
+  return !!fiveHourReset && !!until && Math.abs(until - fiveHourReset) <= 120_000
+}
+
+// Waits survive a restart of Agent Code (crash, reboot, update): session id → resume time, or { at, network: true }
+// for a retry after a network error (so it continues with the network prompt).
 const resumeFile = path.join(stateDir, "auto-resume.json")
 /** A wait this long overdue when Agent Code starts again is stale: leave that session alone. */
 const RESUME_KEEP = 12 * 3_600_000
@@ -1194,7 +1234,7 @@ function setResumeAt(session         , value                    ) {
   const id = session.store.sessionID
   if (!id) return
   const pending = readPendingResumes()
-  if (value) pending[id] = value
+  if (value) pending[id] = networkWait.has(session) ? { at: value, network: true } : value
   else if (id in pending) delete pending[id]
   else return
   writePendingResumes(pending)
@@ -1268,19 +1308,22 @@ function armNetworkRetry(session) {
   )
   networkWait.add(session)
   refusedUntil.set(session, at)
+  refusedWindow.delete(session)
   session.setStore("resumeAt", 0)
   waitingResume.add(session)
   startResumeClock()
   checkAutoResume()
 }
 
-/** A turn was refused by a limit: wait for the reset, then continue on our own. */
-function armAutoResume(session         , resetsAt         ) {
+/** A turn was refused by a limit: wait for the reset, then continue on our own (`key`: the refusing window, if known). */
+function armAutoResume(session         , resetsAt         , key) {
   networkWait.delete(session)
   if (config.autoResume === false) return
   log("auto-resume armed", session.store.sessionID, resetsAt ? new Date(resetsAt).toISOString() : "no reset time")
   if (resetsAt) refusedUntil.set(session, resetsAt)
   else refusedUntil.delete(session)
+  if (key) refusedWindow.set(session, key)
+  else refusedWindow.delete(session)
   session.setStore("resumeAt", 0)
   waitingResume.add(session)
   startResumeClock()
@@ -1333,6 +1376,8 @@ function checkAutoResume() {
     try {
       if (session.disposed || config.autoResume === false || session.store.resumeAt === undefined) {
         waitingResume.delete(session)
+        // The wait ends without a continue: the next one waits for a planned resume again.
+        session.heldResume = undefined
         if (!session.disposed && session.store.resumeAt !== undefined) setResumeAt(session, undefined)
         continue
       }
@@ -1345,6 +1390,7 @@ function checkAutoResume() {
           waitingResume.delete(session)
           setResumeAt(session, undefined)
           resumeTries.delete(session)
+          session.heldResume = undefined
           session.notice?.("Auto-resume stopped after 3 tries: this limit gives no reset time. Send a message when you want to try again.", "info")
           continue
         }
@@ -1400,19 +1446,24 @@ export function autoResumeChanged() {
 /** Cancel a pending auto-resume (the user typed something or turned the setting off). */
 export function cancelAutoResume(session         ) {
   waitingResume.delete(session)
+  // Ended by the user, not by the continue: a later limit wait honours a planned resume again.
+  session.heldResume = undefined
   if (session.store.resumeAt !== undefined) setResumeAt(session, undefined)
 }
 
 /** A tab came back after Agent Code restarted: pick up the wait it was in (the time may already have passed). */
 function restoreAutoResume(session         , id        ) {
   const pending = readPendingResumes()
-  const at = pending[id]
+  const entry = pending[id]
+  const at = typeof entry === "object" ? entry?.at : entry
   if (!at) return
   if (config.autoResume === false || at < Date.now() - RESUME_KEEP) {
     delete pending[id]
     writePendingResumes(pending)
     return
   }
+  // A network retry continues with the network prompt, not "the limit has reset".
+  if (entry.network) networkWait.add(session)
   session.setStore("resumeAt", at)
   waitingResume.add(session)
   startResumeClock()
@@ -2191,7 +2242,7 @@ function linkSessions(previous, next) {
     delete moved[previous]
     config.stopAfter = { ...config.stopAfter, tabs: moved }
   }
-  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause", "sessionSchedules", "sessionMemories"]) {
+  for (const key of ["sessionUnsent", "sessionPauses", "sessionDrafts", "sessionAgentMode", "sessionAutoPause", "sessionSchedules", "sessionMemories", "sessionAgentMix", "sessionThinking"]) {
     const record = config[key]
     if (!record || !(previous in record)) continue
     const moved = { ...record, [next]: record[previous] }
@@ -2817,7 +2868,16 @@ export function createSession(seed             ) {
     else await start({ sessionId: store.sessionID ?? randomUUID() })
   }
 
-  function dispose() {
+  /**
+   * The tab leaves this window: closed by the user, or `moved` to another window (its wait goes with it). Quitting
+   * Agent Code doesn't come here (disposeAll only stops the tabs), so waits still survive a restart.
+   */
+  function dispose(options = {}) {
+    // A closed tab's wait ends with it: reopened later, it must not continue by itself. Not when another tab here
+    // holds the same conversation (a duplicate copy being dropped).
+    const id = store.sessionID
+    const shared = [...allSessions].some((other) => other !== self && !other.disposed && other.store.sessionID === id)
+    if (!options.moved && id && store.resumeAt !== undefined && !shared) cancelAutoResume(api)
     stop()
     disposed = true
     limitResetListeners.delete(onLimitReset)
@@ -2825,6 +2885,8 @@ export function createSession(seed             ) {
     clearTimeout(mcpPoll)
     clearInterval(spendPoll)
     clearTimeout(spendTimer)
+    clearTimeout(pauseTimer)
+    clearTimeout(wakeTimer)
     emit("closed")
   }
 
@@ -3338,6 +3400,8 @@ export function createSession(seed             ) {
     finishTurn({ error: error && !interrupted ? error : undefined })
     if (isLimitError(error) && !interrupted) armAutoResume(api, limitResetTime(error))
     else if (error && !interrupted && isNetworkError(error)) armNetworkRetry(api)
+    // A turn that went through: the limit and network try counts start again (as for Claude's result).
+    else if (!error) resumeSucceeded(api)
     void syncOpencodeIds()
     if (ocQueue.length) void promptOpencode()
   }
@@ -3495,9 +3559,9 @@ export function createSession(seed             ) {
 
   let pauseWaiters = []
   let pauseTimer
-  // A limit reset was used: a pause before the limit is over.
+  // A 5-hour reset was used: a pause before that window is over (not one for the weekly or a model's limit).
   const onLimitReset = () =>
-    (store.pause?.reason === "limit" || (store.pause?.reason === "stop" && store.pause.windows?.some((w) => w.key === "fiveHour"))) && resume(true)
+    (store.pause?.reason === "limit" || store.pause?.reason === "stop") && store.pause.windows?.some((w) => w.key === "fiveHour") && resume(true)
   limitResetListeners.add(onLimitReset)
   allSessions.add(self)
   // A new tab starts in the default mode (Chat); a restored one takes its session's own in load().
@@ -4712,7 +4776,10 @@ export function createSession(seed             ) {
             fableRefused = true
             return markFableHit(resetsAt)
           }
-          return markLimitHit(info.rateLimitType, resetsAt)
+          const hit = markLimitHit(info.rateLimitType, resetsAt)
+          // A per-model window (seven_day_opus, …) is its own: not the 5-hour one markLimitHit shows full.
+          limitWindow = windowKey(info.rateLimitType) ? hit : info.rateLimitType || undefined
+          return
         }
         const key = windowKey(info.rateLimitType)
         if (key && typeof info.utilization === "number") {
@@ -4723,7 +4790,8 @@ export function createSession(seed             ) {
           const moved = !!resetsAt && !!current?.resetsAt && Math.abs(resetsAt - current.resetsAt) > 60_000
           if (!current || current.hit || moved || value >= current.utilization || !planExact)
           {
-            setLimits(key                       , keepHit(current, { utilization: value, resetsAt: resetsAt ?? current?.resetsAt }))
+            // The window object is replaced, not merged: a new (lower) window must not keep the old one's `hit`.
+            setLimits(key                       , reconcile(keepHit(current, { utilization: value, resetsAt: resetsAt ?? current?.resetsAt })))
             shareLimits()
           }
           setLimits("available", true)
@@ -4983,11 +5051,14 @@ export function createSession(seed             ) {
   }
   // Subagents' replies as they stream (foreground ones; background ones come from their transcripts below).
   const childStreams = new Map()
+  // Messages whose thinking time the stream already counted: their transcript entries don't count it again.
+  const streamedMessages = new Set()
   function childStream(parent, event) {
     if (event?.type === "message_start") {
       const id = event.message?.id
       if (!id) return
       childStreams.set(parent, { id, model: event.message.model, chars: 0 })
+      streamedMessages.add(id)
       noteSpend(id, event.message.model, event.message.usage, true)
       return
     }
@@ -5099,7 +5170,7 @@ export function createSession(seed             ) {
             if (!Number.isFinite(at)) continue
             const before = subagentLastAt.get(file)
             subagentLastAt.set(file, at)
-            const thought = entry.type === "assistant" && Array.isArray(message?.content) && message.content.some((block) => /thinking/.test(block?.type ?? ""))
+            const thought = entry.type === "assistant" && !streamedMessages.has(message?.id) && Array.isArray(message?.content) && message.content.some((block) => /thinking/.test(block?.type ?? ""))
             if (thought && before && at > before) setStore("subThinkingMs", (value) => value + Math.min(at - before, 15 * 60_000))
           } catch {}
         }
@@ -5111,6 +5182,7 @@ export function createSession(seed             ) {
   function primeSubagentRead() {
     subagentRead.clear()
     subagentLastAt.clear()
+    streamedMessages.clear()
     if (!store.sessionID) return
     const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects", store.cwd.replace(/[^a-zA-Z0-9]/g, "-"), store.sessionID, "subagents")
     try {
@@ -5482,6 +5554,8 @@ export function createSession(seed             ) {
   // What this turn learned about a limit refusal; the result message doesn't always carry it.
   let limitRefusal
   let limitResetsAt
+  // The window the rate-limit event named as refusing (auto-resume wakes on a 5-hour reset only for that one).
+  let limitWindow
   let fableRefused = false
 
   function handleResult(message     ) {
@@ -5496,7 +5570,8 @@ export function createSession(seed             ) {
     const refusal = isLimitError(error) || /fable limit/i.test(error ?? "") ? error : limitRefusal
     const resetsAt = limitResetsAt ?? limitResetTime(refusal)
     const fable = !!refusal && !splitModel(store.model) && (fableRefused || /fable limit/i.test(refusal))
-    limitRefusal = limitResetsAt = undefined
+    const refusedBy = limitWindow
+    limitRefusal = limitResetsAt = limitWindow = undefined
     fableRefused = false
     batch(() => {
       if (typeof message.total_cost_usd === "number") {
@@ -5520,13 +5595,19 @@ export function createSession(seed             ) {
       if (interrupted) return
       void fallBackFromFable(api).then((moved) => {
         if (moved) send(FABLE_RESUME_PROMPT)
-        else armAutoResume(api, resetsAt)
+        else armAutoResume(api, resetsAt, "fable")
       })
       return
     }
     // Only Claude's own refusals count against the Claude plan (other providers answer 429 too).
-    if (refusal && !splitModel(store.model)) markLimitHit(/weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined, resetsAt)
-    if (refusal && !interrupted) armAutoResume(api, resetsAt)
+    let refusedKey = refusedBy
+    if (refusal && !splitModel(store.model)) {
+      const type = /weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined
+      const shown = markLimitHit(type, resetsAt)
+      // Only a window the text names: a guess is left to the reset time (see waitsForFiveHour).
+      if (type) refusedKey = refusedKey ?? shown
+    }
+    if (refusal && !interrupted) armAutoResume(api, resetsAt, refusedKey)
     else if (error && !interrupted && isNetworkError(error)) armNetworkRetry(api)
     else {
       if (!error) resumeSucceeded(api)

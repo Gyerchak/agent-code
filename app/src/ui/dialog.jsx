@@ -25,16 +25,20 @@ const [mirrorState, setMirrorState] = createSignal()
 export const dialogMirror = mirrorState
 let mirrorHandlers
 let mirrorOwner
+// Counts the dialogs that took the mirror, so the page can tell its op was meant for an older one.
+let mirrorSeq = 0
+/** Runs an op on the mirrored dialog: true when done, "stale" when `args.seq` names an older dialog, "unknown" when its option is gone, false when there is no dialog. */
 export function mirrorAct(op, args = {}) {
   const handler = mirrorHandlers?.[op]
   if (!handler) return false
-  handler(args)
-  return true
+  if (args.seq !== undefined && Number(args.seq) !== mirrorSeq) return "stale"
+  return handler(args) === false ? "unknown" : true
 }
 function mirror(owner, state, handlers) {
+  if (mirrorOwner !== owner) mirrorSeq++
   mirrorOwner = owner
   mirrorHandlers = handlers
-  setMirrorState(state)
+  setMirrorState({ ...state, seq: mirrorSeq })
 }
 function unmirror(owner) {
   if (mirrorOwner !== owner) return
@@ -66,6 +70,10 @@ export const dialog = {
   },
   get depth() {
     return dialogStore.stack.length
+  },
+  /** The dialog on top (a new object whenever the top one changes): lets the web server notice dialogs the mirror can't read. */
+  get top() {
+    return dialogStore.stack.at(-1)
   },
   replace(element                   , onClose             , size             = "medium") {
     for (const item of dialogStore.stack) item.onClose?.()
@@ -361,25 +369,36 @@ export function DialogSelect   (props
         footer: plain(props.footer),
       },
       {
-        select: ({ value }) => choose(byValue(value)),
+        select: ({ value }) => {
+          const option = byValue(value)
+          if (!option) return false
+          choose(option)
+        },
         right: ({ value }) => {
           const option = byValue(value)
-          if (option) props.onRightClick?.(option)
+          if (!option) return false
+          props.onRightClick?.(option)
         },
         side: ({ value }) => {
           const option = byValue(value)
-          if (option) props.side?.run(option)
+          if (!option) return false
+          props.side?.run(option)
         },
         action: ({ value, keybind }) => {
           const option = byValue(value)
           const action = (props.actions ?? []).find((item) => item.keybind === keybind)
-          if (option && action) action.run(option)
+          if (!option || !action) return false
+          action.run(option)
         },
         tab: ({ key }) => props.onTab?.(key),
         filter: ({ text }) => {
-          setStore("filter", String(text ?? ""))
-          props.search?.(String(text ?? ""))
-          props.onFilter?.(String(text ?? ""))
+          const value = String(text ?? "")
+          // Show it in the terminal's own input too (setting it fires onInput, which does the rest).
+          if (input && !input.isDestroyed) input.value = value
+          if (store.filter === value) return
+          setStore("filter", value)
+          props.search?.(value)
+          props.onFilter?.(value)
         },
         close: () => dialog.pop(),
       },
@@ -436,13 +455,13 @@ export function DialogSelect   (props
     commands: () => [],
     handler: (event) => {
       // Actions first: one may use a modified arrow key (ctrl+up moves a favourite).
+      const tried = new Set()
       for (const action of props.actions ?? []) {
         if (action.keybind.includes("+") && keyMatches(event, action.keybind)) {
+          tried.add(action)
           const option = selected()
           // An action with nothing to do here (it returns false) lets the key through: ctrl+v still pastes.
-          if (option && action.run(option) === false) continue
-          if (!option) continue
-          return true
+          if (option && action.run(option) !== false) return true
         }
       }
       if (props.tabs?.length && event.name === "tab") {
@@ -470,10 +489,11 @@ export function DialogSelect   (props
         return true
       }
       for (const action of props.actions ?? []) {
+        // Already run (or skipped) in the first loop: not twice for one key.
+        if (tried.has(action)) continue
         if (matchesId(event, action.keybind) || keyMatches(event, action.keybind)) {
           const option = selected()
-          if (option) action.run(option)
-          return true
+          if (option && action.run(option) !== false) return true
         }
       }
       return false
@@ -690,8 +710,8 @@ export function DialogPrompt(props                                              
   let input
   const mirrorKey = {}
   mirror(mirrorKey, { kind: "prompt", title: plain(props.title), placeholder: props.placeholder ?? "", value: props.value ?? "" }, {
-    confirm: ({ text }) => props.onConfirm(String(text ?? "")),
-    close: () => (props.onCancel ? props.onCancel() : dialog.pop()),
+    confirm: ({ text }) => void props.onConfirm(String(text ?? "")),
+    close: () => void (props.onCancel ? props.onCancel() : dialog.pop()),
   })
   onCleanup(() => unmirror(mirrorKey))
   useLayer({

@@ -51,7 +51,10 @@ export async function planDetails() {
   try {
     const data = JSON.parse(await readFile(credentialsFile(), "utf8"))
     const type = data?.claudeAiOauth?.subscriptionType
-    return type ? { type, label: planLabel(type) } : undefined
+    if (!type) return undefined
+    // The credentials have no multiple ("Max", not "Max 5×"): the last profile reading of the same plan keeps its label.
+    if (shared?.plan?.type === type) return shared.plan
+    return { type, label: planLabel(type) }
   } catch {
     return undefined
   }
@@ -164,7 +167,10 @@ function writeShared(shared        ) {
 // Anthropic. Only `fetched` makes a reading fresh: windows republishing their own live numbers used to keep the
 // cache "fresh" for good, so after a reset (a new weekly date) nobody asked Anthropic again.
 export function publishPlanUsage(usage           ) {
-  writeShared({ ...readShared(), time: Date.now(), usage })
+  const shared = readShared()
+  // The last 5-hour reset stays in the file (a window that hasn't heard of it yet must not drop it for the others).
+  const resetAt = Math.max(usage.resetAt ?? 0, shared.usage?.resetAt ?? 0) || undefined
+  writeShared({ ...shared, time: Date.now(), usage: { ...usage, resetAt } })
 }
 
 /**
@@ -208,7 +214,8 @@ export async function fetchPlanUsage(force = false, maxAge = 100_000)           
       backoff = Math.min(15 * 60_000, backoff ? backoff * 2 : 2 * 60_000)
       pausedUntil = Date.now() + (retry > 0 ? retry * 1000 : backoff)
       log("plan usage rate limited until", new Date(pausedUntil).toISOString())
-      writeShared({ ...shared, pausedUntil })
+      // Read again: the token and the request took a while, another window may have written newer numbers.
+      writeShared({ ...readShared(), pausedUntil })
       return shared.usage && shared.time && Date.now() - shared.time < 15 * 60_000 ? shared.usage : undefined
     }
     if (!response.ok) {
@@ -221,7 +228,10 @@ export async function fetchPlanUsage(force = false, maxAge = 100_000)           
     for (const [key, raw] of Object.entries     (body ?? {})) {
       if (/^(five_hour|seven_day)/.test(key)) {
         const w = window(raw)
-        if (w) all.push(w)
+        // Per-model weekly windows (seven_day_opus, …; seven_day_overage_included is Fable's, as in session.js) hold
+        // only tabs on that model, like the scoped ones below.
+        const model = key === "seven_day_overage_included" ? "fable" : key.match(/^seven_day_(opus|sonnet|haiku|fable)$/)?.[1]
+        if (w) all.push(model ? { ...w, model } : w)
       }
     }
     // Per-model weekly limits (Fable on Max and up: at most a share of the weekly limit). Tagged with the model so
@@ -242,7 +252,9 @@ export async function fetchPlanUsage(force = false, maxAge = 100_000)           
     // the API leaves the window out now and then (e.g. before the window's first use) — unknown, not "none".
     const rolling = !!body.five_hour || (body?.limits ?? []).some((item) => item?.kind === "session") ? true : undefined
     const usage = { fiveHour: window(body.five_hour), week: window(body.seven_day), extra: extra(body), all, scoped, rolling }
-    writeShared({ time: Date.now(), fetched: Date.now(), usage })
+    // A 5-hour reset published meanwhile stays (the other windows may not have read it yet).
+    const resetAt = readShared().usage?.resetAt
+    writeShared({ time: Date.now(), fetched: Date.now(), usage: resetAt ? { ...usage, resetAt } : usage })
     return usage
   } catch (error) {
     log("plan usage error", error)
@@ -290,13 +302,21 @@ export function planPerPercent() {
   return rateCache
 }
 
+/** "Max" (read without its multiple, or the bare type "max") and "Max 5×" are one plan; "Max 5×" and "Max 20×" are not. */
+function samePlan(a, b) {
+  const x = String(a ?? "").toLowerCase()
+  const y = String(b ?? "").toLowerCase()
+  return x === y || (!!x && !!y && (x === y.split(" ")[0] || y === x.split(" ")[0]))
+}
+
 /** A fresh weekly reading (percent): once it moved 2 points, fold the dollars spent meanwhile into the estimate. */
 export function samplePlanRate(week, plan, five) {
   rateCache = undefined
   // The 5-hour window the same way: a reset (or first reading) starts over, 2 points of growth make a sample.
   if (typeof five === "number") {
     const now = readRate()
-    if (now.base5 === undefined || five < now.base5 || now.plan !== plan) writeRate({ ...now, base5: five, spent5: 0, ...(now.plan !== plan ? { perPercent5: undefined } : {}) })
+    const other = !samePlan(now.plan, plan)
+    if (now.base5 === undefined || five < now.base5 || other) writeRate({ ...now, base5: five, spent5: 0, ...(other ? { perPercent5: undefined } : {}) })
     else if (five - now.base5 >= 2) {
       const sample = now.spent5 > 0 ? now.spent5 / (five - now.base5) : undefined
       writeRate({ ...now, base5: five, spent5: 0, ...(sample ? { perPercent5: now.perPercent5 ? now.perPercent5 * 0.7 + sample * 0.3 : sample } : {}) })
@@ -304,8 +324,14 @@ export function samplePlanRate(week, plan, five) {
   }
   if (typeof week !== "number") return
   const rate = readRate()
+  // The same plan now read with its multiple ("Max" → "Max 5×"): the calibration stays, under the fuller label.
+  if (rate.plan && rate.plan !== plan && samePlan(rate.plan, plan) && String(plan).length > String(rate.plan).length) {
+    rate.plan = plan
+    writeRate(rate)
+  }
+  const other = !samePlan(rate.plan, plan)
   // A new plan or a weekly reset starts over from here.
-  if (rate.base === undefined || week < rate.base || rate.plan !== plan) return writeRate({ ...rate, base: week, spent: 0, plan, ...(rate.plan !== plan ? { perPercent: undefined, samples: 0 } : {}) })
+  if (rate.base === undefined || week < rate.base || other) return writeRate({ ...rate, base: week, spent: 0, plan: other ? plan : rate.plan, ...(other ? { perPercent: undefined, samples: 0 } : {}) })
   const grew = week - rate.base
   if (grew < 2) return
   if (!(rate.spent > 0)) return writeRate({ ...rate, base: week, spent: 0 })
@@ -324,7 +350,7 @@ const PLAN_PRICES = { pro: 20, "max 5×": 100, "max 20×": 200, max: 100 }
  */
 export function planRate(label, price) {
   const rate = readRate()
-  if (!rate.perPercent || (label && rate.plan && rate.plan !== label)) return undefined
+  if (!rate.perPercent || (label && rate.plan && !samePlan(rate.plan, label))) return undefined
   const monthly = rate.perPercent * 100 * (30.44 / 7)
   const cost = price ?? PLAN_PRICES[String(label ?? "").toLowerCase()]
   // Shown only once it is believable: a few readings, and a plan that comes out cheaper than the API.

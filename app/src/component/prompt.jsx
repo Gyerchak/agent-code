@@ -708,6 +708,16 @@ export function Prompt(props                                         ) {
     return size
   })
   const showGo = createMemo(() => kind() === "go" && !!catalog.go && roomForLimits())
+  // The auto-resume note; the footer reserves exactly its length. A wait that is over but held by the user's pause
+  // has no time to show (it goes on once the pause ends).
+  const resumeText = createMemo(() => {
+    const at = store.resumeAt
+    if (at === undefined) return undefined
+    if (!at) return "⏸ resumes after reset"
+    if (store.pause && store.pause.reason !== "limit" && at <= Date.now()) return "⏸ resumes after the pause"
+    const day = new Date(at).toDateString() === new Date().toDateString() ? "" : `${new Date(at).toLocaleDateString([], { weekday: "short" })} `
+    return `⏸ resumes ${day}${new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+  })
 
   // The footer is one line, so its right side gets a width budget measured from the real row: tokens and cost
   // always show, then the warning and resume time, then the plan meters (with reset times, then without, and
@@ -724,10 +734,11 @@ export function Prompt(props                                         ) {
     const usageText = props.home ? "" : [...usage(), cost()].filter(Boolean).join(" · ")
     take(usageText.length)
     if (!props.home && warning()) take(warning().text.length)
-    if (store.resumeAt !== undefined) take(18)
+    if (resumeText()) take(resumeText().length)
     if (subagents()) take(subagents().length)
     const shown = {}
     let compact = false
+    let mini = false
     if (showLimits()) {
       // The fuller of 5h/week first, then the other, then this model's own weekly limit.
       const main = [
@@ -735,17 +746,26 @@ export function Prompt(props                                         ) {
         limits.week && { key: "week", label: "wk", window: liveWindow(limits.week, "week") },
       ].filter(Boolean).sort((a, b) => barUsed(b.window) - barUsed(a.window))
       const bars = [...main, ownScoped() && { key: "scoped", label: ownScoped().name.slice(0, 2).toLowerCase(), window: ownScoped() }].filter(Boolean)
-      const room = (list, reset) => list.reduce((sum, bar) => sum + barLength(bar.label, bar.window, reset) + GAP, 0)
+      // Narrower and narrower before any meter goes: with reset times, without, then just "wk 82%" (no bar).
+      const size = (bar, mode) => (mode === "mini" ? bar.label.length + 1 + usedText(bar.window).length : barLength(bar.label, bar.window, mode === "full"))
+      const room = (list, mode) => list.reduce((sum, bar) => sum + size(bar, mode) + GAP, 0)
       let list = bars
-      while (list.length && room(list, false) > left) list = list.slice(0, -1)
-      compact = room(list, true) > left
-      left -= room(list, !compact)
+      let mode = "full"
+      while (list.length) {
+        mode = ["full", "compact", "mini"].find((each) => room(list, each) <= left)
+        if (mode) break
+        list = list.slice(0, -1)
+      }
+      mode = mode ?? "mini"
+      compact = mode !== "full"
+      mini = mode === "mini"
+      left -= room(list, mode)
       for (const bar of list) shown[bar.key] = true
     }
     const go = showGo() && take(22 * [catalog.go?.rolling, catalog.go?.weekly, catalog.go?.monthly].filter(Boolean).length)
     const commands = take(shortcut("command.palette.show").length + 9)
     const agents = width() >= 44 && take(shortcut("agent.cycle").replace("shift+tab", "tab").length + 7)
-    return { fiveHour: !!shown.fiveHour, week: !!shown.week, scoped: !!shown.scoped, compact, go, commands, agents }
+    return { fiveHour: !!shown.fiveHour, week: !!shown.week, scoped: !!shown.scoped, compact, mini, go, commands, agents }
   })
 
   const metadata = createMemo(() => {
@@ -1066,10 +1086,10 @@ export function Prompt(props                                         ) {
                 </Show>
                 <Show when={fit().fiveHour || fit().week || fit().scoped}>
                   <box flexDirection="row" gap={2} flexShrink={0}>
-                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={liveWindow(w(), "fiveHour")} reset={!fit().compact} />}</Show>
-                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={liveWindow(w(), "week")} reset={!fit().compact} />}</Show>
+                    <Show when={fit().fiveHour && limits.fiveHour}>{(w                       ) => <UsageBar label="5h" window={liveWindow(w(), "fiveHour")} reset={!fit().compact} mini={fit().mini} />}</Show>
+                    <Show when={fit().week && limits.week}>{(w                       ) => <UsageBar label="wk" window={liveWindow(w(), "week")} reset={!fit().compact} mini={fit().mini} />}</Show>
                     <Show when={fit().scoped && ownScoped()}>
-                      {(w) => <UsageBar label={w().name.slice(0, 2).toLowerCase()} window={w()} reset={!fit().compact} />}
+                      {(w) => <UsageBar label={w().name.slice(0, 2).toLowerCase()} window={w()} reset={!fit().compact} mini={fit().mini} />}
                     </Show>
                   </box>
                 </Show>
@@ -1080,11 +1100,9 @@ export function Prompt(props                                         ) {
                     <Show when={catalog.go?.monthly}>{(w                       ) => <UsageBar label="mo" window={w()} />}</Show>
                   </box>
                 </Show>
-                <Show when={store.resumeAt !== undefined}>
+                <Show when={resumeText()}>
                   <text fg={theme.warning} wrapMode="none" flexShrink={0}>
-                    {store.resumeAt
-                      ? `⏸ resumes ${new Date(store.resumeAt).toDateString() === new Date().toDateString() ? "" : `${new Date(store.resumeAt).toLocaleDateString([], { weekday: "short" })} `}${new Date(store.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                      : "⏸ resumes after reset"}
+                    {resumeText()}
                   </text>
                 </Show>
                 <Show when={!props.home && warning()}>
@@ -1142,7 +1160,16 @@ export function UsageBar(props                                                  
   const used = () => barUsed(props.window)
   const filled = () => Math.min(width(), Math.round((used() / 100) * width()))
   const color = () => (used() >= 90 ? theme.error : used() >= 75 ? theme.warning : theme.success)
+  // `mini`: no room for the bar — the label and the percent only (reactive: the footer's room changes).
   return (
+    <Show
+      when={!props.mini}
+      fallback={
+        <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
+          {props.label} <span style={{ fg: color() }}>{usedText(props.window)}</span>
+        </text>
+      }
+    >
     <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
       {props.label} <span style={{ fg: color() }}>{"▰".repeat(filled())}</span>
       <span style={{ fg: theme.border }}>{"▱".repeat(width() - filled())}</span> {usedText(props.window)}
@@ -1150,6 +1177,7 @@ export function UsageBar(props                                                  
         <span style={{ fg: theme.textMuted }}> {shortReset(props.window.resetsAt )}</span>
       </Show>
     </text>
+    </Show>
   )
 }
 

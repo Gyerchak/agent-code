@@ -915,7 +915,8 @@ function ReasoningView(props                         ) {
   const done = () => props.part.end !== undefined
   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
   const fg = () => (expanded() ? alpha(theme.warning, 0.6) : theme.warning)
-  const elapsed = () => (props.part.end && props.part.start ? duration(props.part.end - props.part.start) : undefined)
+  // No length when it isn't known: reopened conversations (and whole thinking blocks) get start = end, not "0ms".
+  const elapsed = () => (props.part.end && props.part.start && props.part.end > props.part.start ? duration(props.part.end - props.part.start) : undefined)
   const header = () => (
         <Show
       when={done()}

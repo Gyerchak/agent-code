@@ -79,17 +79,23 @@ function localSpec(value        )       {
   return { levels: ["none", "high"], efforts: [], toggle: true, budget: false }
 }
 
-/** Another harness states its own reasoning levels when it lists models (dsh: off, low, high, max). */
+/**
+ * Another harness states its own reasoning levels when it lists models (dsh: off, low, high, max). Undefined when
+ * opencode or Codex list none: their models then take models.dev's own per-model levels (as before 5.27.2).
+ */
 function harnessSpec(value        )       {
   harnessTick()
   const split = splitModel(value)
-  return effortSpec(harnessInfo(split.provider.id)?.efforts ?? [])
+  const efforts = harnessInfo(split.provider.id)?.efforts ?? []
+  if (split.provider.id === "dsh" || efforts.length) return effortSpec(efforts)
+  return undefined
 }
 
 function spec(value        )       {
   const kind = providerKind(value)
   if (kind === "local") return localSpec(value)
-  if (kind === "harness") return harnessSpec(value)
+  const own = kind === "harness" ? harnessSpec(value) : undefined
+  if (own) return own
   const dev = devModel(value)
   if (dev?.reasoning === false) return effortSpec([])
   if (dev?.options) return fromOptions(dev.options)

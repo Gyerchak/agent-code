@@ -12,7 +12,7 @@ import { log } from "./log"
 import { stateDir } from "./paths"
 import { findBinary, openCommand, spawnOptions } from "./platform"
 // tabs before session: tabs.js has to load first (it imports session.js, which reaches back to it).
-import { active as activeTab, newSession, tabs } from "./tabs"
+import { active as activeTab, focusTab, newSession, tabs } from "./tabs"
 import { accessEngine, accessEngineName, accessFor, setAccess } from "./access"
 import { controlRows } from "./controls"
 import { allCommands, runCommand } from "./keymap"
@@ -255,6 +255,10 @@ function readBody(request, limit = 60 * 1024 * 1024) {
 }
 
 const findSession = (key) => tabs().find((session) => session.key === key)
+/** Makes the tab the page is showing the app's focused one (a command, a slash command or a setting acts on that). */
+const focusSession = (session) => {
+  if (session && activeTab() !== session) focusTab(session)
+}
 
 async function saveUploads(list) {
   const out = []
@@ -297,6 +301,7 @@ async function handleApi(request, response, url) {
         // "/schedules", "/models"…: the terminal's own command (its dialog opens in the page), not a message.
         const command = !attachments.length && slashCommand(text)
         if (command) {
+          focusSession(session)
           runCommand(command.id)
           return json(response, 200, { ok: true, command: command.id })
         }
@@ -376,7 +381,12 @@ function checkChanges() {
     const lastPart = last?.type === "assistant" ? last.parts.at(-1) : undefined
     const grows = lastPart?.type === "text" || lastPart?.type === "reasoning" ? (lastPart.text?.length ?? 0) : (lastPart?.status ?? "")
     const flags = messages.filter((m) => m.type === "user" && (m.queued || m.unsent)).length
-    const sig = `${messages.length}:${last?.type === "assistant" ? last.parts.length : 0}:${grows}:${last?.error ?? ""}:${flags}:${session.store.status}:${session.store.permissions.length}:${!!session.store.pause}`
+    // The control rows (schedules, resume, stop, switches, access) change without any message.
+    let controls = ""
+    try {
+      controls = JSON.stringify(controlRows(session.store, phoneServerState()).map(({ color, ...row }) => row))
+    } catch {}
+    const sig = `${controls}:${messages.length}:${last?.type === "assistant" ? last.parts.length : 0}:${grows}:${last?.error ?? ""}:${flags}:${session.store.status}:${session.store.permissions.length}:${!!session.store.pause}`
     if (signatures.get(session.key) !== sig) {
       signatures.set(session.key, sig)
       broadcast("tab", { key: session.key })
@@ -985,7 +995,7 @@ function webMessages(session) {
 function webCommands() {
   return allCommands()
     .filter((command) => command.palette !== false && command.title && (!command.enabled || command.enabled()))
-    .map((command) => ({ id: command.id, title: String(command.title), category: command.category ?? "", slash: command.slash }))
+    .map((command) => ({ id: command.id, title: String(command.title), category: command.category ?? "", slash: command.slash, aliases: command.slashAliases }))
 }
 
 /** A typed "/name" that is one of the terminal's commands (its own name first, then an alias; any case). */
@@ -995,6 +1005,12 @@ function slashCommand(text) {
   const name = match[1].toLowerCase()
   const usable = allCommands().filter((command) => !command.enabled || command.enabled())
   return usable.find((command) => command.slash?.toLowerCase() === name) ?? usable.find((command) => command.slashAliases?.some((alias) => alias.toLowerCase() === name))
+}
+
+/** The dialog open now, as the page draws it: the mirror, or kind "other" for one the mirror can't read (an alert, a custom one). */
+function webDialog() {
+  const open = dialogStack.open
+  return { open, dialog: open ? (dialogMirror() ?? { kind: "other" }) : undefined }
 }
 
 function webTab(session, full) {
@@ -1083,6 +1099,8 @@ async function webApi(request, response, url, parts) {
   if (request.method === "GET") {
     if (what === "boot") {
       const { agentList, limits } = await import("./session")
+      // The access settings are for the page's tab (`tab`), else the focused one.
+      const forTab = (findSession(url.searchParams.get("tab") ?? "") ?? activeTab())?.store
       return json(response, 200, {
         version: acodeVersion(),
         cwd: app.cwd,
@@ -1090,10 +1108,10 @@ async function webApi(request, response, url, parts) {
         users: webUsers(),
         agents: agentList().map((agent) => ({ id: agent.id, name: agent.name })),
         models: await webModels(),
-        // Access settings are per harness: the focused tab's.
+        // Access settings are per harness: the page's tab's.
         settings: WEB_SETTINGS.map((item) =>
           item.access
-            ? { key: item.key, title: `${item.title} (${accessEngineName(activeTab()?.store)})`, value: !!accessFor(activeTab()?.store)[item.key] }
+            ? { key: item.key, title: `${item.title} (${accessEngineName(forTab)})`, value: !!accessFor(forTab)[item.key] }
             : { key: item.key, title: item.title, value: config[item.key] ?? item.fallback },
         ),
         limits: { fiveHour: limits.fiveHour, week: limits.week, scoped: limits.scoped },
@@ -1129,7 +1147,7 @@ async function webApi(request, response, url, parts) {
     if (what === "alive") return json(response, 200, { pages: clients.size })
     // Everything the terminal's command list (ctrl+p) has, and the dialog open now (drawn by the page natively).
     if (what === "commands") return json(response, 200, { commands: webCommands() })
-    if (what === "dialog") return json(response, 200, { open: dialogStack.open, dialog: dialogMirror() })
+    if (what === "dialog") return json(response, 200, webDialog())
     if (what === "screen") {
       const now = webScreen()
       return json(response, 200, Number(url.searchParams.get("have")) === now.id ? { id: now.id, same: true } : now)
@@ -1172,6 +1190,8 @@ async function webApi(request, response, url, parts) {
     case "setting": {
       const item = WEB_SETTINGS.find((entry) => entry.key === body.name)
       if (!item) return json(response, 400, { error: "unknown setting" })
+      // The page's tab is the focused one first.
+      focusSession(session)
       if (item.access) {
         // The focused tab's harness; its idle tabs start again with the new instructions.
         const engine = accessEngine(activeTab()?.store)
@@ -1233,12 +1253,21 @@ async function webApi(request, response, url, parts) {
       return json(response, 200, { ok: true, output, dir, open: path.join(dir, "box", "scripts", "acode-box.sh") + " web" })
     }
     case "command": {
+      focusSession(session)
       const ok = runCommand(String(body.id ?? ""))
       return json(response, ok ? 200 : 404, ok ? { ok: true } : { error: "no such command here" })
     }
     case "dialog": {
-      const ok = mirrorAct(String(body.op ?? ""), body)
-      return json(response, ok ? 200 : 409, ok ? { ok: true } : { error: "that dialog is not open any more" })
+      const op = String(body.op ?? "")
+      let done = mirrorAct(op, body)
+      // A dialog the mirror can't read still closes.
+      if (done === false && op === "close" && dialogStack.open) {
+        dialogStack.pop()
+        done = true
+      }
+      if (done === true) return json(response, 200, { ok: true })
+      if (done === "unknown") return json(response, 404, { error: "that option is not in the dialog any more" })
+      return json(response, 409, { error: "that dialog is not open any more" })
     }
     case "openurl": {
       const target = String(body.url ?? "")
@@ -1303,7 +1332,9 @@ export function startWebServer(memory, env = {}) {
   // The page hears when a dialog opens, changes or closes.
   createRoot(() =>
     createEffect(() => {
+      // Also when the top dialog is one the mirror can't read: it comes and goes without the mirror changing.
       dialogMirror()
+      void dialogStack.top
       broadcast("dialog", {})
     }),
   )

@@ -40,7 +40,8 @@ export function modelMemoryDir(model        , cwd = store.cwd) {
 
 /** Claude models, and models given full access, use the shared memory; every other model keeps its own. */
 export const hasFullMemory = (model        ) => providerKind(model) === "anthropic" || (config.memoryFullAccess ?? []).includes(model)
-export const storeOf = (model        ) => (hasFullMemory(model) ? memoryDir() : modelMemoryDir(model))
+// The same store the sidebar and the memory tools use (in an acode-box: the box's own memory folder).
+export const storeOf = (model        ) => sessionStore({ model, cwd: store.cwd }).dir
 const storeName = (model        ) => (hasFullMemory(model) ? "shared" : splitModel(model)?.model ?? model)
 
 const [version, setVersion] = createSignal(0)
