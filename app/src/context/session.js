@@ -833,11 +833,15 @@ function applyUsage(usage) {
     readingPrint = print
     newReading()
   }
-  const rolling = usage.rolling ?? limits.rolling
+  // Only an Ultra plan has no rolling limit. A reading without the 5-hour window (the API leaves it out now and then,
+  // and an older Agent Code may share such a reading as "no rolling limit") doesn't hide the 5-hour meter any more:
+  // the last known window stays, or 0% once it has reset.
+  const rolling = catalog.plan === "ultra" ? false : usage.rolling === true || catalog.plan ? true : limits.rolling
+  const lastFive = limits.fiveHour?.resetsAt > Date.now() ? limits.fiveHour : { utilization: 0, resetsAt: undefined }
   setLimits({
     available: true,
     rolling,
-    fiveHour: rolling === false ? undefined : keepHit(limits.fiveHour, usage.fiveHour),
+    fiveHour: rolling === false ? undefined : (keepHit(limits.fiveHour, usage.fiveHour) ?? (usage.fiveHour ? undefined : lastFive)),
     week: keepHit(limits.week, usage.week) ?? (usage.week === undefined && limits.week?.resetsAt > Date.now() ? limits.week : undefined),
     all: usage.all ?? limits.all,
     scoped: usage.scoped ?? limits.scoped,

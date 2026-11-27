@@ -238,8 +238,9 @@ export async function fetchPlanUsage(force = false, maxAge = 100_000)           
         scoped.push({ ...entry, name: model, allowance: share?.allowance_percent_of_weekly, ofWeekly: share?.used_percent_of_weekly })
       }
     })
-    // No five_hour window (and no "session" limit) means the plan has no rolling limit (Ultra).
-    const rolling = !!body.five_hour || (body?.limits ?? []).some((item) => item?.kind === "session")
+    // A 5-hour window (or a "session" limit) says the plan has a rolling limit. Its absence proves nothing on its own:
+    // the API leaves the window out now and then (e.g. before the window's first use) — unknown, not "none".
+    const rolling = !!body.five_hour || (body?.limits ?? []).some((item) => item?.kind === "session") ? true : undefined
     const usage = { fiveHour: window(body.five_hour), week: window(body.seven_day), extra: extra(body), all, scoped, rolling }
     writeShared({ time: Date.now(), fetched: Date.now(), usage })
     return usage
