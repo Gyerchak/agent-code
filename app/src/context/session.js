@@ -1238,8 +1238,41 @@ export function onModel(store, name) {
   return [store.modelId, store.model].some((m) => typeof m === "string" && m.toLowerCase().includes(needle))
 }
 
+const NETWORK_PROMPT = "The connection to the API was lost earlier (a network error); it is back now. Continue the work from where it stopped."
+/** A turn ended on a network / server error (no connection, DNS, the API overloaded or down). */
+export const isNetworkError = (text) =>
+  !!text && /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|can'?t reach the API|fetch failed|socket hang up|network error|getaddrinfo|overloaded|\b(500|502|503|504|529)\b[^.\n]{0,40}(error|unavailable|gateway|overloaded)/i.test(text)
+// Tabs waiting after a network error (they continue with NETWORK_PROMPT), and how many tries each has had.
+const networkWait = new WeakSet()
+const networkTries = new WeakMap()
+
+/**
+ * A turn ended on a network error: Agent Code tries again by itself — every 30 minutes for 3 tries, then every hour
+ * for 3, then every 3 hours for as long as Agent Code is open. A turn that goes through starts the count again.
+ * It rides on auto-resume (same switch; the footer shows when; pauses and planned resumes are respected).
+ */
+function armNetworkRetry(session) {
+  if (config.autoResume === false) return
+  const tries = (networkTries.get(session) ?? 0) + 1
+  networkTries.set(session, tries)
+  const minutes = tries <= 3 ? 30 : tries <= 6 ? 60 : 180
+  const at = Date.now() + minutes * 60_000
+  log("network retry armed", session.store.sessionID, tries, new Date(at).toISOString())
+  session.notice?.(
+    `Can't reach the API: trying again at ${new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (try ${tries}; every 30 min ×3, then every hour ×3, then every 3 h). Send a message to try now.`,
+    "warning",
+  )
+  networkWait.add(session)
+  refusedUntil.set(session, at)
+  session.setStore("resumeAt", 0)
+  waitingResume.add(session)
+  startResumeClock()
+  checkAutoResume()
+}
+
 /** A turn was refused by a limit: wait for the reset, then continue on our own. */
 function armAutoResume(session         , resetsAt         ) {
+  networkWait.delete(session)
   if (config.autoResume === false) return
   log("auto-resume armed", session.store.sessionID, resetsAt ? new Date(resetsAt).toISOString() : "no reset time")
   if (resetsAt) refusedUntil.set(session, resetsAt)
@@ -1279,7 +1312,9 @@ async function fireAutoResume(session         ) {
   try {
     if (session.store.fatal && session.store.sessionID) await session.start({ resume: session.store.sessionID })
     else await session.ensureStarted()
-    session.send(RESUME_PROMPT)
+    const network = networkWait.has(session)
+    networkWait.delete(session)
+    session.send(network ? NETWORK_PROMPT : RESUME_PROMPT)
   } catch (error) {
     log("auto-resume failed, trying again in 5 minutes", error)
     resumingNow.delete(session)
@@ -1348,6 +1383,7 @@ function checkAutoResume() {
 /** A turn finished without a limit error: the next limit starts the backoff afresh. */
 export function resumeSucceeded(session         ) {
   resumeTries.delete(session)
+  networkTries.delete(session)
   // One at a time: this tab is done, the next one may go.
   if (resumingNow.delete(session) && waitingResume.size) checkAutoResume()
 }
@@ -2729,6 +2765,7 @@ export function createSession(seed             ) {
       })
       if (LOGIN_ERROR.test(errorMessage(error))) needLogin()
       if (isLimitError(errorMessage(error))) armAutoResume(api, limitResetTime(errorMessage(error)))
+      else if (isNetworkError(errorMessage(error))) armNetworkRetry(api)
     }
   }
 
@@ -3296,6 +3333,7 @@ export function createSession(seed             ) {
     const interrupted = lastTurn()?.interrupted
     finishTurn({ error: error && !interrupted ? error : undefined })
     if (isLimitError(error) && !interrupted) armAutoResume(api, limitResetTime(error))
+    else if (error && !interrupted && isNetworkError(error)) armNetworkRetry(api)
     void syncOpencodeIds()
     if (ocQueue.length) void promptOpencode()
   }
@@ -3593,7 +3631,7 @@ export function createSession(seed             ) {
 
   function send(text        , extra            = {}) {
     // A message from the user: orchestrator mode's per-message count starts again.
-    if (text !== "Continue where you stopped." && text !== RESUME_PROMPT) agentLimits.userMessage()
+    if (text !== "Continue where you stopped." && text !== RESUME_PROMPT && text !== NETWORK_PROMPT) agentLimits.userMessage()
     // Writing to a paused tab means: go on.
     if (store.pause && !(store.pause.interrupted && text === "Continue where you stopped.")) resume()
     // Like opencode: a new prompt deletes the reverted messages for good.
@@ -5485,6 +5523,7 @@ export function createSession(seed             ) {
     // Only Claude's own refusals count against the Claude plan (other providers answer 429 too).
     if (refusal && !splitModel(store.model)) markLimitHit(/weekly|7.?day/i.test(refusal) ? "seven_day" : /session|5.?hour/i.test(refusal) ? "five_hour" : undefined, resetsAt)
     if (refusal && !interrupted) armAutoResume(api, resetsAt)
+    else if (error && !interrupted && isNetworkError(error)) armNetworkRetry(api)
     else {
       if (!error) resumeSucceeded(api)
       void pollPlanUsage()
